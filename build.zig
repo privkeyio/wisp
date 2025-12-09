@@ -4,12 +4,16 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Import http.zig and websocket.zig dependencies
+    // Import dependencies
     const httpz = b.dependency("httpz", .{
         .target = target,
         .optimize = optimize,
     });
     const websocket = b.dependency("websocket", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const libnostr = b.dependency("libnostr", .{
         .target = target,
         .optimize = optimize,
     });
@@ -29,11 +33,12 @@ pub fn build(b: *std.Build) void {
 
     exe.root_module.strip = optimize == .ReleaseSmall or optimize == .ReleaseFast;
 
-    exe.addIncludePath(.{ .cwd_relative = "../libnostr-c/include" });
-    exe.addIncludePath(.{ .cwd_relative = "../libnostr-c/build/include" });
-    exe.addLibraryPath(.{ .cwd_relative = "../libnostr-c/build" });
-    exe.linkSystemLibrary("nostr");
-    exe.linkSystemLibrary("lmdb");
+    // Link libnostr-c (statically built by Zig)
+    exe.linkLibrary(libnostr.artifact("nostr"));
+    exe.root_module.addIncludePath(libnostr.path("include"));
+
+    // System libraries
+    exe.root_module.linkSystemLibrary("lmdb", .{});
     exe.linkLibC();
 
     b.installArtifact(exe);
@@ -51,10 +56,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    test_nostr.addIncludePath(.{ .cwd_relative = "../libnostr-c/include" });
-    test_nostr.addIncludePath(.{ .cwd_relative = "../libnostr-c/build/include" });
-    test_nostr.addLibraryPath(.{ .cwd_relative = "../libnostr-c/build" });
-    test_nostr.linkSystemLibrary("nostr");
+    test_nostr.linkLibrary(libnostr.artifact("nostr"));
+    test_nostr.root_module.addIncludePath(libnostr.path("include"));
     test_nostr.linkLibC();
     b.installArtifact(test_nostr);
 
@@ -70,7 +73,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    test_lmdb.linkSystemLibrary("lmdb");
+    test_lmdb.root_module.linkSystemLibrary("lmdb", .{});
     test_lmdb.linkLibC();
     b.installArtifact(test_lmdb);
 

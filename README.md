@@ -6,25 +6,34 @@ A minimal Nostr relay in Zig. Uses [libnostr-c](https://github.com/privkeyio/lib
 
 Supports NIPs: 1, 9, 11, 40
 
-## Requirements
-
-- Zig 0.13+
-- libnostr-c (built, in `../libnostr-c`)
-- liblmdb (`apt install liblmdb-dev`)
-
-## Build
+## Building
 
 ```sh
+# Install dependencies (Debian/Ubuntu)
+sudo apt install -y libssl-dev libcjson-dev libsecp256k1-dev liblmdb-dev
+
+# Clone
+git clone https://github.com/privkeyio/wisp && cd wisp/
+git clone https://github.com/privkeyio/libnostr-c ../libnostr-c
+
+# Build
 zig build
 ```
 
-## Run
+## Running
 
 ```sh
-LD_LIBRARY_PATH=../libnostr-c/build ./zig-out/bin/wisp
+./zig-out/bin/wisp
 ```
 
-Listens on `127.0.0.1:7777` by default. Configure via `wisp.toml` or environment variables (`WISP_PORT`, `WISP_HOST`, `WISP_DATA_DIR`).
+Listens on `127.0.0.1:7777` by default.
+
+## Configuration
+
+Configure via `wisp.toml` or environment variables:
+- `WISP_PORT` - Port to listen on (default: 7777)
+- `WISP_HOST` - Host to bind to (default: 127.0.0.1)
+- `WISP_DATA_DIR` - Data directory (default: ./data)
 
 ## License
 
