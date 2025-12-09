@@ -1,0 +1,163 @@
+const std = @import("std");
+
+pub const Config = struct {
+    host: []const u8,
+    port: u16,
+    name: []const u8,
+    description: []const u8,
+    pubkey: ?[]const u8,
+    contact: ?[]const u8,
+    max_connections: u32,
+    max_subscriptions: u32,
+    max_filters: u32,
+    max_message_size: u32,
+    max_event_tags: u32,
+    max_content_length: u32,
+    query_limit_default: u32,
+    query_limit_max: u32,
+    storage_path: []const u8,
+    storage_map_size_mb: u32,
+    idle_seconds: u32,
+
+    _allocated: std.ArrayListUnmanaged([]const u8),
+    _allocator: ?std.mem.Allocator,
+
+    pub fn defaults() Config {
+        return .{
+            .host = "127.0.0.1",
+            .port = 7777,
+            .name = "Wisp",
+            .description = "A lightweight Nostr relay",
+            .pubkey = null,
+            .contact = null,
+            .max_connections = 1000,
+            .max_subscriptions = 20,
+            .max_filters = 10,
+            .max_message_size = 65536,
+            .max_event_tags = 2000,
+            .max_content_length = 102400,
+            .query_limit_default = 500,
+            .query_limit_max = 5000,
+            .storage_path = "./data",
+            .storage_map_size_mb = 10240,
+            .idle_seconds = 300,
+            ._allocated = undefined,
+            ._allocator = null,
+        };
+    }
+
+    pub fn load(allocator: std.mem.Allocator, path: []const u8) !Config {
+        var config = defaults();
+        config._allocator = allocator;
+        config._allocated = .{};
+
+        const file = try std.fs.cwd().openFile(path, .{});
+        defer file.close();
+
+        const content = try file.readToEndAlloc(allocator, 1024 * 1024);
+        defer allocator.free(content);
+
+        var section: []const u8 = "";
+        var lines = std.mem.splitScalar(u8, content, '\n');
+
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r");
+            if (trimmed.len == 0 or trimmed[0] == '#') continue;
+
+            if (trimmed[0] == '[' and trimmed[trimmed.len - 1] == ']') {
+                section = trimmed[1 .. trimmed.len - 1];
+                continue;
+            }
+
+            const eq_pos = std.mem.indexOf(u8, trimmed, "=") orelse continue;
+            const key = std.mem.trim(u8, trimmed[0..eq_pos], " \t");
+            var value = std.mem.trim(u8, trimmed[eq_pos + 1 ..], " \t");
+
+            if (value.len >= 2 and value[0] == '"' and value[value.len - 1] == '"') {
+                value = value[1 .. value.len - 1];
+            }
+
+            try config.setValue(section, key, value);
+        }
+
+        return config;
+    }
+
+    fn setValue(self: *Config, section: []const u8, key: []const u8, value: []const u8) !void {
+        if (std.mem.eql(u8, section, "server")) {
+            if (std.mem.eql(u8, key, "host")) {
+                self.host = try self.allocString(value);
+            } else if (std.mem.eql(u8, key, "port")) {
+                self.port = try std.fmt.parseInt(u16, value, 10);
+            }
+        } else if (std.mem.eql(u8, section, "relay")) {
+            if (std.mem.eql(u8, key, "name")) {
+                self.name = try self.allocString(value);
+            } else if (std.mem.eql(u8, key, "description")) {
+                self.description = try self.allocString(value);
+            } else if (std.mem.eql(u8, key, "pubkey")) {
+                self.pubkey = try self.allocString(value);
+            } else if (std.mem.eql(u8, key, "contact")) {
+                self.contact = try self.allocString(value);
+            }
+        } else if (std.mem.eql(u8, section, "limits")) {
+            if (std.mem.eql(u8, key, "max_connections")) {
+                self.max_connections = try std.fmt.parseInt(u32, value, 10);
+            } else if (std.mem.eql(u8, key, "max_subscriptions")) {
+                self.max_subscriptions = try std.fmt.parseInt(u32, value, 10);
+            } else if (std.mem.eql(u8, key, "max_filters")) {
+                self.max_filters = try std.fmt.parseInt(u32, value, 10);
+            } else if (std.mem.eql(u8, key, "max_message_size")) {
+                self.max_message_size = try std.fmt.parseInt(u32, value, 10);
+            } else if (std.mem.eql(u8, key, "max_event_tags")) {
+                self.max_event_tags = try std.fmt.parseInt(u32, value, 10);
+            } else if (std.mem.eql(u8, key, "max_content_length")) {
+                self.max_content_length = try std.fmt.parseInt(u32, value, 10);
+            } else if (std.mem.eql(u8, key, "query_limit_default")) {
+                self.query_limit_default = try std.fmt.parseInt(u32, value, 10);
+            } else if (std.mem.eql(u8, key, "query_limit_max")) {
+                self.query_limit_max = try std.fmt.parseInt(u32, value, 10);
+            }
+        } else if (std.mem.eql(u8, section, "storage")) {
+            if (std.mem.eql(u8, key, "path")) {
+                self.storage_path = try self.allocString(value);
+            } else if (std.mem.eql(u8, key, "map_size_mb")) {
+                self.storage_map_size_mb = try std.fmt.parseInt(u32, value, 10);
+            }
+        } else if (std.mem.eql(u8, section, "timeouts")) {
+            if (std.mem.eql(u8, key, "idle_seconds")) {
+                self.idle_seconds = try std.fmt.parseInt(u32, value, 10);
+            }
+        }
+    }
+
+    fn allocString(self: *Config, value: []const u8) ![]const u8 {
+        if (self._allocator) |alloc| {
+            const copy = try alloc.dupe(u8, value);
+            try self._allocated.append(alloc, copy);
+            return copy;
+        }
+        return value;
+    }
+
+    pub fn loadEnv(self: *Config) void {
+        if (std.posix.getenv("WISP_HOST")) |v| self.host = v;
+        if (std.posix.getenv("WISP_PORT")) |v| {
+            self.port = std.fmt.parseInt(u16, v, 10) catch self.port;
+        }
+        if (std.posix.getenv("WISP_RELAY_NAME")) |v| self.name = v;
+        if (std.posix.getenv("WISP_STORAGE_PATH")) |v| self.storage_path = v;
+        if (std.posix.getenv("WISP_MAX_CONNECTIONS")) |v| {
+            self.max_connections = std.fmt.parseInt(u32, v, 10) catch self.max_connections;
+        }
+    }
+
+    pub fn deinit(self: *Config) void {
+        if (self._allocator) |alloc| {
+            for (self._allocated.items) |s| {
+                alloc.free(s);
+            }
+            self._allocated.deinit(alloc);
+        }
+    }
+};

@@ -1,6 +1,7 @@
 zig-out/
 .zig-cache/
 test_data/
-data/
+data
+data-lock
 *.mdb
 *.mdb-lock
