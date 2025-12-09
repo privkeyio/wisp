@@ -1,8 +1,6 @@
-<p align="center">
-  <img src="assets/wisp-logo.jpeg" alt="Wisp Logo" width="200">
-</p>
-
 # Wisp
+
+<img src="assets/wisp-logo.jpeg" alt="Wisp Logo" width="300">
 
 A minimal Nostr relay in Zig. Uses [libnostr-c](https://github.com/privkeyio/libnostr-c) for protocol handling and LMDB for storage.
 
