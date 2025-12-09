@@ -243,7 +243,20 @@ pub const QueryIterator = struct {
 
         if (!self.started) {
             self.started = true;
-            _ = try self.cursor.?.get(.last);
+            const first_entry = try self.cursor.?.get(.last) orelse return null;
+            if (first_entry.key.len >= 40) {
+                const event_id = first_entry.key[8..40];
+                if (try self.txn.?.get(self.store.events, event_id)) |json| {
+                    var event = nostr.Event.parse(json) catch return try self.next();
+                    defer event.deinit();
+                    if (!nostr.isExpired(&event)) {
+                        if (self.filters.len == 0 or nostr.filtersMatch(self.filters, &event)) {
+                            self.returned += 1;
+                            return json;
+                        }
+                    }
+                }
+            }
         }
 
         while (true) {
