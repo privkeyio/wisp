@@ -7,20 +7,29 @@ pub const Connection = struct {
     subscriptions: std.StringHashMap(Subscription),
     created_at: i64,
     last_activity: i64,
+    ws_conn: ?*anyopaque = null,
+    ws_write_fn: ?*const fn (*anyopaque, []const u8) anyerror!void = null,
 
     events_received: u64 = 0,
     events_sent: u64 = 0,
 
-    pub fn init(backing_allocator: std.mem.Allocator, id: u64) Connection {
+    pub fn init(self: *Connection, backing_allocator: std.mem.Allocator, id: u64) void {
         const now = std.time.timestamp();
-        var arena = std.heap.ArenaAllocator.init(backing_allocator);
-        return .{
-            .id = id,
-            .arena = arena,
-            .subscriptions = std.StringHashMap(Subscription).init(arena.allocator()),
-            .created_at = now,
-            .last_activity = now,
-        };
+        self.id = id;
+        self.arena = std.heap.ArenaAllocator.init(backing_allocator);
+        self.subscriptions = std.StringHashMap(Subscription).init(self.arena.allocator());
+        self.created_at = now;
+        self.last_activity = now;
+        self.events_received = 0;
+        self.events_sent = 0;
+        self.ws_conn = null;
+        self.ws_write_fn = null;
+    }
+
+    pub fn send(self: *Connection, data: []const u8) void {
+        if (self.ws_conn != null and self.ws_write_fn != null) {
+            self.ws_write_fn.?(self.ws_conn.?, data) catch {};
+        }
     }
 
     pub fn deinit(self: *Connection) void {
@@ -41,10 +50,9 @@ pub const Connection = struct {
         self.removeSubscription(sub_id);
 
         const sub_id_copy = try alloc.dupe(u8, sub_id);
-
         const filters_copy = try alloc.alloc(nostr.Filter, filters.len);
         for (filters, 0..) |f, i| {
-            filters_copy[i] = f;
+            filters_copy[i] = try f.clone(alloc);
         }
 
         try self.subscriptions.put(sub_id_copy, .{

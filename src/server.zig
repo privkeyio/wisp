@@ -9,7 +9,6 @@ const Connection = @import("connection.zig").Connection;
 const nip11 = @import("nip11.zig");
 const nostr = @import("nostr.zig");
 
-// Limit websocket.zig verbosity to errors only
 pub const std_options = std.Options{ .log_scope_levels = &[_]std.log.ScopeLevel{
     .{ .scope = .websocket, .level = .err },
 } };
@@ -20,7 +19,6 @@ pub const Server = struct {
     handler: *MsgHandler,
     subs: *Subscriptions,
 
-    connections: std.AutoHashMap(u64, *WsClient),
     next_id: u64 = 0,
     mutex: std.Thread.Mutex,
 
@@ -39,7 +37,6 @@ pub const Server = struct {
             .config = config,
             .handler = handler,
             .subs = subs,
-            .connections = std.AutoHashMap(u64, *WsClient).init(allocator),
             .mutex = .{},
         };
     }
@@ -48,7 +45,6 @@ pub const Server = struct {
         if (self.http_server) |*s| {
             s.deinit();
         }
-        self.connections.deinit();
     }
 
     pub fn run(self: *Server, shutdown: *std.atomic.Value(bool)) !void {
@@ -76,24 +72,22 @@ pub const Server = struct {
     }
 
     pub fn send(self: *Server, conn_id: u64, data: []const u8) void {
-        self.mutex.lock();
-        const client = self.connections.get(conn_id);
-        self.mutex.unlock();
-
-        if (client) |c| {
-            c.conn.write(data) catch {};
+        if (self.subs.getConnection(conn_id)) |conn| {
+            conn.send(data);
         }
+    }
+
+    pub fn connectionCount(self: *Server) usize {
+        return self.subs.connectionCount();
     }
 };
 
-// Handler struct required by httpz for WebSocket support
 const Handler = struct {
     server: *Server,
 
     pub const WebsocketHandler = WsClient;
 };
 
-// WebSocket client handler
 const WsClient = struct {
     id: u64,
     conn: *websocket.Conn,
@@ -109,7 +103,7 @@ const WsClient = struct {
         const allocator = server.allocator;
 
         server.mutex.lock();
-        if (server.connections.count() >= server.config.max_connections) {
+        if (server.subs.connectionCount() >= server.config.max_connections) {
             server.mutex.unlock();
             return error.TooManyConnections;
         }
@@ -118,27 +112,23 @@ const WsClient = struct {
         server.mutex.unlock();
 
         const connection = try allocator.create(Connection);
-        connection.* = Connection.init(allocator, conn_id);
+        connection.init(allocator, conn_id);
 
-        var client = WsClient{
+        connection.ws_conn = ws_conn;
+        connection.ws_write_fn = @ptrCast(&websocket.Conn.write);
+
+        server.subs.addConnection(connection) catch {
+            connection.deinit();
+            allocator.destroy(connection);
+            return error.ConnectionFailed;
+        };
+
+        return WsClient{
             .id = conn_id,
             .conn = ws_conn,
             .connection = connection,
             .server = server,
         };
-
-        server.mutex.lock();
-        server.connections.put(conn_id, &client) catch {
-            server.mutex.unlock();
-            connection.deinit();
-            allocator.destroy(connection);
-            return error.ConnectionFailed;
-        };
-        server.mutex.unlock();
-
-        server.subs.addConnection(connection) catch {};
-
-        return client;
     }
 
     pub fn clientMessage(self: *WsClient, data: []const u8) !void {
@@ -156,19 +146,13 @@ const WsClient = struct {
         const server = self.server;
         const allocator = server.allocator;
 
-        server.mutex.lock();
-        _ = server.connections.remove(self.id);
-        server.mutex.unlock();
-
         server.subs.removeConnection(self.id);
         self.connection.deinit();
         allocator.destroy(self.connection);
     }
 };
 
-// HTTP route handlers
 fn index(h: Handler, req: *httpz.Request, res: *httpz.Response) !void {
-    // Check for WebSocket upgrade
     if (req.header("upgrade")) |upgrade| {
         if (std.ascii.eqlIgnoreCase(upgrade, "websocket")) {
             const ctx = WsClient.Context{ .server = h.server };
@@ -180,7 +164,6 @@ fn index(h: Handler, req: *httpz.Request, res: *httpz.Response) !void {
         }
     }
 
-    // Check for NIP-11 request
     if (req.header("accept")) |accept| {
         if (std.mem.indexOf(u8, accept, "application/nostr+json") != null) {
             var body_buf: [4096]u8 = undefined;
@@ -197,7 +180,6 @@ fn index(h: Handler, req: *httpz.Request, res: *httpz.Response) !void {
         }
     }
 
-    // Default HTML response
     res.content_type = .HTML;
     res.body =
         \\<!DOCTYPE html>

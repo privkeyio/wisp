@@ -50,6 +50,18 @@ pub const Subscriptions = struct {
         _ = self.connections.remove(conn_id);
     }
 
+    pub fn getConnection(self: *Subscriptions, conn_id: u64) ?*Connection {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.connections.get(conn_id);
+    }
+
+    pub fn connectionCount(self: *Subscriptions) usize {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.connections.count();
+    }
+
     pub fn subscribe(
         self: *Subscriptions,
         conn: *Connection,

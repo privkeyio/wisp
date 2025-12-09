@@ -203,17 +203,77 @@ pub fn getDeletionIds(allocator: std.mem.Allocator, event: *const Event) ![]cons
 pub const Filter = struct {
     inner: *const c.nostr_filter_t,
     owned: bool,
+    storage: ?*c.nostr_filter_t = null, // Optional owned storage
 
     pub fn parse(json: []const u8, out: *c.nostr_filter_t) !Filter {
         const result = c.nostr_filter_parse(json.ptr, json.len, out);
         if (result != c.NOSTR_RELAY_OK) {
             return mapError(result);
         }
-        return .{ .inner = out, .owned = true };
+        return .{ .inner = out, .owned = true, .storage = out };
     }
 
     pub fn borrow(inner: *const c.nostr_filter_t) Filter {
-        return .{ .inner = inner, .owned = false };
+        return .{ .inner = inner, .owned = false, .storage = null };
+    }
+
+    pub fn clone(self: *const Filter, allocator: std.mem.Allocator) !Filter {
+        const storage = try allocator.create(c.nostr_filter_t);
+
+        storage.* = self.inner.*;
+
+        if (self.inner.kinds != null and self.inner.kinds_count > 0) {
+            const kinds_copy = try allocator.alloc(i32, self.inner.kinds_count);
+            @memcpy(kinds_copy, self.inner.kinds[0..self.inner.kinds_count]);
+            storage.kinds = kinds_copy.ptr;
+        }
+
+        if (self.inner.ids != null and self.inner.ids_count > 0) {
+            const ids_copy = try allocator.alloc([*c]u8, self.inner.ids_count);
+            for (0..self.inner.ids_count) |i| {
+                const src = self.inner.ids[i];
+                if (src != null) {
+                    const len = std.mem.len(src);
+                    const dst = try allocator.alloc(u8, len + 1);
+                    @memcpy(dst[0..len], src[0..len]);
+                    dst[len] = 0;
+                    ids_copy[i] = dst.ptr;
+                } else {
+                    ids_copy[i] = null;
+                }
+            }
+            storage.ids = @ptrCast(ids_copy.ptr);
+        }
+
+        if (self.inner.authors != null and self.inner.authors_count > 0) {
+            const authors_copy = try allocator.alloc([*c]u8, self.inner.authors_count);
+            for (0..self.inner.authors_count) |i| {
+                const src = self.inner.authors[i];
+                if (src != null) {
+                    const len = std.mem.len(src);
+                    const dst = try allocator.alloc(u8, len + 1);
+                    @memcpy(dst[0..len], src[0..len]);
+                    dst[len] = 0;
+                    authors_copy[i] = dst.ptr;
+                } else {
+                    authors_copy[i] = null;
+                }
+            }
+            storage.authors = @ptrCast(authors_copy.ptr);
+        }
+
+        storage.e_tags = null;
+        storage.e_tags_count = 0;
+        storage.p_tags = null;
+        storage.p_tags_count = 0;
+        storage.generic_tags = null;
+        storage.generic_tags_count = 0;
+
+        return .{
+            .inner = storage,
+            .owned = false, // Don't call nostr_filter_free - arena will handle it
+            .storage = storage,
+        };
     }
 
     pub fn matches(self: *const Filter, event: *const Event) bool {
