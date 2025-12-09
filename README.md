@@ -2,4 +2,29 @@
   <img src="assets/wisp-logo.jpeg" alt="Wisp Logo" width="200">
 </p>
 
-Wisp is a minimal, high-performance Nostr relay designed to run on modest hardware. Powered by [libnostr-c](https://github.com/privkeyio/libnostr-c) for native protocol handling and cryptography.
+# Wisp
+
+A minimal Nostr relay in Zig. Uses [libnostr-c](https://github.com/privkeyio/libnostr-c) for protocol handling and LMDB for storage.
+
+## Requirements
+
+- Zig 0.13+
+- libnostr-c (built, in `../libnostr-c`)
+- liblmdb (`apt install liblmdb-dev`)
+
+## Build
+
+```sh
+zig build
+```
+
+## Test
+
+```sh
+LD_LIBRARY_PATH=../libnostr-c/build zig build test-nostr
+zig build test-lmdb
+```
+
+## Status
+
+Work in progress. Core FFI bindings verified working.
