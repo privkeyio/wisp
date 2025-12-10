@@ -45,6 +45,102 @@ pub fn errorMessage(err: Error) []const u8 {
     };
 }
 
+pub const TagValue = union(enum) {
+    binary: [32]u8,
+    string: []const u8,
+
+    pub fn eql(self: TagValue, other: TagValue) bool {
+        return switch (self) {
+            .binary => |b| switch (other) {
+                .binary => |ob| std.mem.eql(u8, &b, &ob),
+                .string => false,
+            },
+            .string => |s| switch (other) {
+                .binary => false,
+                .string => |os| std.mem.eql(u8, s, os),
+            },
+        };
+    }
+};
+
+pub const TagIndex = struct {
+    entries: [26]std.ArrayListUnmanaged(TagValue),
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator) TagIndex {
+        var entries: [26]std.ArrayListUnmanaged(TagValue) = undefined;
+        for (&entries) |*e| {
+            e.* = .{};
+        }
+        return .{ .entries = entries, .allocator = allocator };
+    }
+
+    pub fn deinit(self: *TagIndex) void {
+        for (&self.entries) |*list| {
+            for (list.items) |val| {
+                switch (val) {
+                    .string => |s| self.allocator.free(s),
+                    .binary => {},
+                }
+            }
+            list.deinit(self.allocator);
+        }
+    }
+
+    fn letterIndex(letter: u8) ?usize {
+        if (letter >= 'a' and letter <= 'z') return letter - 'a';
+        if (letter >= 'A' and letter <= 'Z') return letter - 'A';
+        return null;
+    }
+
+    pub fn append(self: *TagIndex, tag_letter: u8, value: TagValue) !void {
+        const idx = letterIndex(tag_letter) orelse return;
+        try self.entries[idx].append(self.allocator, value);
+    }
+
+    pub fn get(self: *const TagIndex, tag_letter: u8) ?[]const TagValue {
+        const idx = letterIndex(tag_letter) orelse return null;
+        if (self.entries[idx].items.len == 0) return null;
+        return self.entries[idx].items;
+    }
+
+    pub fn iterator(self: *const TagIndex) TagIterator {
+        return TagIterator.init(self);
+    }
+};
+
+pub const TagIterator = struct {
+    index: *const TagIndex,
+    letter_idx: usize = 0,
+    value_idx: usize = 0,
+
+    pub fn init(index: *const TagIndex) TagIterator {
+        return .{ .index = index };
+    }
+
+    pub const Entry = struct {
+        letter: u8,
+        value: TagValue,
+    };
+
+    pub fn next(self: *TagIterator) ?Entry {
+        while (self.letter_idx < 26) {
+            const list = &self.index.entries[self.letter_idx];
+            if (self.value_idx < list.items.len) {
+                const entry = Entry{
+                    .letter = @intCast(self.letter_idx + 'a'),
+                    .value = list.items[self.value_idx],
+                };
+                self.value_idx += 1;
+                return entry;
+            }
+            self.letter_idx += 1;
+            self.value_idx = 0;
+        }
+        return null;
+    }
+};
+
 pub const Event = struct {
     id_bytes: [32]u8,
     pubkey_bytes: [32]u8,
@@ -56,6 +152,7 @@ pub const Event = struct {
     d_tag_val: ?[]const u8 = null,
     expiration_val: ?i64 = null,
     e_tags: std.ArrayListUnmanaged([32]u8),
+    tags: TagIndex,
     allocator: std.mem.Allocator,
 
     pub fn parse(json: []const u8) Error!Event {
@@ -106,31 +203,42 @@ pub const Event = struct {
             .raw_json = json,
             .allocator = allocator,
             .e_tags = .{},
+            .tags = TagIndex.init(allocator),
         };
 
         if (root.get("tags")) |tags_val| {
             if (tags_val == .array) {
                 for (tags_val.array.items) |tag| {
-                    if (tag != .array or tag.array.items.len < 1) continue;
+                    if (tag != .array or tag.array.items.len < 2) continue;
 
                     const tag_name = if (tag.array.items[0] == .string) tag.array.items[0].string else continue;
+                    const tag_value_str = if (tag.array.items[1] == .string) tag.array.items[1].string else continue;
 
-                    if (std.mem.eql(u8, tag_name, "d") and tag.array.items.len > 1) {
-                        if (tag.array.items[1] == .string) {
-                            event.d_tag_val = findStringInJson(json, tag.array.items[1].string);
-                        }
-                    } else if (std.mem.eql(u8, tag_name, "expiration") and tag.array.items.len > 1) {
-                        if (tag.array.items[1] == .string) {
-                            event.expiration_val = std.fmt.parseInt(i64, tag.array.items[1].string, 10) catch null;
-                        }
-                    } else if (std.mem.eql(u8, tag_name, "e") and tag.array.items.len > 1) {
-                        if (tag.array.items[1] == .string) {
-                            const e_hex = tag.array.items[1].string;
-                            if (e_hex.len == 64) {
-                                var e_bytes: [32]u8 = undefined;
-                                if (std.fmt.hexToBytes(&e_bytes, e_hex)) |_| {
-                                    event.e_tags.append(allocator, e_bytes) catch {};
+                    if (std.mem.eql(u8, tag_name, "d")) {
+                        event.d_tag_val = findStringInJson(json, tag_value_str);
+                    } else if (std.mem.eql(u8, tag_name, "expiration")) {
+                        event.expiration_val = std.fmt.parseInt(i64, tag_value_str, 10) catch null;
+                    }
+
+                    if (tag_name.len == 1) {
+                        const letter = tag_name[0];
+
+                        if (letter == 'e' or letter == 'p') {
+                            if (tag_value_str.len == 64) {
+                                var bytes: [32]u8 = undefined;
+                                if (std.fmt.hexToBytes(&bytes, tag_value_str)) |_| {
+                                    event.tags.append(letter, .{ .binary = bytes }) catch {};
+                                    if (letter == 'e') {
+                                        event.e_tags.append(allocator, bytes) catch {};
+                                    }
                                 } else |_| {}
+                            }
+                        } else {
+                            if (tag_value_str.len > 0 and tag_value_str.len <= 256) {
+                                const duped = allocator.dupe(u8, tag_value_str) catch continue;
+                                event.tags.append(letter, .{ .string = duped }) catch {
+                                    allocator.free(duped);
+                                };
                             }
                         }
                     }
@@ -254,6 +362,7 @@ pub const Event = struct {
 
     pub fn deinit(self: *Event) void {
         self.e_tags.deinit(self.allocator);
+        self.tags.deinit();
     }
 };
 
@@ -290,6 +399,11 @@ pub fn getDeletionIds(allocator: std.mem.Allocator, event: *const Event) ![]cons
     return &[_][32]u8{};
 }
 
+pub const FilterTagEntry = struct {
+    letter: u8,
+    values: []const TagValue,
+};
+
 pub const Filter = struct {
     kinds_slice: ?[]const i32 = null,
     ids_bytes: ?[][32]u8 = null,
@@ -297,6 +411,7 @@ pub const Filter = struct {
     since_val: i64 = 0,
     until_val: i64 = 0,
     limit_val: i32 = 0,
+    tag_filters: ?[]FilterTagEntry = null,
     allocator: ?std.mem.Allocator = null,
 
     pub fn clone(self: *const Filter, allocator: std.mem.Allocator) !Filter {
@@ -311,6 +426,16 @@ pub const Filter = struct {
         }
         if (self.authors_bytes) |author_list| {
             new_filter.authors_bytes = try allocator.dupe([32]u8, author_list);
+        }
+        if (self.tag_filters) |tags| {
+            var new_tags = try allocator.alloc(FilterTagEntry, tags.len);
+            for (tags, 0..) |entry, i| {
+                new_tags[i] = .{
+                    .letter = entry.letter,
+                    .values = try allocator.dupe(TagValue, entry.values),
+                };
+            }
+            new_filter.tag_filters = new_tags;
         }
 
         return new_filter;
@@ -358,6 +483,22 @@ pub const Filter = struct {
             return false;
         }
 
+        if (self.tag_filters) |tag_entries| {
+            for (tag_entries) |filter_entry| {
+                const event_tag_values = event.tags.get(filter_entry.letter) orelse return false;
+                var tag_found = false;
+                outer: for (filter_entry.values) |filter_val| {
+                    for (event_tag_values) |event_val| {
+                        if (filter_val.eql(event_val)) {
+                            tag_found = true;
+                            break :outer;
+                        }
+                    }
+                }
+                if (!tag_found) return false;
+            }
+        }
+
         return true;
     }
 
@@ -390,6 +531,18 @@ pub const Filter = struct {
             if (self.kinds_slice) |k| alloc.free(k);
             if (self.ids_bytes) |id_list| alloc.free(id_list);
             if (self.authors_bytes) |author_list| alloc.free(author_list);
+            if (self.tag_filters) |tags| {
+                for (tags) |entry| {
+                    for (entry.values) |val| {
+                        switch (val) {
+                            .string => |s| alloc.free(s),
+                            .binary => {},
+                        }
+                    }
+                    alloc.free(entry.values);
+                }
+                alloc.free(tags);
+            }
         }
         self.* = .{};
     }
@@ -568,6 +721,70 @@ pub const ClientMsg = struct {
                 if (v == .integer) {
                     filter.until_val = v.integer;
                 }
+            }
+
+            var tag_entries: std.ArrayListUnmanaged(FilterTagEntry) = .{};
+            errdefer {
+                for (tag_entries.items) |entry| {
+                    for (entry.values) |val| {
+                        switch (val) {
+                            .string => |s| allocator.free(s),
+                            .binary => {},
+                        }
+                    }
+                    allocator.free(entry.values);
+                }
+                tag_entries.deinit(allocator);
+            }
+
+            var filter_iter = filter_obj.iterator();
+            while (filter_iter.next()) |kv| {
+                const key = kv.key_ptr.*;
+                if (key.len == 2 and key[0] == '#') {
+                    const letter = key[1];
+                    if ((letter >= 'a' and letter <= 'z') or (letter >= 'A' and letter <= 'Z')) {
+                        const tag_val = kv.value_ptr.*;
+                        if (tag_val == .array) {
+                            var values_list: std.ArrayListUnmanaged(TagValue) = .{};
+                            errdefer values_list.deinit(allocator);
+
+                            for (tag_val.array.items) |item| {
+                                if (item == .string) {
+                                    const str = item.string;
+                                    if ((letter == 'e' or letter == 'p' or letter == 'E' or letter == 'P') and str.len == 64) {
+                                        var bytes: [32]u8 = undefined;
+                                        if (std.fmt.hexToBytes(&bytes, str)) |_| {
+                                            try values_list.append(allocator, .{ .binary = bytes });
+                                        } else |_| {
+                                            const duped = try allocator.dupe(u8, str);
+                                            try values_list.append(allocator, .{ .string = duped });
+                                        }
+                                    } else {
+                                        if (str.len > 0 and str.len <= 256) {
+                                            const duped = try allocator.dupe(u8, str);
+                                            try values_list.append(allocator, .{ .string = duped });
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (values_list.items.len > 0) {
+                                try tag_entries.append(allocator, .{
+                                    .letter = if (letter >= 'A' and letter <= 'Z') letter + 32 else letter,
+                                    .values = try values_list.toOwnedSlice(allocator),
+                                });
+                            } else {
+                                values_list.deinit(allocator);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (tag_entries.items.len > 0) {
+                filter.tag_filters = try tag_entries.toOwnedSlice(allocator);
+            } else {
+                tag_entries.deinit(allocator);
             }
 
             try filters.append(allocator, filter);

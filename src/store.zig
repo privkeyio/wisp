@@ -155,6 +155,36 @@ pub const Store = struct {
         @memcpy(kind_key[4..12], std.mem.asBytes(&created_at_be));
         @memcpy(kind_key[12..44], id);
         try txn.put(self.idx_kind, &kind_key, empty);
+
+        try self.indexTags(txn, event, id, std.mem.asBytes(&created_at_be));
+    }
+
+    fn indexTags(self: *Store, txn: *Txn, event: *const nostr.Event, id: *const [32]u8, created_at_be: *const [8]u8) !void {
+        const empty: []const u8 = "";
+        var iter = event.tags.iterator();
+
+        while (iter.next()) |entry| {
+            switch (entry.value) {
+                .binary => |bytes| {
+                    var tag_key: [73]u8 = undefined;
+                    tag_key[0] = entry.letter;
+                    @memcpy(tag_key[1..33], &bytes);
+                    @memcpy(tag_key[33..41], created_at_be);
+                    @memcpy(tag_key[41..73], id);
+                    try txn.put(self.idx_tag, &tag_key, empty);
+                },
+                .string => |str| {
+                    if (str.len > 256) continue;
+                    var tag_key_buf: [297]u8 = undefined;
+                    tag_key_buf[0] = entry.letter;
+                    @memcpy(tag_key_buf[1..][0..str.len], str);
+                    @memcpy(tag_key_buf[1 + str.len ..][0..8], created_at_be);
+                    @memcpy(tag_key_buf[1 + str.len + 8 ..][0..32], id);
+                    const key_len = 1 + str.len + 8 + 32;
+                    try txn.put(self.idx_tag, tag_key_buf[0..key_len], empty);
+                },
+            }
+        }
     }
 
     fn deleteEventInternal(self: *Store, txn: *Txn, event: *const nostr.Event) !void {
@@ -178,8 +208,36 @@ pub const Store = struct {
         @memcpy(kind_key[4..12], std.mem.asBytes(&created_at_be));
         @memcpy(kind_key[12..44], id);
         txn.delete(self.idx_kind, &kind_key) catch {};
+        self.deleteTags(txn, event, id, std.mem.asBytes(&created_at_be));
 
         txn.delete(self.events, id) catch {};
+    }
+
+    fn deleteTags(self: *Store, txn: *Txn, event: *const nostr.Event, id: *const [32]u8, created_at_be: *const [8]u8) void {
+        var iter = event.tags.iterator();
+
+        while (iter.next()) |entry| {
+            switch (entry.value) {
+                .binary => |bytes| {
+                    var tag_key: [73]u8 = undefined;
+                    tag_key[0] = entry.letter;
+                    @memcpy(tag_key[1..33], &bytes);
+                    @memcpy(tag_key[33..41], created_at_be);
+                    @memcpy(tag_key[41..73], id);
+                    txn.delete(self.idx_tag, &tag_key) catch {};
+                },
+                .string => |str| {
+                    if (str.len > 256) continue;
+                    var tag_key_buf: [297]u8 = undefined;
+                    tag_key_buf[0] = entry.letter;
+                    @memcpy(tag_key_buf[1..][0..str.len], str);
+                    @memcpy(tag_key_buf[1 + str.len ..][0..8], created_at_be);
+                    @memcpy(tag_key_buf[1 + str.len + 8 ..][0..32], id);
+                    const key_len = 1 + str.len + 8 + 32;
+                    txn.delete(self.idx_tag, tag_key_buf[0..key_len]) catch {};
+                },
+            }
+        }
     }
 
     pub fn delete(self: *Store, event_id: *const [32]u8, requester_pubkey: *const [32]u8) !bool {
