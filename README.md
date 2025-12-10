@@ -8,6 +8,7 @@ A lightweight [nostr](https://github.com/nostr-protocol/nostr) relay written in 
 * LMDB storage (no external database)
 * [noscrypt](https://github.com/VnUgE/noscrypt) for Schnorr signatures
 * Single binary, minimal dependencies
+* Requires Zig 0.15+
 
 ## Build
 
