@@ -2,7 +2,7 @@
 
 <img src="assets/wisp-logo.jpeg" alt="Wisp Logo" width="300">
 
-A minimal Nostr relay in Zig. Uses [libnostr-c](https://github.com/privkeyio/libnostr-c) for protocol handling and LMDB for storage.
+A minimal Nostr relay in Zig. Uses [noscrypt](https://github.com/VnUgE/noscrypt) for Schnorr signatures and LMDB for storage.
 
 Supports NIPs: 1, 9, 11, 40
 
@@ -10,11 +10,11 @@ Supports NIPs: 1, 9, 11, 40
 
 ```sh
 # Install dependencies (Debian/Ubuntu)
-sudo apt install -y libssl-dev libcjson-dev libsecp256k1-dev liblmdb-dev
+sudo apt install -y libssl-dev libsecp256k1-dev liblmdb-dev
 
-# Clone
+# Clone with noscrypt submodule
 git clone https://github.com/privkeyio/wisp && cd wisp/
-git clone https://github.com/privkeyio/libnostr-c ../libnostr-c
+git clone https://github.com/VnUgE/noscrypt ../noscrypt
 
 # Build
 zig build

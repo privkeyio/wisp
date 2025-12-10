@@ -13,7 +13,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const libnostr = b.dependency("libnostr", .{
+    const noscrypt = b.dependency("noscrypt", .{
         .target = target,
         .optimize = optimize,
     });
@@ -33,9 +33,9 @@ pub fn build(b: *std.Build) void {
 
     exe.root_module.strip = optimize == .ReleaseSmall or optimize == .ReleaseFast;
 
-    // Link libnostr-c (statically built by Zig)
-    exe.linkLibrary(libnostr.artifact("nostr"));
-    exe.root_module.addIncludePath(libnostr.path("include"));
+    // Link noscrypt (statically built by Zig)
+    exe.linkLibrary(noscrypt.artifact("noscrypt"));
+    exe.root_module.addIncludePath(noscrypt.path("include"));
 
     // System libraries
     exe.root_module.linkSystemLibrary("lmdb", .{});
@@ -47,23 +47,6 @@ pub fn build(b: *std.Build) void {
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
     b.step("run", "Run the relay").dependOn(&run_cmd.step);
-
-    const test_nostr = b.addExecutable(.{
-        .name = "test_nostr",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/test_nostr.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    test_nostr.linkLibrary(libnostr.artifact("nostr"));
-    test_nostr.root_module.addIncludePath(libnostr.path("include"));
-    test_nostr.linkLibC();
-    b.installArtifact(test_nostr);
-
-    const run_test_nostr = b.addRunArtifact(test_nostr);
-    run_test_nostr.step.dependOn(b.getInstallStep());
-    b.step("test-nostr", "Test libnostr-c bindings").dependOn(&run_test_nostr.step);
 
     const test_lmdb = b.addExecutable(.{
         .name = "test_lmdb",

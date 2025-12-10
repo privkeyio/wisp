@@ -6,3 +6,4 @@ data-lock
 *.mdb
 *.mdb-lock
 .venv/
+wisp.toml
