@@ -6,6 +6,7 @@ const Subscriptions = @import("subscriptions.zig").Subscriptions;
 const Handler = @import("handler.zig").Handler;
 const Broadcaster = @import("broadcaster.zig").Broadcaster;
 const Server = @import("server.zig").Server;
+const Spider = @import("spider.zig").Spider;
 const nostr = @import("nostr.zig");
 
 var g_server: ?*Server = null;
@@ -143,6 +144,25 @@ pub fn main() !void {
     g_server = &server;
     defer g_server = null;
 
+    // Initialize Spider if enabled
+    var spider: ?Spider = null;
+    if (config.spider_enabled) {
+        spider = Spider.init(allocator, &config, &store, &broadcaster) catch |err| {
+            std.log.err("Failed to initialize Spider: {}", .{err});
+            return err;
+        };
+        spider.?.start() catch |err| {
+            std.log.err("Failed to start Spider: {}", .{err});
+            spider.?.deinit();
+            return err;
+        };
+        std.log.info("Spider enabled", .{});
+    }
+    defer if (spider) |*s| {
+        s.stop();
+        s.deinit();
+    };
+
     const sa = std.posix.Sigaction{
         .handler = .{ .handler = signalHandler },
         .mask = std.posix.sigemptyset(),
@@ -221,6 +241,20 @@ fn processImportLine(allocator: std.mem.Allocator, store: *Store, line: []const 
         failed.* += 1;
         return;
     };
+
+    // Handle NIP-09 deletions
+    if (nostr.isDeletion(&event)) {
+        const ids_to_delete = nostr.getDeletionIds(allocator, &event) catch {
+            failed.* += 1;
+            return;
+        };
+        defer allocator.free(ids_to_delete);
+
+        const pubkey = event.pubkey();
+        for (ids_to_delete) |target_id| {
+            _ = store.delete(&target_id, pubkey) catch {};
+        }
+    }
 
     const result = store.store(&event, line) catch {
         failed.* += 1;

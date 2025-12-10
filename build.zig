@@ -9,7 +9,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const websocket = b.dependency("websocket", .{
+    // Get websocket from httpz to avoid version conflicts
+    const httpz_dep = httpz.builder.dependency("websocket", .{
         .target = target,
         .optimize = optimize,
     });
@@ -26,7 +27,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "httpz", .module = httpz.module("httpz") },
-                .{ .name = "websocket", .module = websocket.module("websocket") },
+                .{ .name = "websocket", .module = httpz_dep.module("websocket") },
             },
         }),
     });
