@@ -1,39 +1,59 @@
-# Wisp
+# wisp - a nostr relay
 
-<img src="assets/wisp-logo.jpeg" alt="Wisp Logo" width="300">
+<img src="assets/wisp-logo.jpeg" alt="Wisp Logo" width="200">
 
-A minimal Nostr relay in Zig. Uses [noscrypt](https://github.com/VnUgE/noscrypt) for Schnorr signatures and LMDB for storage.
+A lightweight [nostr](https://github.com/nostr-protocol/nostr) relay written in Zig.
 
-Supports NIPs: 1, 9, 11, 40
+* Supports NIPs: 1, 9, 11, 40, 42
+* LMDB storage (no external database)
+* [noscrypt](https://github.com/VnUgE/noscrypt) for Schnorr signatures
+* Single binary, minimal dependencies
 
-## Building
+## Build
 
 ```sh
-# Install dependencies (Debian/Ubuntu)
+# Debian/Ubuntu
 sudo apt install -y libssl-dev libsecp256k1-dev liblmdb-dev
 
-# Clone with noscrypt submodule
 git clone https://github.com/privkeyio/wisp && cd wisp/
 git clone https://github.com/VnUgE/noscrypt ../noscrypt
-
-# Build
 zig build
 ```
 
-## Running
+## Run
 
 ```sh
 ./zig-out/bin/wisp
 ```
 
-Listens on `127.0.0.1:7777` by default.
+Listens on `127.0.0.1:7777`, stores data in `./data/`.
 
-## Configuration
+## Configure
 
-Configure via `wisp.toml` or environment variables:
-- `WISP_PORT` - Port to listen on (default: 7777)
-- `WISP_HOST` - Host to bind to (default: 127.0.0.1)
-- `WISP_DATA_DIR` - Data directory (default: ./data)
+Environment variables:
+
+| Variable | Default |
+|----------|---------|
+| `WISP_HOST` | `127.0.0.1` |
+| `WISP_PORT` | `7777` |
+| `WISP_STORAGE_PATH` | `./data` |
+| `WISP_AUTH_TO_WRITE` | `false` |
+| `WISP_RELAY_URL` | `` |
+
+Or use a config file (`wisp.toml`):
+
+```toml
+[server]
+host = "0.0.0.0"
+port = 7777
+
+[relay]
+name = "My Relay"
+
+[auth]
+to_write = true
+relay_url = "wss://relay.example.com"
+```
 
 ## License
 
