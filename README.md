@@ -40,6 +40,7 @@ Environment variables:
 | `WISP_STORAGE_PATH` | `./data` |
 | `WISP_AUTH_TO_WRITE` | `false` |
 | `WISP_RELAY_URL` | `` |
+| `WISP_EVENTS_PER_MINUTE` | `60` |
 
 Or use a config file (`wisp.toml`):
 
@@ -50,6 +51,9 @@ port = 7777
 
 [relay]
 name = "My Relay"
+
+[limits]
+events_per_minute = 60
 
 [auth]
 to_write = true

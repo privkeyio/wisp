@@ -54,12 +54,39 @@ pub const Handler = struct {
 
         const id = event.id();
 
-        // NIP-42: Check if auth is required for writes
+        if (!conn.checkRateLimit(self.config.events_per_minute)) {
+            self.sendOk(conn, id, false, "rate-limited: too many events");
+            return;
+        }
+
         if (self.config.auth_required or self.config.auth_to_write) {
             if (!conn.isAuthenticated()) {
                 self.sendOk(conn, id, false, "auth-required: authentication required to publish events");
                 return;
             }
+        }
+
+        const now = std.time.timestamp();
+        const created = event.createdAt();
+
+        if (created > now + self.config.max_future_seconds) {
+            self.sendOk(conn, id, false, "invalid: event too far in future");
+            return;
+        }
+
+        if (created < now - self.config.max_event_age) {
+            self.sendOk(conn, id, false, "invalid: event too old");
+            return;
+        }
+
+        if (event.content().len > self.config.max_content_length) {
+            self.sendOk(conn, id, false, "invalid: content too long");
+            return;
+        }
+
+        if (event.tagCount() > self.config.max_event_tags) {
+            self.sendOk(conn, id, false, "invalid: too many tags");
+            return;
         }
 
         event.validate() catch |err| {
@@ -102,6 +129,7 @@ pub const Handler = struct {
 
         self.sendOk(conn, id, true, "");
         conn.events_received += 1;
+        conn.recordEvent();
 
         self.broadcaster.broadcast(&event);
     }

@@ -15,6 +15,9 @@ pub const Config = struct {
     max_content_length: u32,
     query_limit_default: u32,
     query_limit_max: u32,
+    events_per_minute: u32,
+    max_event_age: i64,
+    max_future_seconds: i64,
     storage_path: []const u8,
     storage_map_size_mb: u32,
     idle_seconds: u32,
@@ -43,6 +46,9 @@ pub const Config = struct {
             .max_content_length = 102400,
             .query_limit_default = 500,
             .query_limit_max = 5000,
+            .events_per_minute = 60,
+            .max_event_age = 94608000,
+            .max_future_seconds = 900,
             .storage_path = "./data",
             .storage_map_size_mb = 10240,
             .idle_seconds = 300,
@@ -125,6 +131,12 @@ pub const Config = struct {
                 self.query_limit_default = try std.fmt.parseInt(u32, value, 10);
             } else if (std.mem.eql(u8, key, "query_limit_max")) {
                 self.query_limit_max = try std.fmt.parseInt(u32, value, 10);
+            } else if (std.mem.eql(u8, key, "events_per_minute")) {
+                self.events_per_minute = try std.fmt.parseInt(u32, value, 10);
+            } else if (std.mem.eql(u8, key, "max_event_age")) {
+                self.max_event_age = try std.fmt.parseInt(i64, value, 10);
+            } else if (std.mem.eql(u8, key, "max_future_seconds")) {
+                self.max_future_seconds = try std.fmt.parseInt(i64, value, 10);
             }
         } else if (std.mem.eql(u8, section, "storage")) {
             if (std.mem.eql(u8, key, "path")) {
@@ -173,6 +185,9 @@ pub const Config = struct {
             self.auth_to_write = std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "1");
         }
         if (std.posix.getenv("WISP_RELAY_URL")) |v| self.relay_url = v;
+        if (std.posix.getenv("WISP_EVENTS_PER_MINUTE")) |v| {
+            self.events_per_minute = std.fmt.parseInt(u32, v, 10) catch self.events_per_minute;
+        }
     }
 
     pub fn deinit(self: *Config) void {

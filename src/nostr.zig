@@ -153,6 +153,7 @@ pub const Event = struct {
     expiration_val: ?i64 = null,
     e_tags: std.ArrayListUnmanaged([32]u8),
     tags: TagIndex,
+    tag_count: u32 = 0,
     allocator: std.mem.Allocator,
 
     pub fn parse(json: []const u8) Error!Event {
@@ -208,6 +209,7 @@ pub const Event = struct {
 
         if (root.get("tags")) |tags_val| {
             if (tags_val == .array) {
+                event.tag_count = @intCast(tags_val.array.items.len);
                 for (tags_val.array.items) |tag| {
                     if (tag != .array or tag.array.items.len < 2) continue;
 
@@ -355,9 +357,8 @@ pub const Event = struct {
         return self.d_tag_val;
     }
 
-    pub fn tagCount(self: *const Event) usize {
-        _ = self;
-        return 0;
+    pub fn tagCount(self: *const Event) u32 {
+        return self.tag_count;
     }
 
     pub fn deinit(self: *Event) void {

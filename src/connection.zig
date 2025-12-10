@@ -13,6 +13,9 @@ pub const Connection = struct {
     events_received: u64 = 0,
     events_sent: u64 = 0,
 
+    events_this_minute: u32 = 0,
+    minute_start: i64 = 0,
+
     // NIP-42 Authentication
     auth_challenge: [32]u8 = undefined,
     authenticated_pubkeys: std.AutoHashMap([32]u8, void) = undefined,
@@ -27,6 +30,8 @@ pub const Connection = struct {
         self.last_activity = now;
         self.events_received = 0;
         self.events_sent = 0;
+        self.events_this_minute = 0;
+        self.minute_start = now;
         self.ws_conn = null;
         self.ws_write_fn = null;
         std.crypto.random.bytes(&self.auth_challenge);
@@ -99,6 +104,19 @@ pub const Connection = struct {
 
     pub fn touch(self: *Connection) void {
         self.last_activity = std.time.timestamp();
+    }
+
+    pub fn checkRateLimit(self: *Connection, limit: u32) bool {
+        const now = std.time.timestamp();
+        if (now - self.minute_start >= 60) {
+            self.minute_start = now;
+            self.events_this_minute = 0;
+        }
+        return self.events_this_minute < limit;
+    }
+
+    pub fn recordEvent(self: *Connection) void {
+        self.events_this_minute += 1;
     }
 };
 
