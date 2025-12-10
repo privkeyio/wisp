@@ -7,3 +7,4 @@ data-lock
 *.mdb-lock
 .venv/
 wisp.toml
+wisp-db-test/
