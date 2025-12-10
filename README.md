@@ -4,7 +4,7 @@
 
 A lightweight [nostr](https://github.com/nostr-protocol/nostr) relay written in Zig.
 
-* Supports NIPs: 1, 9, 11, 40, 42
+* Supports NIPs: 1, 9, 11, 40, 42, 45
 * LMDB storage (no external database)
 * [noscrypt](https://github.com/VnUgE/noscrypt) for Schnorr signatures
 * Single binary, minimal dependencies
@@ -28,6 +28,19 @@ zig build
 ```
 
 Listens on `127.0.0.1:7777`, stores data in `./data/`.
+
+## Import/Export
+
+```sh
+# Export all events to JSONL
+./zig-out/bin/wisp export > backup.jsonl
+
+# Import events from JSONL
+./zig-out/bin/wisp import < backup.jsonl
+
+# Use custom database path
+./zig-out/bin/wisp export --db /path/to/db > backup.jsonl
+```
 
 ## Configure
 
