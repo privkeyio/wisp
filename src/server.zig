@@ -8,6 +8,7 @@ const Subscriptions = @import("subscriptions.zig").Subscriptions;
 const Connection = @import("connection.zig").Connection;
 const nip11 = @import("nip11.zig");
 const nostr = @import("nostr.zig");
+const rate_limiter = @import("rate_limiter.zig");
 
 pub const std_options = std.Options{ .log_scope_levels = &[_]std.log.ScopeLevel{
     .{ .scope = .websocket, .level = .err },
@@ -24,6 +25,9 @@ pub const Server = struct {
 
     http_server: ?HttpServer = null,
 
+    ip_rate_limiter: rate_limiter.RateLimiter,
+    ip_filter: rate_limiter.IpFilter,
+
     const HttpServer = httpz.Server(Handler);
 
     pub fn init(
@@ -32,12 +36,22 @@ pub const Server = struct {
         handler: *MsgHandler,
         subs: *Subscriptions,
     ) !Server {
+        var ip_filter = rate_limiter.IpFilter.init(allocator);
+        try ip_filter.loadWhitelist(config.ip_whitelist);
+        try ip_filter.loadBlacklist(config.ip_blacklist);
+
         return .{
             .allocator = allocator,
             .config = config,
             .handler = handler,
             .subs = subs,
             .mutex = .{},
+            .ip_rate_limiter = rate_limiter.RateLimiter.init(allocator, .{
+                .events_per_minute_per_ip = config.events_per_minute_per_ip,
+                .global_events_per_minute = config.global_events_per_minute,
+                .max_connections_per_ip = config.max_connections_per_ip,
+            }),
+            .ip_filter = ip_filter,
         };
     }
 
@@ -45,6 +59,8 @@ pub const Server = struct {
         if (self.http_server) |*s| {
             s.deinit();
         }
+        self.ip_rate_limiter.deinit();
+        self.ip_filter.deinit();
     }
 
     pub fn run(self: *Server, shutdown: *std.atomic.Value(bool)) !void {
@@ -96,11 +112,21 @@ const WsClient = struct {
 
     pub const Context = struct {
         server: *Server,
+        client_ip: []const u8,
     };
 
     pub fn init(ws_conn: *websocket.Conn, ctx: *const Context) !WsClient {
         const server = ctx.server;
         const allocator = server.allocator;
+        const client_ip = ctx.client_ip;
+
+        if (!server.ip_filter.isAllowed(client_ip)) {
+            return error.IpBlocked;
+        }
+
+        if (!server.ip_rate_limiter.canConnect(client_ip)) {
+            return error.TooManyConnectionsFromIp;
+        }
 
         server.mutex.lock();
         if (server.subs.connectionCount() >= server.config.max_connections) {
@@ -113,6 +139,7 @@ const WsClient = struct {
 
         const connection = try allocator.create(Connection);
         connection.init(allocator, conn_id);
+        connection.setClientIp(client_ip);
 
         connection.ws_conn = ws_conn;
         connection.ws_write_fn = @ptrCast(&websocket.Conn.write);
@@ -122,6 +149,8 @@ const WsClient = struct {
             allocator.destroy(connection);
             return error.ConnectionFailed;
         };
+
+        server.ip_rate_limiter.addConnection(client_ip);
 
         return WsClient{
             .id = conn_id,
@@ -141,7 +170,6 @@ const WsClient = struct {
     }
 
     pub fn clientMessage(self: *WsClient, data: []const u8) !void {
-        // NIP-42: Send AUTH challenge on first message if auth is enabled
         if (self.server.config.auth_required or self.server.config.auth_to_write) {
             self.sendAuthChallenge();
         }
@@ -160,6 +188,11 @@ const WsClient = struct {
         const server = self.server;
         const allocator = server.allocator;
 
+        const client_ip = self.connection.getClientIp();
+        if (client_ip.len > 0) {
+            server.ip_rate_limiter.removeConnection(client_ip);
+        }
+
         server.subs.removeConnection(self.id);
         self.connection.deinit();
         allocator.destroy(self.connection);
@@ -169,7 +202,17 @@ const WsClient = struct {
 fn index(h: Handler, req: *httpz.Request, res: *httpz.Response) !void {
     if (req.header("upgrade")) |upgrade| {
         if (std.ascii.eqlIgnoreCase(upgrade, "websocket")) {
-            const ctx = WsClient.Context{ .server = h.server };
+            var addr_buf: [64]u8 = undefined;
+            const remote_addr = std.fmt.bufPrint(&addr_buf, "{any}", .{req.address}) catch "unknown";
+
+            const client_ip = rate_limiter.extractClientIp(
+                req.header("x-forwarded-for"),
+                req.header("x-real-ip"),
+                remote_addr,
+                h.server.config.trust_proxy,
+            );
+
+            const ctx = WsClient.Context{ .server = h.server, .client_ip = client_ip };
             if (try httpz.upgradeWebsocket(WsClient, req, res, &ctx) == false) {
                 res.status = 400;
                 res.body = "invalid websocket handshake";

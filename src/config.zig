@@ -22,10 +22,16 @@ pub const Config = struct {
     storage_map_size_mb: u32,
     idle_seconds: u32,
 
-    // NIP-42 Authentication
     auth_required: bool,
     auth_to_write: bool,
     relay_url: []const u8,
+
+    trust_proxy: bool,
+    events_per_minute_per_ip: u32,
+    global_events_per_minute: u64,
+    max_connections_per_ip: u32,
+    ip_whitelist: []const u8,
+    ip_blacklist: []const u8,
 
     _allocated: std.ArrayListUnmanaged([]const u8),
     _allocator: ?std.mem.Allocator,
@@ -55,6 +61,12 @@ pub const Config = struct {
             .auth_required = false,
             .auth_to_write = false,
             .relay_url = "",
+            .trust_proxy = false,
+            .events_per_minute_per_ip = 120,
+            .global_events_per_minute = 10000,
+            .max_connections_per_ip = 10,
+            .ip_whitelist = "",
+            .ip_blacklist = "",
             ._allocated = undefined,
             ._allocator = null,
         };
@@ -156,6 +168,20 @@ pub const Config = struct {
             } else if (std.mem.eql(u8, key, "relay_url")) {
                 self.relay_url = try self.allocString(value);
             }
+        } else if (std.mem.eql(u8, section, "security")) {
+            if (std.mem.eql(u8, key, "trust_proxy")) {
+                self.trust_proxy = std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1");
+            } else if (std.mem.eql(u8, key, "events_per_minute_per_ip")) {
+                self.events_per_minute_per_ip = try std.fmt.parseInt(u32, value, 10);
+            } else if (std.mem.eql(u8, key, "global_events_per_minute")) {
+                self.global_events_per_minute = try std.fmt.parseInt(u64, value, 10);
+            } else if (std.mem.eql(u8, key, "max_connections_per_ip")) {
+                self.max_connections_per_ip = try std.fmt.parseInt(u32, value, 10);
+            } else if (std.mem.eql(u8, key, "ip_whitelist")) {
+                self.ip_whitelist = try self.allocString(value);
+            } else if (std.mem.eql(u8, key, "ip_blacklist")) {
+                self.ip_blacklist = try self.allocString(value);
+            }
         }
     }
 
@@ -188,6 +214,20 @@ pub const Config = struct {
         if (std.posix.getenv("WISP_EVENTS_PER_MINUTE")) |v| {
             self.events_per_minute = std.fmt.parseInt(u32, v, 10) catch self.events_per_minute;
         }
+        if (std.posix.getenv("WISP_TRUST_PROXY")) |v| {
+            self.trust_proxy = std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "1");
+        }
+        if (std.posix.getenv("WISP_EVENTS_PER_MINUTE_PER_IP")) |v| {
+            self.events_per_minute_per_ip = std.fmt.parseInt(u32, v, 10) catch self.events_per_minute_per_ip;
+        }
+        if (std.posix.getenv("WISP_GLOBAL_EVENTS_PER_MINUTE")) |v| {
+            self.global_events_per_minute = std.fmt.parseInt(u64, v, 10) catch self.global_events_per_minute;
+        }
+        if (std.posix.getenv("WISP_MAX_CONNECTIONS_PER_IP")) |v| {
+            self.max_connections_per_ip = std.fmt.parseInt(u32, v, 10) catch self.max_connections_per_ip;
+        }
+        if (std.posix.getenv("WISP_IP_WHITELIST")) |v| self.ip_whitelist = v;
+        if (std.posix.getenv("WISP_IP_BLACKLIST")) |v| self.ip_blacklist = v;
     }
 
     pub fn deinit(self: *Config) void {

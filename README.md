@@ -54,8 +54,14 @@ Environment variables:
 | `WISP_AUTH_TO_WRITE` | `false` |
 | `WISP_RELAY_URL` | `` |
 | `WISP_EVENTS_PER_MINUTE` | `60` |
+| `WISP_TRUST_PROXY` | `false` |
+| `WISP_EVENTS_PER_MINUTE_PER_IP` | `120` |
+| `WISP_GLOBAL_EVENTS_PER_MINUTE` | `10000` |
+| `WISP_MAX_CONNECTIONS_PER_IP` | `10` |
+| `WISP_IP_WHITELIST` | `` |
+| `WISP_IP_BLACKLIST` | `` |
 
-Or use a config file (`wisp.toml`):
+Or use a config file (`./wisp config.toml`):
 
 ```toml
 [server]
@@ -71,6 +77,14 @@ events_per_minute = 60
 [auth]
 to_write = true
 relay_url = "wss://relay.example.com"
+
+[security]
+trust_proxy = true
+events_per_minute_per_ip = 120
+global_events_per_minute = 10000
+max_connections_per_ip = 10
+ip_whitelist = "192.168.1,10.0.0"
+ip_blacklist = "1.2.3.4"
 ```
 
 ## License

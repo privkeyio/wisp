@@ -16,7 +16,8 @@ pub const Connection = struct {
     events_this_minute: u32 = 0,
     minute_start: i64 = 0,
 
-    // NIP-42 Authentication
+    client_ip: [64]u8 = undefined,
+    client_ip_len: u8 = 0,
     auth_challenge: [32]u8 = undefined,
     authenticated_pubkeys: std.AutoHashMap([32]u8, void) = undefined,
     challenge_sent: bool = false,
@@ -32,11 +33,23 @@ pub const Connection = struct {
         self.events_sent = 0;
         self.events_this_minute = 0;
         self.minute_start = now;
+        self.client_ip = undefined;
+        self.client_ip_len = 0;
         self.ws_conn = null;
         self.ws_write_fn = null;
         std.crypto.random.bytes(&self.auth_challenge);
         self.authenticated_pubkeys = std.AutoHashMap([32]u8, void).init(self.arena.allocator());
         self.challenge_sent = false;
+    }
+
+    pub fn setClientIp(self: *Connection, ip: []const u8) void {
+        const len = @min(ip.len, self.client_ip.len);
+        @memcpy(self.client_ip[0..len], ip[0..len]);
+        self.client_ip_len = @intCast(len);
+    }
+
+    pub fn getClientIp(self: *const Connection) []const u8 {
+        return self.client_ip[0..self.client_ip_len];
     }
 
     pub fn isAuthenticated(self: *const Connection) bool {

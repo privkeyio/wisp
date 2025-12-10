@@ -5,6 +5,7 @@ const Subscriptions = @import("subscriptions.zig").Subscriptions;
 const Broadcaster = @import("broadcaster.zig").Broadcaster;
 const Connection = @import("connection.zig").Connection;
 const nostr = @import("nostr.zig");
+const rate_limiter = @import("rate_limiter.zig");
 
 pub const Handler = struct {
     allocator: std.mem.Allocator,
@@ -13,6 +14,7 @@ pub const Handler = struct {
     subs: *Subscriptions,
     broadcaster: *Broadcaster,
     send_fn: *const fn (conn_id: u64, data: []const u8) void,
+    ip_rate_limiter: ?*rate_limiter.RateLimiter,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -29,7 +31,12 @@ pub const Handler = struct {
             .subs = subs,
             .broadcaster = broadcaster,
             .send_fn = send_fn,
+            .ip_rate_limiter = null,
         };
+    }
+
+    pub fn setRateLimiter(self: *Handler, limiter: *rate_limiter.RateLimiter) void {
+        self.ip_rate_limiter = limiter;
     }
 
     pub fn handle(self: *Handler, conn: *Connection, message: []const u8) void {
@@ -58,6 +65,14 @@ pub const Handler = struct {
         if (!conn.checkRateLimit(self.config.events_per_minute)) {
             self.sendOk(conn, id, false, "rate-limited: too many events");
             return;
+        }
+
+        if (self.ip_rate_limiter) |limiter| {
+            const client_ip = conn.getClientIp();
+            if (client_ip.len > 0 and !limiter.checkIp(client_ip)) {
+                self.sendOk(conn, id, false, "rate-limited: too many events from your IP");
+                return;
+            }
         }
 
         if (self.config.auth_required or self.config.auth_to_write) {
@@ -131,6 +146,13 @@ pub const Handler = struct {
         self.sendOk(conn, id, true, "");
         conn.events_received += 1;
         conn.recordEvent();
+
+        if (self.ip_rate_limiter) |limiter| {
+            const client_ip = conn.getClientIp();
+            if (client_ip.len > 0) {
+                limiter.recordEvent(client_ip);
+            }
+        }
 
         self.broadcaster.broadcast(&event);
     }

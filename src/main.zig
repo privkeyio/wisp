@@ -138,6 +138,8 @@ pub fn main() !void {
     var server = try Server.init(allocator, &config, &handler, &subs);
     defer server.deinit();
 
+    handler.setRateLimiter(&server.ip_rate_limiter);
+
     g_server = &server;
     defer g_server = null;
 
