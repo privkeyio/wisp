@@ -21,6 +21,45 @@ fn sendCallback(conn_id: u64, data: []const u8) void {
     }
 }
 
+const Command = enum {
+    relay,
+    import_cmd,
+    export_cmd,
+    help,
+};
+
+fn parseCommand(arg: []const u8) Command {
+    if (std.mem.eql(u8, arg, "import")) return .import_cmd;
+    if (std.mem.eql(u8, arg, "export")) return .export_cmd;
+    if (std.mem.eql(u8, arg, "help") or std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) return .help;
+    return .relay;
+}
+
+fn printHelp() void {
+    const help =
+        \\Usage: wisp <command> [options]
+        \\
+        \\Commands:
+        \\  relay [config]  Start the relay server (default)
+        \\  import          Import events from stdin (JSONL format)
+        \\  export          Export all events to stdout (JSONL format)
+        \\  help            Show this help
+        \\
+        \\Options:
+        \\  --db <path>     Database path (default: ./data)
+        \\
+        \\Examples:
+        \\  wisp                          Start relay with defaults
+        \\  wisp relay config.ini         Start relay with config file
+        \\  wisp import < events.jsonl    Import events from file
+        \\  wisp export > backup.jsonl    Export all events to file
+        \\  wisp import --db ./mydata     Import to specific database
+        \\
+    ;
+    const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
+    stdout.writeAll(help) catch {};
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -28,7 +67,42 @@ pub fn main() !void {
 
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
-    const config_path: ?[]const u8 = if (args.len > 1) args[1] else null;
+
+    var cmd = Command.relay;
+    var config_path: ?[]const u8 = null;
+    var db_path: []const u8 = "./data";
+    var cmd_set = false;
+
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--db")) {
+            i += 1;
+            if (i < args.len) {
+                db_path = args[i];
+            }
+        } else if (!cmd_set) {
+            cmd = parseCommand(arg);
+            cmd_set = true;
+            if (cmd == .relay and !std.mem.startsWith(u8, arg, "-")) {
+                config_path = arg;
+            }
+        }
+    }
+
+    switch (cmd) {
+        .help => {
+            printHelp();
+            return;
+        },
+        .import_cmd => {
+            return runImport(allocator, db_path);
+        },
+        .export_cmd => {
+            return runExport(allocator, db_path);
+        },
+        .relay => {},
+    }
 
     var config = if (config_path) |path|
         Config.load(allocator, path) catch |err| {
@@ -78,4 +152,115 @@ pub fn main() !void {
     try server.run(&g_shutdown);
 
     std.log.info("Shutdown complete", .{});
+}
+
+fn runImport(allocator: std.mem.Allocator, db_path: []const u8) !void {
+    try nostr.init();
+    defer nostr.cleanup();
+
+    var lmdb = try Lmdb.init(allocator, db_path, 10240);
+    defer lmdb.deinit();
+
+    var store = try Store.init(allocator, &lmdb);
+    defer store.deinit();
+
+    const stdin_file = std.fs.File{ .handle = std.posix.STDIN_FILENO };
+    const stderr_file = std.fs.File{ .handle = std.posix.STDERR_FILENO };
+
+    var imported: u64 = 0;
+    var failed: u64 = 0;
+    var duplicates: u64 = 0;
+
+    var line_list: std.ArrayListUnmanaged(u8) = .{};
+    defer line_list.deinit(allocator);
+
+    var read_buf: [65536]u8 = undefined;
+
+    while (true) {
+        const bytes_read = stdin_file.read(&read_buf) catch break;
+        if (bytes_read == 0) break;
+
+        for (read_buf[0..bytes_read]) |byte| {
+            if (byte == '\n') {
+                if (line_list.items.len > 0) {
+                    processImportLine(allocator, &store, line_list.items, &imported, &failed, &duplicates);
+                }
+                line_list.clearRetainingCapacity();
+            } else {
+                line_list.append(allocator, byte) catch {
+                    failed += 1;
+                    line_list.clearRetainingCapacity();
+                };
+            }
+        }
+
+        if ((imported + duplicates + failed) % 10000 == 0 and (imported + duplicates + failed) > 0) {
+            printStatus(stderr_file, "Progress: {d} imported, {d} duplicates, {d} failed\n", .{ imported, duplicates, failed });
+        }
+    }
+
+    if (line_list.items.len > 0) {
+        processImportLine(allocator, &store, line_list.items, &imported, &failed, &duplicates);
+    }
+
+    lmdb.sync();
+
+    printStatus(stderr_file, "Import complete: {d} imported, {d} duplicates, {d} failed\n", .{ imported, duplicates, failed });
+}
+
+fn processImportLine(allocator: std.mem.Allocator, store: *Store, line: []const u8, imported: *u64, failed: *u64, duplicates: *u64) void {
+    var event = nostr.Event.parseWithAllocator(line, allocator) catch {
+        failed.* += 1;
+        return;
+    };
+    defer event.deinit();
+
+    event.validate() catch {
+        failed.* += 1;
+        return;
+    };
+
+    const result = store.store(&event, line) catch {
+        failed.* += 1;
+        return;
+    };
+
+    if (result.stored) {
+        imported.* += 1;
+    } else if (std.mem.startsWith(u8, result.message, "duplicate")) {
+        duplicates.* += 1;
+    } else {
+        failed.* += 1;
+    }
+}
+
+fn printStatus(file: std.fs.File, comptime fmt: []const u8, args: anytype) void {
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    file.writeAll(msg) catch {};
+}
+
+fn runExport(allocator: std.mem.Allocator, db_path: []const u8) !void {
+    var lmdb = try Lmdb.init(allocator, db_path, 10240);
+    defer lmdb.deinit();
+
+    var store = try Store.init(allocator, &lmdb);
+    defer store.deinit();
+
+    const stdout_file = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
+    const stderr_file = std.fs.File{ .handle = std.posix.STDERR_FILENO };
+
+    const empty_filters = [_]nostr.Filter{};
+    var iter = try store.query(&empty_filters, std.math.maxInt(u32));
+    defer iter.deinit();
+
+    var exported: u64 = 0;
+
+    while (try iter.next()) |json| {
+        stdout_file.writeAll(json) catch return;
+        stdout_file.writeAll("\n") catch return;
+        exported += 1;
+    }
+
+    printStatus(stderr_file, "Exported {d} events\n", .{exported});
 }
