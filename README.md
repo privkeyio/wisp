@@ -1,4 +1,4 @@
-# wisp - a nostr relay
+# wisp - a lightweight nostr relay
 
 <img src="assets/wisp-logo.jpeg" alt="Wisp Logo" width="200">
 
