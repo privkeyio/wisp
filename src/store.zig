@@ -79,7 +79,17 @@ pub const Store = struct {
         var replaced_id: ?[32]u8 = null;
 
         if (kind_type == .replaceable or kind_type == .addressable) {
-            replaced_id = try self.handleReplaceable(&txn, event, kind_type);
+            const result = try self.handleReplaceable(&txn, event, kind_type);
+            switch (result) {
+                .rejected => {
+                    txn.abort();
+                    return .{ .stored = false, .message = "replaced: have newer event" };
+                },
+                .replaced => |rid| {
+                    replaced_id = rid;
+                },
+                .new_entry => {},
+            }
         }
 
         try txn.put(self.events, id, json);
@@ -89,7 +99,13 @@ pub const Store = struct {
         return .{ .stored = true, .replaced_id = replaced_id };
     }
 
-    fn handleReplaceable(self: *Store, txn: *Txn, event: *const nostr.Event, kind_type: nostr.KindType) !?[32]u8 {
+    pub const ReplaceableResult = union(enum) {
+        replaced: [32]u8,
+        new_entry: void,
+        rejected: void,
+    };
+
+    fn handleReplaceable(self: *Store, txn: *Txn, event: *const nostr.Event, kind_type: nostr.KindType) !ReplaceableResult {
         var key_buf: [128]u8 = undefined;
         var key_len: usize = 0;
 
@@ -115,8 +131,16 @@ pub const Store = struct {
                 var existing = try nostr.Event.parse(existing_json);
                 defer existing.deinit();
 
-                if (existing.createdAt() >= event.createdAt()) {
-                    return null;
+                if (existing.createdAt() > event.createdAt()) {
+                    return .rejected;
+                }
+
+                if (existing.createdAt() == event.createdAt()) {
+                    const existing_id = existing.id();
+                    const new_id = event.id();
+                    if (std.mem.order(u8, existing_id, new_id) == .lt) {
+                        return .rejected;
+                    }
                 }
 
                 var replaced: [32]u8 = undefined;
@@ -125,12 +149,12 @@ pub const Store = struct {
                 try self.deleteEventInternal(txn, &existing);
                 try txn.put(self.replaceable, key, event.id());
 
-                return replaced;
+                return .{ .replaced = replaced };
             }
         }
 
         try txn.put(self.replaceable, key, event.id());
-        return null;
+        return .new_entry;
     }
 
     fn indexEvent(self: *Store, txn: *Txn, event: *const nostr.Event) !void {

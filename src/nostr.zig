@@ -289,26 +289,12 @@ pub const Event = struct {
             hasher.update("[]");
         }
 
-        hasher.update(",\"");
-        for (self.content()) |c| {
-            switch (c) {
-                '"' => hasher.update("\\\""),
-                '\\' => hasher.update("\\\\"),
-                '\n' => hasher.update("\\n"),
-                '\r' => hasher.update("\\r"),
-                '\t' => hasher.update("\\t"),
-                else => {
-                    if (c < 0x20) {
-                        var buf: [6]u8 = undefined;
-                        const s = std.fmt.bufPrint(&buf, "\\u{x:0>4}", .{c}) catch continue;
-                        hasher.update(s);
-                    } else {
-                        hasher.update(&[_]u8{c});
-                    }
-                },
-            }
+        hasher.update(",");
+        if (findJsonValue(self.raw_json, "content")) |content_slice| {
+            hasher.update(content_slice);
+        } else {
+            hasher.update("\"\"");
         }
-        hasher.update("\"");
 
         hasher.update("]");
 
@@ -945,6 +931,23 @@ fn findJsonValue(json: []const u8, key: []const u8) ?[]const u8 {
         if (start >= json.len) return null;
 
         const first = json[start];
+
+        if (first == '"') {
+            var end = start + 1;
+            var escape = false;
+            while (end < json.len) {
+                const c = json[end];
+                if (escape) {
+                    escape = false;
+                } else if (c == '\\') {
+                    escape = true;
+                } else if (c == '"') {
+                    return json[start .. end + 1];
+                }
+                end += 1;
+            }
+            return null;
+        }
 
         if (first == '[' or first == '{') {
             const close_char: u8 = if (first == '[') ']' else '}';
