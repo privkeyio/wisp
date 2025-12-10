@@ -131,7 +131,21 @@ const WsClient = struct {
         };
     }
 
+    fn sendAuthChallenge(self: *WsClient) void {
+        if (self.connection.challenge_sent) return;
+
+        var buf: [256]u8 = undefined;
+        const auth_msg = nostr.RelayMsg.auth(&self.connection.auth_challenge, &buf) catch return;
+        self.conn.write(auth_msg) catch {};
+        self.connection.challenge_sent = true;
+    }
+
     pub fn clientMessage(self: *WsClient, data: []const u8) !void {
+        // NIP-42: Send AUTH challenge on first message if auth is enabled
+        if (self.server.config.auth_required or self.server.config.auth_to_write) {
+            self.sendAuthChallenge();
+        }
+
         if (data.len > self.server.config.max_message_size) {
             var buf: [256]u8 = undefined;
             const notice = nostr.RelayMsg.notice("error: message too large", &buf) catch return;

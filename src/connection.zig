@@ -13,6 +13,11 @@ pub const Connection = struct {
     events_received: u64 = 0,
     events_sent: u64 = 0,
 
+    // NIP-42 Authentication
+    auth_challenge: [32]u8 = undefined,
+    authenticated_pubkeys: std.AutoHashMap([32]u8, void) = undefined,
+    challenge_sent: bool = false,
+
     pub fn init(self: *Connection, backing_allocator: std.mem.Allocator, id: u64) void {
         const now = std.time.timestamp();
         self.id = id;
@@ -24,6 +29,21 @@ pub const Connection = struct {
         self.events_sent = 0;
         self.ws_conn = null;
         self.ws_write_fn = null;
+        std.crypto.random.bytes(&self.auth_challenge);
+        self.authenticated_pubkeys = std.AutoHashMap([32]u8, void).init(self.arena.allocator());
+        self.challenge_sent = false;
+    }
+
+    pub fn isAuthenticated(self: *const Connection) bool {
+        return self.authenticated_pubkeys.count() > 0;
+    }
+
+    pub fn isPubkeyAuthenticated(self: *const Connection, pubkey: *const [32]u8) bool {
+        return self.authenticated_pubkeys.contains(pubkey.*);
+    }
+
+    pub fn addAuthenticatedPubkey(self: *Connection, pubkey: *const [32]u8) !void {
+        try self.authenticated_pubkeys.put(pubkey.*, {});
     }
 
     pub fn send(self: *Connection, data: []const u8) void {

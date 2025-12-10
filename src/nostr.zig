@@ -894,6 +894,21 @@ pub const RelayMsg = struct {
 
         return fbs.getWritten();
     }
+
+    pub fn auth(challenge: *const [32]u8, buf: []u8) ![]u8 {
+        var fbs = std.io.fixedBufferStream(buf);
+        const writer = fbs.writer();
+
+        try writer.writeAll("[\"AUTH\",\"");
+
+        var challenge_hex: [64]u8 = undefined;
+        _ = std.fmt.bufPrint(&challenge_hex, "{x}", .{challenge.*}) catch unreachable;
+        try writer.writeAll(&challenge_hex);
+
+        try writer.writeAll("\"]");
+
+        return fbs.getWritten();
+    }
 };
 
 fn findJsonValue(json: []const u8, key: []const u8) ?[]const u8 {

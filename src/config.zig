@@ -19,6 +19,11 @@ pub const Config = struct {
     storage_map_size_mb: u32,
     idle_seconds: u32,
 
+    // NIP-42 Authentication
+    auth_required: bool,
+    auth_to_write: bool,
+    relay_url: []const u8,
+
     _allocated: std.ArrayListUnmanaged([]const u8),
     _allocator: ?std.mem.Allocator,
 
@@ -41,6 +46,9 @@ pub const Config = struct {
             .storage_path = "./data",
             .storage_map_size_mb = 10240,
             .idle_seconds = 300,
+            .auth_required = false,
+            .auth_to_write = false,
+            .relay_url = "",
             ._allocated = undefined,
             ._allocator = null,
         };
@@ -128,6 +136,14 @@ pub const Config = struct {
             if (std.mem.eql(u8, key, "idle_seconds")) {
                 self.idle_seconds = try std.fmt.parseInt(u32, value, 10);
             }
+        } else if (std.mem.eql(u8, section, "auth")) {
+            if (std.mem.eql(u8, key, "required")) {
+                self.auth_required = std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1");
+            } else if (std.mem.eql(u8, key, "to_write")) {
+                self.auth_to_write = std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1");
+            } else if (std.mem.eql(u8, key, "relay_url")) {
+                self.relay_url = try self.allocString(value);
+            }
         }
     }
 
@@ -150,6 +166,13 @@ pub const Config = struct {
         if (std.posix.getenv("WISP_MAX_CONNECTIONS")) |v| {
             self.max_connections = std.fmt.parseInt(u32, v, 10) catch self.max_connections;
         }
+        if (std.posix.getenv("WISP_AUTH_REQUIRED")) |v| {
+            self.auth_required = std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "1");
+        }
+        if (std.posix.getenv("WISP_AUTH_TO_WRITE")) |v| {
+            self.auth_to_write = std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "1");
+        }
+        if (std.posix.getenv("WISP_RELAY_URL")) |v| self.relay_url = v;
     }
 
     pub fn deinit(self: *Config) void {
