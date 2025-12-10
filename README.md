@@ -1,6 +1,6 @@
 # wisp - a lightweight nostr relay
 
-<img src="assets/wisp-logo.jpeg" alt="Wisp Logo" width="200">
+<img src="assets/wisp-logo.jpeg" alt="Wisp Logo" width="300">
 
 A lightweight [nostr](https://github.com/nostr-protocol/nostr) relay written in Zig.
 
