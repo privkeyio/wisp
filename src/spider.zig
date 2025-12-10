@@ -115,9 +115,17 @@ pub const Spider = struct {
 
         self.follow_pubkeys.clearRetainingCapacity();
 
-        if (self.config.spider_owner_pubkey.len == 64) {
+        if (self.config.spider_admin.len == 64) {
             if (self.loadKind3FollowList()) {
                 log.info("Loaded {d} pubkeys from kind 3 contact list", .{self.follow_pubkeys.items.len});
+                return;
+            }
+            log.info("No local kind 3 found, bootstrapping from remote relay...", .{});
+            self.follow_mutex.unlock();
+            self.bootstrapKind3();
+            self.follow_mutex.lock();
+            if (self.loadKind3FollowList()) {
+                log.info("Loaded {d} pubkeys from bootstrapped kind 3 contact list", .{self.follow_pubkeys.items.len});
                 return;
             }
         }
@@ -126,9 +134,62 @@ pub const Spider = struct {
         log.info("Loaded {d} pubkeys from config", .{self.follow_pubkeys.items.len});
     }
 
+    fn bootstrapKind3(self: *Spider) void {
+        if (self.config.spider_admin.len != 64) return;
+
+        var owner_pubkey: [32]u8 = undefined;
+        _ = std.fmt.hexToBytes(&owner_pubkey, self.config.spider_admin) catch return;
+
+        // Try each configured relay
+        for (self.relays.keys()) |relay_url| {
+            log.info("Bootstrapping kind 3 from {s}...", .{relay_url});
+
+            const parsed = parseRelayUrl(relay_url) orelse continue;
+
+            var client = websocket.Client.init(self.allocator, .{
+                .host = parsed.host,
+                .port = parsed.port,
+                .tls = parsed.use_tls,
+                .ca_bundle = self.ca_bundle,
+                .max_size = 1024 * 1024,
+            }) catch continue;
+            defer client.deinit();
+
+            var host_header_buf: [256]u8 = undefined;
+            const host_header = std.fmt.bufPrint(&host_header_buf, "Host: {s}\r\n", .{parsed.host}) catch continue;
+
+            client.handshake(parsed.path, .{ .headers = host_header }) catch continue;
+
+            var req_buf: [512]u8 = undefined;
+            const req_msg = std.fmt.bufPrint(&req_buf, "[\"REQ\",\"bootstrap\",{{\"kinds\":[3],\"authors\":[\"{s}\"],\"limit\":1}}]", .{self.config.spider_admin}) catch continue;
+
+            client.writeText(@constCast(req_msg)) catch continue;
+
+            var msg_count: usize = 0;
+            while (msg_count < 10) : (msg_count += 1) {
+                const message = client.read() catch break;
+                if (message) |msg| {
+                    defer client.done(msg);
+                    if (msg.data.len > 0) {
+                        if (std.mem.startsWith(u8, msg.data, "[\"EVENT\"")) {
+                            var dummy: u64 = 0;
+                            self.handleRelayMessage(msg.data, relay_url, &dummy);
+                            log.info("Bootstrapped kind 3 from {s}", .{relay_url});
+                            return;
+                        }
+                        if (std.mem.startsWith(u8, msg.data, "[\"EOSE\"")) {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        log.warn("Failed to bootstrap kind 3 from any relay", .{});
+    }
+
     fn loadKind3FollowList(self: *Spider) bool {
         var owner_pubkey: [32]u8 = undefined;
-        _ = std.fmt.hexToBytes(&owner_pubkey, self.config.spider_owner_pubkey) catch return false;
+        _ = std.fmt.hexToBytes(&owner_pubkey, self.config.spider_admin) catch return false;
 
         var authors_array = [1][32]u8{owner_pubkey};
         const filters = [_]nostr.Filter{.{

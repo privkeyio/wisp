@@ -9,6 +9,7 @@ const Connection = @import("connection.zig").Connection;
 const nip11 = @import("nip11.zig");
 const nostr = @import("nostr.zig");
 const rate_limiter = @import("rate_limiter.zig");
+const posix = std.posix;
 
 pub const std_options = std.Options{ .log_scope_levels = &[_]std.log.ScopeLevel{
     .{ .scope = .websocket, .level = .err },
@@ -120,6 +121,9 @@ const WsClient = struct {
         const allocator = server.allocator;
         const client_ip = ctx.client_ip;
 
+        const TCP_NODELAY = 1;
+        posix.setsockopt(ws_conn.stream.handle, posix.IPPROTO.TCP, TCP_NODELAY, &std.mem.toBytes(@as(i32, 1))) catch {};
+
         if (!server.ip_filter.isAllowed(client_ip)) {
             return error.IpBlocked;
         }
@@ -142,7 +146,6 @@ const WsClient = struct {
         connection.setClientIp(client_ip);
 
         connection.ws_conn = ws_conn;
-        connection.ws_write_fn = @ptrCast(&websocket.Conn.write);
 
         server.subs.addConnection(connection) catch {
             connection.deinit();

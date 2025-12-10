@@ -1,5 +1,7 @@
 const std = @import("std");
 const nostr = @import("nostr.zig");
+const httpz = @import("httpz");
+const websocket = httpz.websocket;
 
 pub const Connection = struct {
     id: u64,
@@ -7,8 +9,7 @@ pub const Connection = struct {
     subscriptions: std.StringHashMap(Subscription),
     created_at: i64,
     last_activity: i64,
-    ws_conn: ?*anyopaque = null,
-    ws_write_fn: ?*const fn (*anyopaque, []const u8) anyerror!void = null,
+    ws_conn: ?*websocket.Conn = null,
 
     events_received: u64 = 0,
     events_sent: u64 = 0,
@@ -36,7 +37,6 @@ pub const Connection = struct {
         self.client_ip = undefined;
         self.client_ip_len = 0;
         self.ws_conn = null;
-        self.ws_write_fn = null;
         std.crypto.random.bytes(&self.auth_challenge);
         self.authenticated_pubkeys = std.AutoHashMap([32]u8, void).init(self.arena.allocator());
         self.challenge_sent = false;
@@ -65,8 +65,8 @@ pub const Connection = struct {
     }
 
     pub fn send(self: *Connection, data: []const u8) void {
-        if (self.ws_conn != null and self.ws_write_fn != null) {
-            self.ws_write_fn.?(self.ws_conn.?, data) catch {};
+        if (self.ws_conn) |conn| {
+            conn.write(data) catch {};
         }
     }
 

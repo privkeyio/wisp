@@ -238,7 +238,7 @@ pub const Handler = struct {
 
             var buf: [65536]u8 = undefined;
             const event_msg = nostr.RelayMsg.event(sub_id, &event, &buf) catch continue;
-            self.send_fn(conn.id, event_msg);
+            conn.send(event_msg);
             conn.events_sent += 1;
         }
 
@@ -502,33 +502,33 @@ pub const Handler = struct {
         return url[start..end];
     }
 
-    fn sendOk(self: *Handler, conn: *Connection, event_id: *const [32]u8, success: bool, message: []const u8) void {
+    fn sendOk(_: *Handler, conn: *Connection, event_id: *const [32]u8, success: bool, message: []const u8) void {
         var buf: [512]u8 = undefined;
         const msg = nostr.RelayMsg.ok(event_id, success, message, &buf) catch return;
-        self.send_fn(conn.id, msg);
+        conn.send(msg);
     }
 
-    fn sendEose(self: *Handler, conn: *Connection, sub_id: []const u8) void {
+    fn sendEose(_: *Handler, conn: *Connection, sub_id: []const u8) void {
         var buf: [256]u8 = undefined;
         const msg = nostr.RelayMsg.eose(sub_id, &buf) catch return;
-        self.send_fn(conn.id, msg);
+        conn.send(msg);
     }
 
-    fn sendClosed(self: *Handler, conn: *Connection, sub_id: []const u8, message: []const u8) void {
+    fn sendClosed(_: *Handler, conn: *Connection, sub_id: []const u8, message: []const u8) void {
         var buf: [512]u8 = undefined;
         const msg = nostr.RelayMsg.closed(sub_id, message, &buf) catch return;
-        self.send_fn(conn.id, msg);
+        conn.send(msg);
     }
 
-    fn sendCount(self: *Handler, conn: *Connection, sub_id: []const u8, count_val: u64) void {
+    fn sendCount(_: *Handler, conn: *Connection, sub_id: []const u8, count_val: u64) void {
         var buf: [256]u8 = undefined;
         const msg = nostr.RelayMsg.count(sub_id, count_val, &buf) catch return;
-        self.send_fn(conn.id, msg);
+        conn.send(msg);
     }
 
-    fn sendNotice(self: *Handler, conn: *Connection, message: []const u8) void {
+    fn sendNotice(_: *Handler, conn: *Connection, message: []const u8) void {
         var buf: [512]u8 = undefined;
         const msg = nostr.RelayMsg.notice(message, &buf) catch return;
-        self.send_fn(conn.id, msg);
+        conn.send(msg);
     }
 };

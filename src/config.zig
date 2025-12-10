@@ -36,7 +36,7 @@ pub const Config = struct {
     // Spider configuration
     spider_enabled: bool,
     spider_relays: []const u8,
-    spider_owner_pubkey: []const u8,
+    spider_admin: []const u8,
     spider_pubkeys: []const u8,
 
     _allocated: std.ArrayListUnmanaged([]const u8),
@@ -75,7 +75,7 @@ pub const Config = struct {
             .ip_blacklist = "",
             .spider_enabled = false,
             .spider_relays = "",
-            .spider_owner_pubkey = "",
+            .spider_admin = "",
             .spider_pubkeys = "",
             ._allocated = undefined,
             ._allocator = null,
@@ -197,8 +197,8 @@ pub const Config = struct {
                 self.spider_enabled = std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1");
             } else if (std.mem.eql(u8, key, "relays")) {
                 self.spider_relays = try self.allocString(value);
-            } else if (std.mem.eql(u8, key, "owner_pubkey")) {
-                self.spider_owner_pubkey = try self.allocString(value);
+            } else if (std.mem.eql(u8, key, "admin")) {
+                self.spider_admin = try self.allocString(value);
             } else if (std.mem.eql(u8, key, "pubkeys")) {
                 self.spider_pubkeys = try self.allocString(value);
             }
@@ -252,7 +252,7 @@ pub const Config = struct {
             self.spider_enabled = std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "1");
         }
         if (std.posix.getenv("WISP_SPIDER_RELAYS")) |v| self.spider_relays = v;
-        if (std.posix.getenv("WISP_SPIDER_OWNER_PUBKEY")) |v| self.spider_owner_pubkey = v;
+        if (std.posix.getenv("WISP_SPIDER_ADMIN")) |v| self.spider_admin = v;
         if (std.posix.getenv("WISP_SPIDER_PUBKEYS")) |v| self.spider_pubkeys = v;
     }
 
