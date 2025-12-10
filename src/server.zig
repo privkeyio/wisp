@@ -180,16 +180,13 @@ fn index(h: Handler, req: *httpz.Request, res: *httpz.Response) !void {
 
     if (req.header("accept")) |accept| {
         if (std.mem.indexOf(u8, accept, "application/nostr+json") != null) {
-            var body_buf: [4096]u8 = undefined;
-            const body = nip11.serialize(h.server.config, &body_buf) catch {
-                res.status = 500;
-                return;
-            };
             res.header("Content-Type", "application/nostr+json");
             res.header("Access-Control-Allow-Origin", "*");
             res.header("Access-Control-Allow-Headers", "*");
             res.header("Access-Control-Allow-Methods", "GET, OPTIONS");
-            res.body = body;
+            nip11.write(h.server.config, res.writer()) catch {
+                res.status = 500;
+            };
             return;
         }
     }
