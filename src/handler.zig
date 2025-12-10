@@ -46,6 +46,7 @@ pub const Handler = struct {
             .req => self.handleReq(conn, &msg),
             .close => self.handleClose(conn, &msg),
             .auth => self.handleAuth(conn, &msg),
+            .count => self.handleCount(conn, &msg),
         }
     }
 
@@ -226,6 +227,54 @@ pub const Handler = struct {
         const sub_id = msg.subscriptionId();
         self.subs.unsubscribe(conn, sub_id);
         self.sendClosed(conn, sub_id, "");
+    }
+
+    fn handleCount(self: *Handler, conn: *Connection, msg: *nostr.ClientMsg) void {
+        const sub_id = msg.subscriptionId();
+
+        if (sub_id.len == 0 or sub_id.len > 64) {
+            self.sendClosed(conn, sub_id, "error: invalid subscription ID");
+            return;
+        }
+
+        if (self.config.auth_required) {
+            if (!conn.isAuthenticated()) {
+                self.sendClosed(conn, sub_id, "auth-required: authentication required");
+                return;
+            }
+        }
+
+        const filters = msg.getFilters(conn.allocator()) catch {
+            self.sendClosed(conn, sub_id, "error: failed to parse filters");
+            return;
+        };
+        defer {
+            for (filters) |*f| {
+                var filter = f.*;
+                filter.deinit();
+            }
+            conn.allocator().free(filters);
+        }
+
+        if (filters.len > self.config.max_filters) {
+            self.sendClosed(conn, sub_id, "error: too many filters");
+            return;
+        }
+
+        var total_count: u64 = 0;
+        for (filters) |filter| {
+            var iter = self.store.query(&[_]nostr.Filter{filter}, self.config.query_limit_max) catch {
+                self.sendClosed(conn, sub_id, "error: query failed");
+                return;
+            };
+            defer iter.deinit();
+
+            while (iter.next() catch null) |_| {
+                total_count += 1;
+            }
+        }
+
+        self.sendCount(conn, sub_id, total_count);
     }
 
     fn handleAuth(self: *Handler, conn: *Connection, msg: *nostr.ClientMsg) void {
@@ -446,6 +495,12 @@ pub const Handler = struct {
     fn sendClosed(self: *Handler, conn: *Connection, sub_id: []const u8, message: []const u8) void {
         var buf: [512]u8 = undefined;
         const msg = nostr.RelayMsg.closed(sub_id, message, &buf) catch return;
+        self.send_fn(conn.id, msg);
+    }
+
+    fn sendCount(self: *Handler, conn: *Connection, sub_id: []const u8, count_val: u64) void {
+        var buf: [256]u8 = undefined;
+        const msg = nostr.RelayMsg.count(sub_id, count_val, &buf) catch return;
         self.send_fn(conn.id, msg);
     }
 

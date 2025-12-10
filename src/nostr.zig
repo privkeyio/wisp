@@ -561,6 +561,7 @@ pub const ClientMsgType = enum {
     req,
     close,
     auth,
+    count,
 };
 
 pub const ClientMsg = struct {
@@ -605,6 +606,11 @@ pub const ClientMsg = struct {
             }
         } else if (std.mem.eql(u8, type_str, "AUTH")) {
             msg.msg_type = .auth;
+        } else if (std.mem.eql(u8, type_str, "COUNT")) {
+            msg.msg_type = .count;
+            if (arr.len > 1 and arr[1] == .string) {
+                msg.subscription_id_slice = findStringInJson(json, arr[1].string) orelse "";
+            }
         } else {
             return error.InvalidJson;
         }
@@ -634,7 +640,7 @@ pub const ClientMsg = struct {
     }
 
     pub fn getFilters(self: *const ClientMsg, allocator: std.mem.Allocator) ![]Filter {
-        if (self.msg_type != .req) return &[_]Filter{};
+        if (self.msg_type != .req and self.msg_type != .count) return &[_]Filter{};
 
         const parsed = std.json.parseFromSlice(std.json.Value, allocator, self.raw_json, .{}) catch return error.InvalidJson;
         defer parsed.deinit();
@@ -907,6 +913,19 @@ pub const RelayMsg = struct {
         try writer.writeAll(&challenge_hex);
 
         try writer.writeAll("\"]");
+
+        return fbs.getWritten();
+    }
+
+    pub fn count(sub_id: []const u8, count_val: u64, buf: []u8) ![]u8 {
+        var fbs = std.io.fixedBufferStream(buf);
+        const writer = fbs.writer();
+
+        try writer.writeAll("[\"COUNT\",\"");
+        try writer.writeAll(sub_id);
+        try writer.writeAll("\",{\"count\":");
+        try writer.print("{d}", .{count_val});
+        try writer.writeAll("}]");
 
         return fbs.getWritten();
     }
