@@ -6,7 +6,7 @@ A lightweight [nostr](https://github.com/nostr-protocol/nostr) relay written in 
 
 * Supports NIPs: 1, 9, 11, 40, 42, 45
 * LMDB storage (no external database)
-* [noscrypt](https://github.com/VnUgE/noscrypt) for Schnorr signatures
+* Spider mode for syncing events from external relays
 * Single binary, minimal dependencies
 * Requires Zig 0.15+
 
@@ -14,7 +14,7 @@ A lightweight [nostr](https://github.com/nostr-protocol/nostr) relay written in 
 
 ```sh
 # Debian/Ubuntu
-sudo apt install -y libssl-dev libsecp256k1-dev liblmdb-dev
+sudo apt install -y liblmdb-dev libsecp256k1-dev libssl-dev
 
 git clone https://github.com/privkeyio/wisp && cd wisp/
 git clone https://github.com/VnUgE/noscrypt ../noscrypt
@@ -27,7 +27,7 @@ zig build
 ./zig-out/bin/wisp
 ```
 
-Listens on `127.0.0.1:7777`, stores data in `./data/`.
+Listens on `127.0.0.1:7777`, stores data in `./data`.
 
 ## Import/Export
 
@@ -44,47 +44,31 @@ Listens on `127.0.0.1:7777`, stores data in `./data/`.
 
 ## Configure
 
-Environment variables:
+Copy `wisp.toml.example` to `wisp.toml` and customize, or use environment variables:
 
-| Variable | Default |
-|----------|---------|
-| `WISP_HOST` | `127.0.0.1` |
-| `WISP_PORT` | `7777` |
-| `WISP_STORAGE_PATH` | `./data` |
-| `WISP_AUTH_TO_WRITE` | `false` |
-| `WISP_RELAY_URL` | `` |
-| `WISP_EVENTS_PER_MINUTE` | `60` |
-| `WISP_TRUST_PROXY` | `false` |
-| `WISP_EVENTS_PER_MINUTE_PER_IP` | `120` |
-| `WISP_GLOBAL_EVENTS_PER_MINUTE` | `10000` |
-| `WISP_MAX_CONNECTIONS_PER_IP` | `10` |
-| `WISP_IP_WHITELIST` | `` |
-| `WISP_IP_BLACKLIST` | `` |
+```sh
+cp wisp.toml.example wisp.toml
+./zig-out/bin/wisp wisp.toml
+```
 
-Or use a config file (`./wisp config.toml`):
+All config options can be set via `WISP_` prefixed environment variables (e.g., `WISP_PORT=8080`).
 
-```toml
-[server]
-host = "0.0.0.0"
-port = 7777
+## Spider Mode
 
-[relay]
-name = "My Relay"
+Spider mode syncs events from external relays for specified pubkeys:
 
-[limits]
-events_per_minute = 60
+```sh
+# Follow specific pubkeys
+WISP_SPIDER_ENABLED=true \
+WISP_SPIDER_RELAYS="wss://relay.damus.io,wss://nos.lol" \
+WISP_SPIDER_PUBKEYS="3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d" \
+./zig-out/bin/wisp
 
-[auth]
-to_write = true
-relay_url = "wss://relay.example.com"
-
-[security]
-trust_proxy = true
-events_per_minute_per_ip = 120
-global_events_per_minute = 10000
-max_connections_per_ip = 10
-ip_whitelist = "192.168.1,10.0.0"
-ip_blacklist = "1.2.3.4"
+# Or follow an admin's contact list (kind 3)
+WISP_SPIDER_ENABLED=true \
+WISP_SPIDER_RELAYS="wss://relay.damus.io" \
+WISP_SPIDER_ADMIN="3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d" \
+./zig-out/bin/wisp
 ```
 
 ## License

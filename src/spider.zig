@@ -14,6 +14,9 @@ const MAX_RECONNECT_DELAY_MS: u64 = 3600_000;
 const BLACKOUT_MS: u64 = 24 * 3600_000;
 const REFRESH_INTERVAL_MS: u64 = 300_000;
 const QUICK_DISCONNECT_MS: i64 = 120_000;
+const RATE_LIMIT_BACKOFF_MS: u64 = 60_000;
+const MAX_RATE_LIMIT_BACKOFF_MS: u64 = 1800_000;
+const CATCHUP_WINDOW_MS: i64 = 1800_000;
 
 pub const Spider = struct {
     allocator: std.mem.Allocator,
@@ -140,7 +143,6 @@ pub const Spider = struct {
         var owner_pubkey: [32]u8 = undefined;
         _ = std.fmt.hexToBytes(&owner_pubkey, self.config.spider_admin) catch return;
 
-        // Try each configured relay
         for (self.relays.keys()) |relay_url| {
             log.info("Bootstrapping kind 3 from {s}...", .{relay_url});
 
@@ -312,6 +314,12 @@ pub const Spider = struct {
     }
 
     fn connectAndSubscribe(self: *Spider, conn: *RelayConn, relay_url: []const u8) bool {
+        if (conn.isRateLimited()) {
+            const wait_ms: u64 = @intCast(@max(0, conn.rate_limit_until - std.time.milliTimestamp()));
+            log.info("{s}: Rate limited, waiting {d}ms", .{ relay_url, wait_ms });
+            std.Thread.sleep(wait_ms * std.time.ns_per_ms);
+        }
+
         const parsed = parseRelayUrl(relay_url) orelse {
             log.err("{s}: Invalid URL", .{relay_url});
             return false;
@@ -322,7 +330,7 @@ pub const Spider = struct {
             .port = parsed.port,
             .tls = parsed.use_tls,
             .ca_bundle = self.ca_bundle,
-            .max_size = 1024 * 1024,
+            .max_size = 10 * 1024 * 1024,
         }) catch |err| {
             log.err("{s}: Failed to connect: {}", .{ relay_url, err });
             return false;
@@ -344,7 +352,14 @@ pub const Spider = struct {
 
         log.info("{s}: Connected{s}", .{ relay_url, if (parsed.use_tls) " (TLS)" else "" });
         conn.state = .connected;
-        conn.last_connect = std.time.milliTimestamp();
+        const now = std.time.milliTimestamp();
+
+        if (conn.last_disconnect > 0 and conn.last_connect > 0) {
+            self.performCatchup(&client, conn, relay_url);
+        }
+
+        conn.last_connect = now;
+        conn.clearRateLimit();
 
         self.sendSubscriptions(&client, relay_url) catch |err| {
             log.err("{s}: Failed to send subscriptions: {}", .{ relay_url, err });
@@ -353,8 +368,67 @@ pub const Spider = struct {
 
         self.readLoop(&client, relay_url);
 
+        conn.last_disconnect = std.time.milliTimestamp();
         conn.state = .disconnected;
         return true;
+    }
+
+    fn performCatchup(self: *Spider, client: *websocket.Client, conn: *RelayConn, relay_url: []const u8) void {
+        const since_ts = conn.last_disconnect - CATCHUP_WINDOW_MS;
+        const until_ts = std.time.milliTimestamp() + CATCHUP_WINDOW_MS;
+        const since_unix = @divFloor(since_ts, 1000);
+        const until_unix = @divFloor(until_ts, 1000);
+
+        log.info("{s}: Performing catch-up from {d} to {d}", .{ relay_url, since_unix, until_unix });
+
+        self.follow_mutex.lock();
+        defer self.follow_mutex.unlock();
+
+        if (self.follow_pubkeys.items.len == 0) return;
+
+        var msg_buf: [65536]u8 = undefined;
+        const msg = buildCatchupReqMessage(&msg_buf, self.follow_pubkeys.items, since_unix, until_unix) catch |err| {
+            log.err("{s}: Failed to build catch-up REQ: {}", .{ relay_url, err });
+            return;
+        };
+
+        client.writeText(@constCast(msg)) catch |err| {
+            log.err("{s}: Failed to send catch-up REQ: {}", .{ relay_url, err });
+            return;
+        };
+
+        var catchup_events: u64 = 0;
+        const catchup_start = std.time.milliTimestamp();
+        const catchup_timeout_ms: i64 = 30_000;
+
+        while (std.time.milliTimestamp() - catchup_start < catchup_timeout_ms) {
+            const message = client.read() catch break;
+            if (message) |msg_data| {
+                defer client.done(msg_data);
+                if (msg_data.data.len > 0) {
+                    if (std.mem.startsWith(u8, msg_data.data, "[\"EOSE\"")) {
+                        log.info("{s}: Catch-up complete, received {d} events", .{ relay_url, catchup_events });
+                        break;
+                    }
+                    if (std.mem.startsWith(u8, msg_data.data, "[\"EVENT\"")) {
+                        self.handleRelayMessage(msg_data.data, relay_url, &catchup_events);
+                    }
+                    if (std.mem.startsWith(u8, msg_data.data, "[\"NOTICE\"")) {
+                        self.handleNotice(msg_data.data, relay_url);
+                        if (conn.isRateLimited()) {
+                            log.warn("{s}: Rate limited during catch-up, aborting", .{relay_url});
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        var close_buf: [64]u8 = undefined;
+        const close_msg = std.fmt.bufPrint(&close_buf, "[\"CLOSE\",\"catchup\"]", .{}) catch return;
+        client.writeText(@constCast(close_msg)) catch {};
+
+        log.info("{s}: Catch-up finished with {d} events", .{ relay_url, catchup_events });
     }
 
     fn sendSubscriptions(self: *Spider, client: *websocket.Client, relay_url: []const u8) !void {
@@ -422,6 +496,11 @@ pub const Spider = struct {
     }
 
     fn handleRelayMessage(self: *Spider, data: []const u8, relay_url: []const u8, events_received: *u64) void {
+        if (data.len > 10 and std.mem.startsWith(u8, data, "[\"NOTICE\"")) {
+            self.handleNotice(data, relay_url);
+            return;
+        }
+
         if (data.len < 10 or !std.mem.startsWith(u8, data, "[\"EVENT\"")) return;
 
         var depth: i32 = 0;
@@ -509,6 +588,33 @@ pub const Spider = struct {
             }
         }
     }
+
+    fn handleNotice(self: *Spider, data: []const u8, relay_url: []const u8) void {
+        const notice_start = std.mem.indexOf(u8, data, ",") orelse return;
+        if (notice_start + 2 >= data.len) return;
+
+        var msg_start: usize = notice_start + 1;
+        while (msg_start < data.len and data[msg_start] != '"') : (msg_start += 1) {}
+        if (msg_start >= data.len) return;
+        msg_start += 1;
+
+        var msg_end = msg_start;
+        while (msg_end < data.len and data[msg_end] != '"') : (msg_end += 1) {}
+        if (msg_end >= data.len) return;
+
+        const notice_msg = data[msg_start..msg_end];
+        log.info("{s}: NOTICE: {s}", .{ relay_url, notice_msg });
+
+        if (std.mem.indexOf(u8, notice_msg, "rate") != null or
+            std.mem.indexOf(u8, notice_msg, "too many") != null or
+            std.mem.indexOf(u8, notice_msg, "slow down") != null or
+            std.mem.indexOf(u8, notice_msg, "REQ") != null)
+        {
+            if (self.relays.getPtr(relay_url)) |conn| {
+                conn.applyRateLimit();
+            }
+        }
+    }
 };
 
 const RelayConn = struct {
@@ -517,11 +623,30 @@ const RelayConn = struct {
     reconnect_delay_ms: u64 = RECONNECT_DELAY_MS,
     blackout_until: i64 = 0,
     last_connect: i64 = 0,
+    last_disconnect: i64 = 0,
+    rate_limit_until: i64 = 0,
+    rate_limit_backoff_ms: u64 = RATE_LIMIT_BACKOFF_MS,
 
     const State = enum { disconnected, connecting, connected };
 
     fn init(url: []const u8) RelayConn {
         return .{ .url = url };
+    }
+
+    fn applyRateLimit(self: *RelayConn) void {
+        const now = std.time.milliTimestamp();
+        self.rate_limit_until = now + @as(i64, @intCast(self.rate_limit_backoff_ms));
+        log.warn("{s}: Rate limited, backing off for {d}ms", .{ self.url, self.rate_limit_backoff_ms });
+        self.rate_limit_backoff_ms = @min(self.rate_limit_backoff_ms * 2, MAX_RATE_LIMIT_BACKOFF_MS);
+    }
+
+    fn isRateLimited(self: *const RelayConn) bool {
+        return std.time.milliTimestamp() < self.rate_limit_until;
+    }
+
+    fn clearRateLimit(self: *RelayConn) void {
+        self.rate_limit_backoff_ms = RATE_LIMIT_BACKOFF_MS;
+        self.rate_limit_until = 0;
     }
 };
 
@@ -587,6 +712,27 @@ fn buildReqMessage(buf: []u8, batch_idx: usize, pubkeys: [][32]u8) ![]u8 {
         try writer.print("\"{x}\"", .{pk});
     }
     try writer.writeAll("]}]");
+
+    return fbs.getWritten();
+}
+
+fn buildCatchupReqMessage(buf: []u8, pubkeys: [][32]u8, since: i64, until: i64) ![]u8 {
+    var fbs = std.io.fixedBufferStream(buf);
+    const writer = fbs.writer();
+
+    try writer.writeAll("[\"REQ\",\"catchup\",");
+    try writer.writeAll("{\"authors\":[");
+    for (pubkeys, 0..) |pk, i| {
+        if (i > 0) try writer.writeAll(",");
+        try writer.print("\"{x}\"", .{pk});
+    }
+    try writer.print("],\"since\":{d},\"until\":{d}}},", .{ since, until });
+    try writer.writeAll("{\"#p\":[");
+    for (pubkeys, 0..) |pk, i| {
+        if (i > 0) try writer.writeAll(",");
+        try writer.print("\"{x}\"", .{pk});
+    }
+    try writer.print("],\"since\":{d},\"until\":{d}}}]", .{ since, until });
 
     return fbs.getWritten();
 }

@@ -1,0 +1,51 @@
+# Wisp Configuration Example
+# Copy to wisp.toml and customize
+
+[server]
+host = "0.0.0.0"
+port = 7777
+
+[relay]
+name = "My Relay"
+description = "A lightweight Nostr relay"
+# pubkey = "your_hex_pubkey"
+# contact = "admin@example.com"
+
+[storage]
+path = "./data"
+# map_size_mb = 10240
+
+[limits]
+max_connections = 1000
+max_subscriptions = 20
+max_filters = 10
+max_message_size = 65536
+max_event_tags = 2000
+max_content_length = 102400
+query_limit_default = 500
+query_limit_max = 5000
+events_per_minute = 60
+# max_event_age = 94608000
+# max_future_seconds = 900
+
+[timeouts]
+idle_seconds = 300
+
+[auth]
+# required = false
+# to_write = false
+# relay_url = "wss://relay.example.com"
+
+[security]
+# trust_proxy = false
+# events_per_minute_per_ip = 120
+# global_events_per_minute = 10000
+# max_connections_per_ip = 10
+# ip_whitelist = "192.168.1,10.0.0"
+# ip_blacklist = ""
+
+[spider]
+# enabled = false
+# relays = "wss://relay.damus.io,wss://nos.lol"
+# admin = ""  # hex pubkey - will fetch their kind 3 contact list
+# pubkeys = ""  # comma-separated hex pubkeys to follow
