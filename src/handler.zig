@@ -7,6 +7,24 @@ const Connection = @import("connection.zig").Connection;
 const nostr = @import("nostr.zig");
 const rate_limiter = @import("rate_limiter.zig");
 
+fn isMultiKindOnly(f: *const nostr.Filter) bool {
+    const kinds = f.kinds() orelse return false;
+    if (kinds.len < 2) return false;
+    if (f.authors() != null) return false;
+    if (f.ids() != null) return false;
+    if (f.hasTagFilters()) return false;
+    return true;
+}
+
+fn isKindOnlyQuery(f: *const nostr.Filter) bool {
+    const kinds = f.kinds() orelse return false;
+    if (kinds.len == 0) return false;
+    if (f.authors() != null) return false;
+    if (f.ids() != null) return false;
+    if (f.hasTagFilters()) return false;
+    return true;
+}
+
 pub const Handler = struct {
     allocator: std.mem.Allocator,
     config: *const Config,
@@ -110,7 +128,6 @@ pub const Handler = struct {
             return;
         };
 
-        // NIP-42: Reject kind 22242 AUTH events submitted as regular events
         if (event.kind() == 22242) {
             self.sendOk(conn, id, false, "invalid: AUTH events cannot be published");
             return;
@@ -192,7 +209,6 @@ pub const Handler = struct {
             return;
         }
 
-        // NIP-42: Check if auth is required for all operations
         if (self.config.auth_required) {
             if (!conn.isAuthenticated()) {
                 self.sendClosed(conn, sub_id, "auth-required: authentication required to subscribe");
@@ -226,20 +242,51 @@ pub const Handler = struct {
             limit = @min(@as(u32, @intCast(filters[0].limit())), self.config.query_limit_max);
         }
 
-        var iter = self.store.query(filters, limit) catch {
-            self.sendClosed(conn, sub_id, "error: query failed");
-            return;
-        };
-        defer iter.deinit();
+        if (filters.len == 1 and isKindOnlyQuery(&filters[0])) {
+            const kinds = filters[0].kinds().?;
+            if (kinds.len == 1) {
+                var iter = self.store.query(filters, limit) catch {
+                    self.sendClosed(conn, sub_id, "error: query failed");
+                    return;
+                };
+                defer iter.deinit();
 
-        while (iter.next() catch null) |json| {
-            var event = nostr.Event.parse(json) catch continue;
-            defer event.deinit();
+                while (iter.next() catch null) |json| {
+                    var buf: [65536]u8 = undefined;
+                    const event_msg = nostr.RelayMsg.eventRaw(sub_id, json, &buf) catch continue;
+                    conn.send(event_msg);
+                    conn.events_sent += 1;
+                }
+            } else {
+                var mk_iter = self.store.queryMultiKind(kinds, limit) catch {
+                    self.sendClosed(conn, sub_id, "error: query failed");
+                    return;
+                };
+                defer mk_iter.deinit();
 
-            var buf: [65536]u8 = undefined;
-            const event_msg = nostr.RelayMsg.event(sub_id, &event, &buf) catch continue;
-            conn.send(event_msg);
-            conn.events_sent += 1;
+                while (mk_iter.next() catch null) |json| {
+                    var buf: [65536]u8 = undefined;
+                    const event_msg = nostr.RelayMsg.eventRaw(sub_id, json, &buf) catch continue;
+                    conn.send(event_msg);
+                    conn.events_sent += 1;
+                }
+            }
+        } else {
+            var iter = self.store.query(filters, limit) catch {
+                self.sendClosed(conn, sub_id, "error: query failed");
+                return;
+            };
+            defer iter.deinit();
+
+            while (iter.next() catch null) |json| {
+                var event = nostr.Event.parse(json) catch continue;
+                defer event.deinit();
+
+                var buf: [65536]u8 = undefined;
+                const event_msg = nostr.RelayMsg.event(sub_id, &event, &buf) catch continue;
+                conn.send(event_msg);
+                conn.events_sent += 1;
+            }
         }
 
         self.sendEose(conn, sub_id);
@@ -303,13 +350,11 @@ pub const Handler = struct {
         var event = msg.getEvent();
         const id = event.id();
 
-        // NIP-42: kind must be 22242
         if (event.kind() != 22242) {
             self.sendOk(conn, id, false, "invalid: AUTH event must be kind 22242");
             return;
         }
 
-        // Verify created_at is within 10 minutes
         const now = std.time.timestamp();
         const created = event.createdAt();
         const time_diff = if (now > created) now - created else created - now;
@@ -318,10 +363,8 @@ pub const Handler = struct {
             return;
         }
 
-        // Parse and verify the event has proper tags
         const auth_tags = self.parseAuthTags(event.raw_json);
 
-        // Verify challenge tag matches
         var expected_challenge: [64]u8 = undefined;
         _ = std.fmt.bufPrint(&expected_challenge, "{x}", .{conn.auth_challenge}) catch {
             self.sendOk(conn, id, false, "error: internal error");
@@ -333,7 +376,6 @@ pub const Handler = struct {
             return;
         }
 
-        // Verify relay tag (domain matching)
         if (self.config.relay_url.len > 0) {
             if (auth_tags.relay == null or !self.verifyRelayUrl(auth_tags.relay.?)) {
                 self.sendOk(conn, id, false, "invalid: relay URL mismatch");
@@ -341,13 +383,11 @@ pub const Handler = struct {
             }
         }
 
-        // Verify the event signature (validates id and sig)
         event.validate() catch |err| {
             self.sendOk(conn, id, false, nostr.errorMessage(err));
             return;
         };
 
-        // Authentication successful - add pubkey to authenticated set
         conn.addAuthenticatedPubkey(event.pubkey()) catch {
             self.sendOk(conn, id, false, "error: failed to record authentication");
             return;
@@ -364,7 +404,6 @@ pub const Handler = struct {
     fn parseAuthTags(_: *Handler, json: []const u8) AuthTags {
         var result = AuthTags{};
 
-        // Find "tags" array in the JSON
         const tags_start = std.mem.indexOf(u8, json, "\"tags\"") orelse return result;
         var pos = tags_start + 6;
 
@@ -373,7 +412,6 @@ pub const Handler = struct {
         if (pos >= json.len) return result;
         pos += 1;
 
-        // Parse each tag
         var depth: i32 = 0;
         var in_string = false;
         var escape = false;
@@ -422,7 +460,6 @@ pub const Handler = struct {
     }
 
     fn extractAuthTag(tag_json: []const u8, result: *AuthTags) void {
-        // Extract first two string values from tag array
         var values: [2]?[]const u8 = .{ null, null };
         var value_idx: usize = 0;
         var pos: usize = 0;
@@ -467,7 +504,6 @@ pub const Handler = struct {
     }
 
     fn verifyRelayUrl(self: *Handler, provided: []const u8) bool {
-        // Extract domain from config relay_url and provided URL
         const config_domain = extractDomain(self.config.relay_url);
         const provided_domain = extractDomain(provided);
 
@@ -477,7 +513,6 @@ pub const Handler = struct {
     }
 
     fn extractDomain(url: []const u8) ?[]const u8 {
-        // Skip protocol
         var start: usize = 0;
         if (std.mem.startsWith(u8, url, "wss://")) {
             start = 6;
@@ -491,7 +526,6 @@ pub const Handler = struct {
 
         if (start >= url.len) return null;
 
-        // Find end of domain (port, path, or end of string)
         var end = start;
         while (end < url.len) {
             if (url[end] == ':' or url[end] == '/' or url[end] == '?') break;

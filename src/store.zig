@@ -173,11 +173,12 @@ pub const Store = struct {
         @memcpy(pubkey_key[40..72], id);
         try txn.put(self.idx_pubkey, &pubkey_key, empty);
 
-        var kind_key: [44]u8 = undefined;
-        const kind_be = @byteSwap(@as(u32, @bitCast(event.kind())));
-        @memcpy(kind_key[0..4], std.mem.asBytes(&kind_be));
-        @memcpy(kind_key[4..12], std.mem.asBytes(&created_at_be));
-        @memcpy(kind_key[12..44], id);
+        var kind_key: [42]u8 = undefined;
+        const kind_u16: u16 = @truncate(@as(u32, @bitCast(event.kind())));
+        const kind_be = @byteSwap(kind_u16);
+        @memcpy(kind_key[0..2], std.mem.asBytes(&kind_be));
+        @memcpy(kind_key[2..10], std.mem.asBytes(&created_at_be));
+        @memcpy(kind_key[10..42], id);
         try txn.put(self.idx_kind, &kind_key, empty);
 
         try self.indexTags(txn, event, id, std.mem.asBytes(&created_at_be));
@@ -226,11 +227,12 @@ pub const Store = struct {
         @memcpy(pubkey_key[40..72], id);
         txn.delete(self.idx_pubkey, &pubkey_key) catch {};
 
-        var kind_key: [44]u8 = undefined;
-        const kind_be = @byteSwap(@as(u32, @bitCast(event.kind())));
-        @memcpy(kind_key[0..4], std.mem.asBytes(&kind_be));
-        @memcpy(kind_key[4..12], std.mem.asBytes(&created_at_be));
-        @memcpy(kind_key[12..44], id);
+        var kind_key: [42]u8 = undefined;
+        const kind_u16: u16 = @truncate(@as(u32, @bitCast(event.kind())));
+        const kind_be = @byteSwap(kind_u16);
+        @memcpy(kind_key[0..2], std.mem.asBytes(&kind_be));
+        @memcpy(kind_key[2..10], std.mem.asBytes(&created_at_be));
+        @memcpy(kind_key[10..42], id);
         txn.delete(self.idx_kind, &kind_key) catch {};
         self.deleteTags(txn, event, id, std.mem.asBytes(&created_at_be));
 
@@ -296,6 +298,132 @@ pub const Store = struct {
     pub fn query(self: *Store, filters: []const nostr.Filter, limit: u32) !QueryIterator {
         return QueryIterator.init(self, filters, limit);
     }
+
+    pub fn queryMultiKind(self: *Store, kinds: []const i32, limit: u32) !MultiKindResult {
+        var txn = try self.lmdb.beginTxn(true);
+        errdefer txn.abort();
+
+        var results: std.ArrayListUnmanaged(EventRef) = .empty;
+        errdefer results.deinit(self.allocator);
+
+        var kind_set: [256]bool = .{false} ** 256;
+        var has_large_kind = false;
+        for (kinds) |kind| {
+            if (kind >= 0 and kind < 256) {
+                kind_set[@intCast(kind)] = true;
+            } else {
+                has_large_kind = true;
+            }
+        }
+
+        var cursor = try txn.cursor(self.idx_created);
+        defer cursor.close();
+
+        var entry = try cursor.get(.last);
+        var collected: u32 = 0;
+        var scanned: u32 = 0;
+        const max_scan: u32 = limit * 20;
+
+        while (entry != null and collected < limit and scanned < max_scan) : (entry = try cursor.get(.prev)) {
+            const e = entry.?;
+            scanned += 1;
+
+            if (e.key.len < 40) continue;
+
+            const event_id: *const [32]u8 = @ptrCast(e.key[8..40]);
+            const ts_bytes: *const [8]u8 = @ptrCast(e.key[0..8]);
+            const timestamp = @byteSwap(@as(u64, @bitCast(ts_bytes.*)));
+
+            const json = try txn.get(self.events, event_id) orelse continue;
+            const kind_opt = extractKindFromJson(json);
+            if (kind_opt) |kind| {
+                const matches = if (kind >= 0 and kind < 256)
+                    kind_set[@intCast(kind)]
+                else if (has_large_kind)
+                    blk: {
+                        for (kinds) |k| {
+                            if (k == kind) break :blk true;
+                        }
+                        break :blk false;
+                    }
+                else
+                    false;
+
+                if (matches) {
+                    try results.append(self.allocator, .{
+                        .id = event_id.*,
+                        .timestamp = timestamp,
+                    });
+                    collected += 1;
+                }
+            }
+        }
+
+        return MultiKindResult{
+            .store = self,
+            .txn = txn,
+            .results = results,
+            .index = 0,
+            .limit = results.items.len,
+        };
+    }
+
+    fn extractKindFromJson(json: []const u8) ?i32 {
+        const pattern = "\"kind\":";
+        if (std.mem.indexOf(u8, json, pattern)) |idx| {
+            var pos = idx + pattern.len;
+            while (pos < json.len and (json[pos] == ' ' or json[pos] == '\t')) {
+                pos += 1;
+            }
+            if (pos >= json.len) return null;
+
+            var num: i32 = 0;
+            var found_digit = false;
+            while (pos < json.len) {
+                const c = json[pos];
+                if (c >= '0' and c <= '9') {
+                    num = num * 10 + @as(i32, @intCast(c - '0'));
+                    found_digit = true;
+                } else {
+                    break;
+                }
+                pos += 1;
+            }
+            if (found_digit) return num;
+        }
+        return null;
+    }
+
+};
+
+const EventRef = struct {
+    id: [32]u8,
+    timestamp: u64,
+};
+
+pub const MultiKindResult = struct {
+    store: *Store,
+    txn: Txn,
+    results: std.ArrayListUnmanaged(EventRef),
+    index: usize,
+    limit: usize,
+
+    pub fn next(self: *MultiKindResult) !?[]const u8 {
+        while (self.index < self.limit) {
+            const ref = self.results.items[self.index];
+            self.index += 1;
+
+            if (try self.txn.get(self.store.events, &ref.id)) |json| {
+                return json;
+            }
+        }
+        return null;
+    }
+
+    pub fn deinit(self: *MultiKindResult) void {
+        self.results.deinit(self.store.allocator);
+        self.txn.abort();
+    }
 };
 
 pub const QueryIterator = struct {
@@ -306,13 +434,47 @@ pub const QueryIterator = struct {
     txn: ?Txn = null,
     cursor: ?Cursor = null,
     started: bool = false,
+    index_type: IndexType = .created,
+    prefix: [44]u8 = undefined,
+    prefix_len: usize = 0,
+    skip_filter: bool = false,
+
+    const IndexType = enum { created, kind, pubkey, tag };
 
     pub fn init(store: *Store, filters: []const nostr.Filter, limit: u32) QueryIterator {
-        return .{
+        var iter = QueryIterator{
             .store = store,
             .filters = filters,
             .limit = limit,
         };
+
+        if (filters.len > 0) {
+            const f = filters[0];
+
+            if (f.kinds()) |kinds| {
+                if (f.authors() == null and f.ids() == null and !f.hasTagFilters()) {
+                    if (kinds.len == 1) {
+                        iter.index_type = .kind;
+                        const kind_u16: u16 = @truncate(@as(u32, @bitCast(kinds[0])));
+                        const kind_be = @byteSwap(kind_u16);
+                        @memcpy(iter.prefix[0..2], std.mem.asBytes(&kind_be));
+                        iter.prefix_len = 2;
+                        iter.skip_filter = true;
+                    }
+                }
+            }
+
+            if (f.authors()) |authors| {
+                if (authors.len == 1) {
+                    iter.index_type = .pubkey;
+                    @memcpy(iter.prefix[0..32], &authors[0]);
+                    iter.prefix_len = 32;
+                    iter.skip_filter = (f.kinds() == null and f.ids() == null and !f.hasTagFilters());
+                }
+            }
+        }
+
+        return iter;
     }
 
     pub fn next(self: *QueryIterator) !?[]const u8 {
@@ -320,45 +482,100 @@ pub const QueryIterator = struct {
 
         if (self.txn == null) {
             self.txn = try self.store.lmdb.beginTxn(true);
-            self.cursor = try self.txn.?.cursor(self.store.idx_created);
+            const dbi = switch (self.index_type) {
+                .kind => self.store.idx_kind,
+                .pubkey => self.store.idx_pubkey,
+                .tag => self.store.idx_tag,
+                .created => self.store.idx_created,
+            };
+            self.cursor = try self.txn.?.cursor(dbi);
         }
 
         if (!self.started) {
             self.started = true;
-            const first_entry = try self.cursor.?.get(.last) orelse return null;
-            if (first_entry.key.len >= 40) {
-                const event_id = first_entry.key[8..40];
-                if (try self.txn.?.get(self.store.events, event_id)) |json| {
-                    var event = nostr.Event.parse(json) catch return try self.next();
-                    defer event.deinit();
-                    if (!nostr.isExpired(&event)) {
-                        if (self.filters.len == 0 or nostr.filtersMatch(self.filters, &event)) {
-                            self.returned += 1;
-                            return json;
-                        }
+
+            const first_entry = switch (self.index_type) {
+                .kind, .pubkey => blk: {
+                    var seek_key: [72]u8 = undefined;
+                    @memcpy(seek_key[0..self.prefix_len], self.prefix[0..self.prefix_len]);
+                    @memset(seek_key[self.prefix_len..][0..8], 0xFF);
+                    @memset(seek_key[self.prefix_len + 8 ..][0..32], 0xFF);
+                    const key_len = self.prefix_len + 40;
+
+                    if (try self.cursor.?.seek(seek_key[0..key_len])) |_| {
+                        break :blk try self.cursor.?.get(.prev);
+                    } else {
+                        break :blk try self.cursor.?.get(.last);
                     }
+                },
+                else => try self.cursor.?.get(.last),
+            };
+
+            if (first_entry) |entry| {
+                if (try self.processEntry(entry)) |json| {
+                    return json;
                 }
+            } else {
+                return null;
             }
         }
 
         while (true) {
             const entry = try self.cursor.?.get(.prev) orelse return null;
 
-            if (entry.key.len < 40) continue;
-            const event_id = entry.key[8..40];
+            if (self.prefix_len > 0) {
+                if (entry.key.len < self.prefix_len or
+                    !std.mem.eql(u8, entry.key[0..self.prefix_len], self.prefix[0..self.prefix_len]))
+                {
+                    return null;
+                }
+            }
 
-            const json = try self.txn.?.get(self.store.events, event_id) orelse continue;
-
-            var event = nostr.Event.parse(json) catch continue;
-            defer event.deinit();
-
-            if (nostr.isExpired(&event)) continue;
-
-            if (self.filters.len == 0 or nostr.filtersMatch(self.filters, &event)) {
-                self.returned += 1;
+            if (try self.processEntry(entry)) |json| {
                 return json;
             }
         }
+    }
+
+    const Entry = @import("lmdb.zig").Entry;
+    fn processEntry(self: *QueryIterator, entry: Entry) !?[]const u8 {
+        const event_id = switch (self.index_type) {
+            .kind => blk: {
+                if (entry.key.len < 42) return null;
+                break :blk entry.key[10..42];
+            },
+            .pubkey => blk: {
+                if (entry.key.len < 72) return null;
+                break :blk entry.key[40..72];
+            },
+            .tag => blk: {
+                if (entry.key.len < 41) return null;
+                break :blk entry.key[entry.key.len - 32 ..];
+            },
+            .created => blk: {
+                if (entry.key.len < 40) return null;
+                break :blk entry.key[8..40];
+            },
+        };
+
+        const json = try self.txn.?.get(self.store.events, event_id) orelse return null;
+
+        if (self.skip_filter) {
+            self.returned += 1;
+            return json;
+        }
+
+        var event = nostr.Event.parse(json) catch return null;
+        defer event.deinit();
+
+        if (nostr.isExpired(&event)) return null;
+
+        if (self.filters.len == 0 or nostr.filtersMatch(self.filters, &event)) {
+            self.returned += 1;
+            return json;
+        }
+
+        return null;
     }
 
     pub fn deinit(self: *QueryIterator) void {

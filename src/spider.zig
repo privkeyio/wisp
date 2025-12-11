@@ -144,7 +144,7 @@ pub const Spider = struct {
         _ = std.fmt.hexToBytes(&owner_pubkey, self.config.spider_admin) catch return;
 
         for (self.relays.keys()) |relay_url| {
-            log.info("Bootstrapping kind 3 from {s}...", .{relay_url});
+            log.info("Bootstrapping admin events from {s}...", .{relay_url});
 
             const parsed = parseRelayUrl(relay_url) orelse continue;
 
@@ -163,27 +163,34 @@ pub const Spider = struct {
             client.handshake(parsed.path, .{ .headers = host_header }) catch continue;
 
             var req_buf: [512]u8 = undefined;
-            const req_msg = std.fmt.bufPrint(&req_buf, "[\"REQ\",\"bootstrap\",{{\"kinds\":[3],\"authors\":[\"{s}\"],\"limit\":1}}]", .{self.config.spider_admin}) catch continue;
+            const req_msg = std.fmt.bufPrint(&req_buf, "[\"REQ\",\"bootstrap\",{{\"kinds\":[0,3,10002],\"authors\":[\"{s}\"]}}]", .{self.config.spider_admin}) catch continue;
 
             client.writeText(@constCast(req_msg)) catch continue;
 
+            var events_received: u64 = 0;
+            var got_kind3 = false;
             var msg_count: usize = 0;
-            while (msg_count < 10) : (msg_count += 1) {
+            while (msg_count < 20) : (msg_count += 1) {
                 const message = client.read() catch break;
                 if (message) |msg| {
                     defer client.done(msg);
                     if (msg.data.len > 0) {
                         if (std.mem.startsWith(u8, msg.data, "[\"EVENT\"")) {
-                            var dummy: u64 = 0;
-                            self.handleRelayMessage(msg.data, relay_url, &dummy);
-                            log.info("Bootstrapped kind 3 from {s}", .{relay_url});
-                            return;
+                            self.handleRelayMessage(msg.data, relay_url, &events_received);
+                            if (std.mem.indexOf(u8, msg.data, "\"kind\":3")) |_| {
+                                got_kind3 = true;
+                            }
                         }
                         if (std.mem.startsWith(u8, msg.data, "[\"EOSE\"")) {
                             break;
                         }
                     }
                 }
+            }
+
+            if (events_received > 0) {
+                log.info("Bootstrapped {d} admin events from {s}", .{ events_received, relay_url });
+                if (got_kind3) return;
             }
         }
         log.warn("Failed to bootstrap kind 3 from any relay", .{});

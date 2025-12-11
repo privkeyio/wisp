@@ -513,6 +513,10 @@ pub const Filter = struct {
         return self.limit_val;
     }
 
+    pub fn hasTagFilters(self: *const Filter) bool {
+        return self.tag_filters != null and self.tag_filters.?.len > 0;
+    }
+
     pub fn deinit(self: *Filter) void {
         if (self.allocator) |alloc| {
             if (self.kinds_slice) |k| alloc.free(k);
@@ -795,13 +799,17 @@ pub const ClientMsg = struct {
 
 pub const RelayMsg = struct {
     pub fn event(sub_id: []const u8, ev: *const Event, buf: []u8) ![]u8 {
+        return eventRaw(sub_id, ev.raw_json, buf);
+    }
+
+    pub fn eventRaw(sub_id: []const u8, raw_json: []const u8, buf: []u8) ![]u8 {
         var fbs = std.io.fixedBufferStream(buf);
         const writer = fbs.writer();
 
         try writer.writeAll("[\"EVENT\",\"");
         try writer.writeAll(sub_id);
         try writer.writeAll("\",");
-        try writer.writeAll(ev.raw_json);
+        try writer.writeAll(raw_json);
         try writer.writeAll("]");
 
         return fbs.getWritten();
