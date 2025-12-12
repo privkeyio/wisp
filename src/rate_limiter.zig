@@ -1,39 +1,28 @@
 const std = @import("std");
 
-pub const RateLimiter = struct {
+pub const ConnectionLimiter = struct {
     allocator: std.mem.Allocator,
     mutex: std.Thread.Mutex,
     ip_buckets: std.StringHashMap(IpBucket),
-    config: RateLimitConfig,
-    global_events_this_minute: u64,
-    global_minute_start: i64,
-
-    pub const RateLimitConfig = struct {
-        events_per_minute_per_ip: u32 = 120,
-        global_events_per_minute: u64 = 10000,
-        max_connections_per_ip: u32 = 10,
-        cleanup_interval_seconds: i64 = 300,
-    };
+    max_connections_per_ip: u32,
+    cleanup_interval_seconds: i64,
 
     const IpBucket = struct {
-        events_this_minute: u32,
-        minute_start: i64,
         connection_count: u32,
         last_activity: i64,
     };
 
-    pub fn init(allocator: std.mem.Allocator, config: RateLimitConfig) RateLimiter {
+    pub fn init(allocator: std.mem.Allocator, max_connections_per_ip: u32) ConnectionLimiter {
         return .{
             .allocator = allocator,
             .mutex = .{},
             .ip_buckets = std.StringHashMap(IpBucket).init(allocator),
-            .config = config,
-            .global_events_this_minute = 0,
-            .global_minute_start = std.time.timestamp(),
+            .max_connections_per_ip = max_connections_per_ip,
+            .cleanup_interval_seconds = 300,
         };
     }
 
-    pub fn deinit(self: *RateLimiter) void {
+    pub fn deinit(self: *ConnectionLimiter) void {
         var iter = self.ip_buckets.keyIterator();
         while (iter.next()) |key| {
             self.allocator.free(key.*);
@@ -41,74 +30,17 @@ pub const RateLimiter = struct {
         self.ip_buckets.deinit();
     }
 
-    pub fn checkIp(self: *RateLimiter, ip: []const u8) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        const now = std.time.timestamp();
-
-        if (now - self.global_minute_start >= 60) {
-            self.global_minute_start = now;
-            self.global_events_this_minute = 0;
-        }
-        if (self.global_events_this_minute >= self.config.global_events_per_minute) {
-            return false;
-        }
-
-        if (self.ip_buckets.getPtr(ip)) |bucket| {
-            if (now - bucket.minute_start >= 60) {
-                bucket.minute_start = now;
-                bucket.events_this_minute = 0;
-            }
-            return bucket.events_this_minute < self.config.events_per_minute_per_ip;
-        }
-
-        return true;
-    }
-
-    pub fn recordEvent(self: *RateLimiter, ip: []const u8) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        const now = std.time.timestamp();
-
-        if (now - self.global_minute_start >= 60) {
-            self.global_minute_start = now;
-            self.global_events_this_minute = 0;
-        }
-        self.global_events_this_minute += 1;
-
-        if (self.ip_buckets.getPtr(ip)) |bucket| {
-            if (now - bucket.minute_start >= 60) {
-                bucket.minute_start = now;
-                bucket.events_this_minute = 0;
-            }
-            bucket.events_this_minute += 1;
-            bucket.last_activity = now;
-        } else {
-            const ip_copy = self.allocator.dupe(u8, ip) catch return;
-            self.ip_buckets.put(ip_copy, .{
-                .events_this_minute = 1,
-                .minute_start = now,
-                .connection_count = 0,
-                .last_activity = now,
-            }) catch {
-                self.allocator.free(ip_copy);
-            };
-        }
-    }
-
-    pub fn canConnect(self: *RateLimiter, ip: []const u8) bool {
+    pub fn canConnect(self: *ConnectionLimiter, ip: []const u8) bool {
         self.mutex.lock();
         defer self.mutex.unlock();
 
         if (self.ip_buckets.get(ip)) |bucket| {
-            return bucket.connection_count < self.config.max_connections_per_ip;
+            return bucket.connection_count < self.max_connections_per_ip;
         }
         return true;
     }
 
-    pub fn addConnection(self: *RateLimiter, ip: []const u8) void {
+    pub fn addConnection(self: *ConnectionLimiter, ip: []const u8) void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -120,8 +52,6 @@ pub const RateLimiter = struct {
         } else {
             const ip_copy = self.allocator.dupe(u8, ip) catch return;
             self.ip_buckets.put(ip_copy, .{
-                .events_this_minute = 0,
-                .minute_start = now,
                 .connection_count = 1,
                 .last_activity = now,
             }) catch {
@@ -130,7 +60,7 @@ pub const RateLimiter = struct {
         }
     }
 
-    pub fn removeConnection(self: *RateLimiter, ip: []const u8) void {
+    pub fn removeConnection(self: *ConnectionLimiter, ip: []const u8) void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -141,7 +71,7 @@ pub const RateLimiter = struct {
         }
     }
 
-    pub fn cleanup(self: *RateLimiter) void {
+    pub fn cleanup(self: *ConnectionLimiter) void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -152,7 +82,7 @@ pub const RateLimiter = struct {
         var iter = self.ip_buckets.iterator();
         while (iter.next()) |entry| {
             if (entry.value_ptr.connection_count == 0 and
-                now - entry.value_ptr.last_activity > self.config.cleanup_interval_seconds)
+                now - entry.value_ptr.last_activity > self.cleanup_interval_seconds)
             {
                 to_remove.append(entry.key_ptr.*) catch continue;
             }
@@ -164,19 +94,17 @@ pub const RateLimiter = struct {
         }
     }
 
-    pub fn getStats(self: *RateLimiter) Stats {
+    pub fn getStats(self: *ConnectionLimiter) Stats {
         self.mutex.lock();
         defer self.mutex.unlock();
 
         return .{
             .tracked_ips = self.ip_buckets.count(),
-            .global_events_this_minute = self.global_events_this_minute,
         };
     }
 
     pub const Stats = struct {
         tracked_ips: usize,
-        global_events_this_minute: u64,
     };
 };
 

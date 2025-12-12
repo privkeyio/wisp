@@ -26,7 +26,7 @@ pub const Server = struct {
 
     http_server: ?HttpServer = null,
 
-    ip_rate_limiter: rate_limiter.RateLimiter,
+    conn_limiter: rate_limiter.ConnectionLimiter,
     ip_filter: rate_limiter.IpFilter,
 
     const HttpServer = httpz.Server(Handler);
@@ -47,11 +47,7 @@ pub const Server = struct {
             .handler = handler,
             .subs = subs,
             .mutex = .{},
-            .ip_rate_limiter = rate_limiter.RateLimiter.init(allocator, .{
-                .events_per_minute_per_ip = config.events_per_minute_per_ip,
-                .global_events_per_minute = config.global_events_per_minute,
-                .max_connections_per_ip = config.max_connections_per_ip,
-            }),
+            .conn_limiter = rate_limiter.ConnectionLimiter.init(allocator, config.max_connections_per_ip),
             .ip_filter = ip_filter,
         };
     }
@@ -60,7 +56,7 @@ pub const Server = struct {
         if (self.http_server) |*s| {
             s.deinit();
         }
-        self.ip_rate_limiter.deinit();
+        self.conn_limiter.deinit();
         self.ip_filter.deinit();
     }
 
@@ -128,7 +124,7 @@ const WsClient = struct {
             return error.IpBlocked;
         }
 
-        if (!server.ip_rate_limiter.canConnect(client_ip)) {
+        if (!server.conn_limiter.canConnect(client_ip)) {
             return error.TooManyConnectionsFromIp;
         }
 
@@ -153,7 +149,7 @@ const WsClient = struct {
             return error.ConnectionFailed;
         };
 
-        server.ip_rate_limiter.addConnection(client_ip);
+        server.conn_limiter.addConnection(client_ip);
 
         return WsClient{
             .id = conn_id,
@@ -193,7 +189,7 @@ const WsClient = struct {
 
         const client_ip = self.connection.getClientIp();
         if (client_ip.len > 0) {
-            server.ip_rate_limiter.removeConnection(client_ip);
+            server.conn_limiter.removeConnection(client_ip);
         }
 
         server.subs.removeConnection(self.id);

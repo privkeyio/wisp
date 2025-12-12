@@ -16,9 +16,11 @@ A lightweight [nostr](https://github.com/nostr-protocol/nostr) relay written in 
 # Debian/Ubuntu
 sudo apt install -y liblmdb-dev libsecp256k1-dev libssl-dev
 
-git clone https://github.com/privkeyio/wisp && cd wisp/
-git clone https://github.com/VnUgE/noscrypt ../noscrypt
-zig build
+git clone https://github.com/VnUgE/noscrypt
+git clone https://github.com/privkeyio/libnostr-z
+git clone https://github.com/privkeyio/wisp
+cp libnostr-z/deps/noscrypt-build.zig noscrypt/build.zig
+cd wisp && zig build
 ```
 
 ## Run

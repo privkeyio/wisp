@@ -14,7 +14,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const noscrypt = b.dependency("noscrypt", .{
+    const nostr = b.dependency("nostr", .{
         .target = target,
         .optimize = optimize,
     });
@@ -28,15 +28,13 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "httpz", .module = httpz.module("httpz") },
                 .{ .name = "websocket", .module = httpz_dep.module("websocket") },
+                .{ .name = "nostr", .module = nostr.module("nostr") },
             },
         }),
     });
 
     exe.root_module.strip = optimize == .ReleaseSmall or optimize == .ReleaseFast;
 
-    // Link noscrypt (statically built by Zig)
-    exe.linkLibrary(noscrypt.artifact("noscrypt"));
-    exe.root_module.addIncludePath(noscrypt.path("include"));
 
     // System libraries
     exe.root_module.linkSystemLibrary("lmdb", .{});
