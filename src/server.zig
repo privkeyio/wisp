@@ -86,7 +86,7 @@ pub const Server = struct {
 
     pub fn send(self: *Server, conn_id: u64, data: []const u8) void {
         if (self.subs.getConnection(conn_id)) |conn| {
-            conn.send(data);
+            _ = conn.send(data);
         }
     }
 
@@ -142,8 +142,10 @@ const WsClient = struct {
         connection.setClientIp(client_ip);
 
         connection.ws_conn = ws_conn;
+        connection.startWriteQueue(ws_conn);
 
         server.subs.addConnection(connection) catch {
+            connection.stopWriteQueue();
             connection.deinit();
             allocator.destroy(connection);
             return error.ConnectionFailed;
@@ -164,7 +166,7 @@ const WsClient = struct {
 
         var buf: [256]u8 = undefined;
         const auth_msg = nostr.RelayMsg.auth(&self.connection.auth_challenge, &buf) catch return;
-        self.conn.write(auth_msg) catch {};
+        self.connection.sendDirect(auth_msg);
         self.connection.challenge_sent = true;
     }
 
@@ -193,6 +195,7 @@ const WsClient = struct {
         }
 
         server.subs.removeConnection(self.id);
+        self.connection.stopWriteQueue();
         self.connection.deinit();
         allocator.destroy(self.connection);
     }

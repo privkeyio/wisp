@@ -4,10 +4,12 @@ const Txn = @import("lmdb.zig").Txn;
 const Dbi = @import("lmdb.zig").Dbi;
 const Cursor = @import("lmdb.zig").Cursor;
 const nostr = @import("nostr.zig");
+const QueryCache = @import("query_cache.zig").QueryCache;
 
 pub const Store = struct {
     lmdb: *Lmdb,
     allocator: std.mem.Allocator,
+    query_cache: QueryCache,
 
     events: Dbi,
     idx_created: Dbi,
@@ -40,6 +42,7 @@ pub const Store = struct {
         return .{
             .lmdb = lmdb,
             .allocator = allocator,
+            .query_cache = QueryCache.init(allocator),
             .events = events,
             .idx_created = idx_created,
             .idx_pubkey = idx_pubkey,
@@ -51,7 +54,7 @@ pub const Store = struct {
     }
 
     pub fn deinit(self: *Store) void {
-        _ = self;
+        self.query_cache.deinit();
     }
 
     pub fn store(self: *Store, event: *const nostr.Event, json: []const u8) !StoreResult {
@@ -65,11 +68,6 @@ pub const Store = struct {
         errdefer txn.abort();
 
         const id = event.id();
-
-        if (try txn.get(self.events, id) != null) {
-            txn.abort();
-            return .{ .stored = false, .message = "duplicate: already have this event" };
-        }
 
         if (try txn.get(self.deleted, id) != null) {
             txn.abort();
@@ -92,9 +90,18 @@ pub const Store = struct {
             }
         }
 
-        try txn.put(self.events, id, json);
+        txn.putNoOverwrite(self.events, id, json) catch |err| {
+            if (err == error.KeyExists) {
+                txn.abort();
+                return .{ .stored = false, .message = "duplicate: already have this event" };
+            }
+            return err;
+        };
+
         try self.indexEvent(&txn, event);
         try txn.commit();
+
+        self.query_cache.invalidate();
 
         return .{ .stored = true, .replaced_id = replaced_id };
     }
@@ -451,6 +458,16 @@ pub const QueryIterator = struct {
         if (filters.len > 0) {
             const f = filters[0];
 
+            if (f.authors()) |authors| {
+                if (authors.len == 1) {
+                    iter.index_type = .pubkey;
+                    @memcpy(iter.prefix[0..32], &authors[0]);
+                    iter.prefix_len = 32;
+                    iter.skip_filter = (f.kinds() == null and f.ids() == null and !f.hasTagFilters());
+                    return iter;
+                }
+            }
+
             if (f.kinds()) |kinds| {
                 if (f.authors() == null and f.ids() == null and !f.hasTagFilters()) {
                     if (kinds.len == 1) {
@@ -460,16 +477,27 @@ pub const QueryIterator = struct {
                         @memcpy(iter.prefix[0..2], std.mem.asBytes(&kind_be));
                         iter.prefix_len = 2;
                         iter.skip_filter = true;
+                        return iter;
                     }
                 }
             }
 
-            if (f.authors()) |authors| {
-                if (authors.len == 1) {
-                    iter.index_type = .pubkey;
-                    @memcpy(iter.prefix[0..32], &authors[0]);
-                    iter.prefix_len = 32;
-                    iter.skip_filter = (f.kinds() == null and f.ids() == null and !f.hasTagFilters());
+            if (f.tag_filters) |tag_filters| {
+                if (tag_filters.len > 0) {
+                    const tag_filter = tag_filters[0];
+                    if (tag_filter.values.len == 1) {
+                        const val = tag_filter.values[0];
+                        switch (val) {
+                            .binary => |bytes| {
+                                iter.index_type = .tag;
+                                iter.prefix[0] = tag_filter.letter;
+                                @memcpy(iter.prefix[1..33], &bytes);
+                                iter.prefix_len = 33;
+                                iter.skip_filter = (f.kinds() == null and f.authors() == null and f.ids() == null);
+                            },
+                            .string => {},
+                        }
+                    }
                 }
             }
         }

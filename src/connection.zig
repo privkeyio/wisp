@@ -2,6 +2,7 @@ const std = @import("std");
 const nostr = @import("nostr.zig");
 const httpz = @import("httpz");
 const websocket = httpz.websocket;
+const WriteQueue = @import("write_queue.zig").WriteQueue;
 
 pub const Connection = struct {
     id: u64,
@@ -20,9 +21,13 @@ pub const Connection = struct {
     authenticated_pubkeys: std.AutoHashMap([32]u8, void) = undefined,
     challenge_sent: bool = false,
 
+    write_queue: WriteQueue,
+    backing_allocator: std.mem.Allocator,
+
     pub fn init(self: *Connection, backing_allocator: std.mem.Allocator, id: u64) void {
         const now = std.time.timestamp();
         self.id = id;
+        self.backing_allocator = backing_allocator;
         self.arena = std.heap.ArenaAllocator.init(backing_allocator);
         self.subscriptions = std.StringHashMap(Subscription).init(self.arena.allocator());
         self.created_at = now;
@@ -35,6 +40,15 @@ pub const Connection = struct {
         std.crypto.random.bytes(&self.auth_challenge);
         self.authenticated_pubkeys = std.AutoHashMap([32]u8, void).init(self.arena.allocator());
         self.challenge_sent = false;
+        self.write_queue = WriteQueue.init(backing_allocator);
+    }
+
+    pub fn startWriteQueue(self: *Connection, ws_conn: *websocket.Conn) void {
+        self.write_queue.start(ws_conn);
+    }
+
+    pub fn stopWriteQueue(self: *Connection) void {
+        self.write_queue.stop();
     }
 
     pub fn setClientIp(self: *Connection, ip: []const u8) void {
@@ -59,7 +73,11 @@ pub const Connection = struct {
         try self.authenticated_pubkeys.put(pubkey.*, {});
     }
 
-    pub fn send(self: *Connection, data: []const u8) void {
+    pub fn send(self: *Connection, data: []const u8) bool {
+        return self.write_queue.enqueue(data);
+    }
+
+    pub fn sendDirect(self: *Connection, data: []const u8) void {
         if (self.ws_conn) |conn| {
             conn.write(data) catch {};
         }

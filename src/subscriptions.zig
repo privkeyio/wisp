@@ -5,14 +5,14 @@ const nostr = @import("nostr.zig");
 pub const Subscriptions = struct {
     allocator: std.mem.Allocator,
     connections: std.AutoHashMap(u64, *Connection),
-    mutex: std.Thread.Mutex,
+    rwlock: std.Thread.RwLock,
     kind_index: std.AutoHashMap(i32, std.ArrayListUnmanaged(u64)),
 
     pub fn init(allocator: std.mem.Allocator) Subscriptions {
         return .{
             .allocator = allocator,
             .connections = std.AutoHashMap(u64, *Connection).init(allocator),
-            .mutex = .{},
+            .rwlock = .{},
             .kind_index = std.AutoHashMap(i32, std.ArrayListUnmanaged(u64)).init(allocator),
         };
     }
@@ -28,14 +28,14 @@ pub const Subscriptions = struct {
     }
 
     pub fn addConnection(self: *Subscriptions, conn: *Connection) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.rwlock.lock();
+        defer self.rwlock.unlock();
         try self.connections.put(conn.id, conn);
     }
 
     pub fn removeConnection(self: *Subscriptions, conn_id: u64) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.rwlock.lock();
+        defer self.rwlock.unlock();
 
         var kind_iter = self.kind_index.valueIterator();
         while (kind_iter.next()) |list| {
@@ -51,14 +51,14 @@ pub const Subscriptions = struct {
     }
 
     pub fn getConnection(self: *Subscriptions, conn_id: u64) ?*Connection {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.rwlock.lockShared();
+        defer self.rwlock.unlockShared();
         return self.connections.get(conn_id);
     }
 
     pub fn connectionCount(self: *Subscriptions) usize {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.rwlock.lockShared();
+        defer self.rwlock.unlockShared();
         return self.connections.count();
     }
 
@@ -69,8 +69,8 @@ pub const Subscriptions = struct {
         filters: []const nostr.Filter,
         max_subs: u32,
     ) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.rwlock.lock();
+        defer self.rwlock.unlock();
 
         try conn.addSubscription(sub_id, filters, max_subs);
 
@@ -96,14 +96,14 @@ pub const Subscriptions = struct {
     }
 
     pub fn unsubscribe(self: *Subscriptions, conn: *Connection, sub_id: []const u8) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.rwlock.lock();
+        defer self.rwlock.unlock();
         conn.removeSubscription(sub_id);
     }
 
     pub fn getCandidates(self: *Subscriptions, event: *const nostr.Event) ![]*Connection {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.rwlock.lockShared();
+        defer self.rwlock.unlockShared();
 
         var result = std.ArrayListUnmanaged(*Connection){};
         var seen = std.AutoHashMap(u64, void).init(self.allocator);
@@ -141,5 +141,23 @@ pub const Subscriptions = struct {
         }
 
         return result.toOwnedSlice(self.allocator);
+    }
+
+    pub fn forEachMatching(
+        self: *Subscriptions,
+        event: *const nostr.Event,
+        msg_buf: *[65536]u8,
+    ) void {
+        self.rwlock.lockShared();
+        defer self.rwlock.unlockShared();
+
+        var conn_iter = self.connections.valueIterator();
+        while (conn_iter.next()) |conn| {
+            if (conn.*.matchesEvent(event)) |sub_id| {
+                const msg = nostr.RelayMsg.event(sub_id, event, msg_buf) catch continue;
+                _ = conn.*.send(msg);
+                conn.*.events_sent += 1;
+            }
+        }
     }
 };

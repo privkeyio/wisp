@@ -53,6 +53,11 @@ pub const Handler = struct {
     pub fn handle(self: *Handler, conn: *Connection, message: []const u8) void {
         conn.touch();
 
+        if (!validateMessageStructure(message)) {
+            self.sendNotice(conn, "error: invalid message structure");
+            return;
+        }
+
         var msg = nostr.ClientMsg.parse(message) catch {
             self.sendNotice(conn, "error: invalid message");
             return;
@@ -66,6 +71,20 @@ pub const Handler = struct {
             .auth => self.handleAuth(conn, &msg),
             .count => self.handleCount(conn, &msg),
         }
+    }
+
+    fn validateMessageStructure(message: []const u8) bool {
+        if (message.len < 5) return false;
+        if (message[0] != '[') return false;
+        if (message[message.len - 1] != ']') return false;
+
+        for (message) |c| {
+            if (c < 0x20 and c != '\t' and c != '\n' and c != '\r') {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     fn handleEvent(self: *Handler, conn: *Connection, msg: *nostr.ClientMsg) void {
@@ -126,10 +145,14 @@ pub const Handler = struct {
             return;
         }
 
-        var json_buf: [65536]u8 = undefined;
-        const json = event.serialize(&json_buf) catch {
-            self.sendOk(conn, id, false, "error: serialization failed");
-            return;
+        const json = if (event.raw_json.len > 0)
+            event.raw_json
+        else blk: {
+            var json_buf: [65536]u8 = undefined;
+            break :blk event.serialize(&json_buf) catch {
+                self.sendOk(conn, id, false, "error: serialization failed");
+                return;
+            };
         };
 
         const result = self.store.store(&event, json) catch {
@@ -229,7 +252,7 @@ pub const Handler = struct {
                 while (iter.next() catch null) |json| {
                     var buf: [65536]u8 = undefined;
                     const event_msg = nostr.RelayMsg.eventRaw(sub_id, json, &buf) catch continue;
-                    conn.send(event_msg);
+                    _ = conn.send(event_msg);
                     conn.events_sent += 1;
                 }
             } else {
@@ -242,7 +265,7 @@ pub const Handler = struct {
                 while (mk_iter.next() catch null) |json| {
                     var buf: [65536]u8 = undefined;
                     const event_msg = nostr.RelayMsg.eventRaw(sub_id, json, &buf) catch continue;
-                    conn.send(event_msg);
+                    _ = conn.send(event_msg);
                     conn.events_sent += 1;
                 }
             }
@@ -254,12 +277,9 @@ pub const Handler = struct {
             defer iter.deinit();
 
             while (iter.next() catch null) |json| {
-                var event = nostr.Event.parse(json) catch continue;
-                defer event.deinit();
-
                 var buf: [65536]u8 = undefined;
-                const event_msg = nostr.RelayMsg.event(sub_id, &event, &buf) catch continue;
-                conn.send(event_msg);
+                const event_msg = nostr.RelayMsg.eventRaw(sub_id, json, &buf) catch continue;
+                _ = conn.send(event_msg);
                 conn.events_sent += 1;
             }
         }
@@ -385,7 +405,6 @@ pub const Handler = struct {
         const tags_start = std.mem.indexOf(u8, json, "\"tags\"") orelse return result;
         var pos = tags_start + 6;
 
-        // Skip to opening bracket
         while (pos < json.len and json[pos] != '[') : (pos += 1) {}
         if (pos >= json.len) return result;
         pos += 1;
@@ -517,30 +536,30 @@ pub const Handler = struct {
     fn sendOk(_: *Handler, conn: *Connection, event_id: *const [32]u8, success: bool, message: []const u8) void {
         var buf: [512]u8 = undefined;
         const msg = nostr.RelayMsg.ok(event_id, success, message, &buf) catch return;
-        conn.send(msg);
+        conn.sendDirect(msg);
     }
 
     fn sendEose(_: *Handler, conn: *Connection, sub_id: []const u8) void {
         var buf: [256]u8 = undefined;
         const msg = nostr.RelayMsg.eose(sub_id, &buf) catch return;
-        conn.send(msg);
+        conn.sendDirect(msg);
     }
 
     fn sendClosed(_: *Handler, conn: *Connection, sub_id: []const u8, message: []const u8) void {
         var buf: [512]u8 = undefined;
         const msg = nostr.RelayMsg.closed(sub_id, message, &buf) catch return;
-        conn.send(msg);
+        conn.sendDirect(msg);
     }
 
     fn sendCount(_: *Handler, conn: *Connection, sub_id: []const u8, count_val: u64) void {
         var buf: [256]u8 = undefined;
         const msg = nostr.RelayMsg.count(sub_id, count_val, &buf) catch return;
-        conn.send(msg);
+        conn.sendDirect(msg);
     }
 
     fn sendNotice(_: *Handler, conn: *Connection, message: []const u8) void {
         var buf: [512]u8 = undefined;
         const msg = nostr.RelayMsg.notice(message, &buf) catch return;
-        conn.send(msg);
+        conn.sendDirect(msg);
     }
 };
