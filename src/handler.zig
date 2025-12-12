@@ -249,6 +249,22 @@ pub const Handler = struct {
             return;
         };
 
+        // NIP-50: Validate search filters
+        for (filters) |filter| {
+            if (filter.search()) |search_query| {
+                // Reject search queries over 256 characters
+                if (search_query.len > 256) {
+                    self.sendClosed(conn, sub_id, "error: search query too long (max 256 chars)");
+                    return;
+                }
+                // Require kinds filter with search to prevent full table scan
+                if (filter.kinds() == null) {
+                    self.sendClosed(conn, sub_id, "error: search requires kinds filter");
+                    return;
+                }
+            }
+        }
+
         var limit = self.config.query_limit_default;
         if (filters.len > 0 and filters[0].limit() > 0) {
             limit = @min(@as(u32, @intCast(filters[0].limit())), self.config.query_limit_max);
