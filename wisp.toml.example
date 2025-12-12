@@ -15,6 +15,11 @@ description = "A lightweight Nostr relay"
 path = "./data"
 # map_size_mb = 10240
 
+# Performance tip: For maximum throughput, use RAM-backed storage (tmpfs):
+#   path = "/dev/shm/wisp/data"
+# This provides ~2x lower latency compared to SSD storage.
+# Note: Data will be lost on reboot unless you configure persistence.
+
 [limits]
 max_connections = 1000
 max_subscriptions = 20

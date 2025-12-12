@@ -400,7 +400,6 @@ pub const Store = struct {
         }
         return null;
     }
-
 };
 
 const EventRef = struct {

@@ -43,7 +43,7 @@ pub const Lmdb = struct {
             return error.EnvSetMaxDbs;
         }
 
-        _ = c.mdb_env_set_maxreaders(env, 256);
+        _ = c.mdb_env_set_maxreaders(env, 512);
 
         if (std.fs.path.dirname(path)) |parent| {
             std.fs.cwd().makePath(parent) catch {};
@@ -52,7 +52,7 @@ pub const Lmdb = struct {
         const path_z = try allocator.dupeZ(u8, path);
         defer allocator.free(path_z);
 
-        const flags: c_uint = c.MDB_NOSUBDIR | c.MDB_NOSYNC | c.MDB_WRITEMAP | c.MDB_MAPASYNC;
+        const flags: c_uint = c.MDB_NOSUBDIR | c.MDB_NOSYNC | c.MDB_NOMETASYNC | c.MDB_WRITEMAP | c.MDB_MAPASYNC | c.MDB_NORDAHEAD;
         const rc = c.mdb_env_open(env, path_z.ptr, flags, 0o644);
         if (rc != 0) {
             std.log.err("LMDB open failed: {}", .{rc});
