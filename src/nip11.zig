@@ -1,21 +1,41 @@
 const std = @import("std");
 const Config = @import("config.zig").Config;
 
+fn writeJsonString(w: anytype, value: []const u8) !void {
+    try w.writeByte('"');
+    for (value) |c| {
+        switch (c) {
+            '"' => try w.writeAll("\\\""),
+            '\\' => try w.writeAll("\\\\"),
+            '\n' => try w.writeAll("\\n"),
+            '\r' => try w.writeAll("\\r"),
+            '\t' => try w.writeAll("\\t"),
+            0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f => try w.print("\\u{x:0>4}", .{c}),
+            else => try w.writeByte(c),
+        }
+    }
+    try w.writeByte('"');
+}
+
 pub fn write(config: *const Config, w: anytype) !void {
     try w.writeAll("{");
 
-    try w.print("\"name\":\"{s}\"", .{config.name});
-    try w.print(",\"description\":\"{s}\"", .{config.description});
+    try w.writeAll("\"name\":");
+    try writeJsonString(w, config.name);
+    try w.writeAll(",\"description\":");
+    try writeJsonString(w, config.description);
 
     if (config.pubkey) |pk| {
-        try w.print(",\"pubkey\":\"{s}\"", .{pk});
+        try w.writeAll(",\"pubkey\":");
+        try writeJsonString(w, pk);
     }
 
     if (config.contact) |contact| {
-        try w.print(",\"contact\":\"{s}\"", .{contact});
+        try w.writeAll(",\"contact\":");
+        try writeJsonString(w, contact);
     }
 
-    try w.writeAll(",\"supported_nips\":[1,9,11,40,45]");
+    try w.writeAll(",\"supported_nips\":[1,9,11,16,33,40,42,45]");
     try w.writeAll(",\"software\":\"https://github.com/privkeyio/wisp\"");
     try w.writeAll(",\"version\":\"0.1.0\"");
 
