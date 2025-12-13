@@ -5,6 +5,7 @@ const Subscriptions = @import("subscriptions.zig").Subscriptions;
 const Broadcaster = @import("broadcaster.zig").Broadcaster;
 const Connection = @import("connection.zig").Connection;
 const nostr = @import("nostr.zig");
+const rate_limiter = @import("rate_limiter.zig");
 
 fn isMultiKindOnly(f: *const nostr.Filter) bool {
     const kinds = f.kinds() orelse return false;
@@ -31,6 +32,7 @@ pub const Handler = struct {
     subs: *Subscriptions,
     broadcaster: *Broadcaster,
     send_fn: *const fn (conn_id: u64, data: []const u8) void,
+    event_limiter: *rate_limiter.EventRateLimiter,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -39,6 +41,7 @@ pub const Handler = struct {
         subs: *Subscriptions,
         broadcaster: *Broadcaster,
         send_fn: *const fn (conn_id: u64, data: []const u8) void,
+        event_limiter: *rate_limiter.EventRateLimiter,
     ) Handler {
         return .{
             .allocator = allocator,
@@ -47,6 +50,7 @@ pub const Handler = struct {
             .subs = subs,
             .broadcaster = broadcaster,
             .send_fn = send_fn,
+            .event_limiter = event_limiter,
         };
     }
 
@@ -100,6 +104,11 @@ pub const Handler = struct {
                 self.sendOk(conn, id, false, "auth-required: authentication required to publish events");
                 return;
             }
+        }
+
+        if (!self.event_limiter.checkAndRecord(conn.getClientIp())) {
+            self.sendOk(conn, id, false, "rate-limited: too many events");
+            return;
         }
 
         const now = std.time.timestamp();
@@ -167,7 +176,7 @@ pub const Handler = struct {
         }
 
         self.sendOk(conn, id, true, "");
-        conn.events_received += 1;
+        conn.recordEvent();
 
         self.broadcaster.broadcast(&event);
     }
