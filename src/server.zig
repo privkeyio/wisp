@@ -61,8 +61,6 @@ pub const Server = struct {
     }
 
     pub fn run(self: *Server, shutdown: *std.atomic.Value(bool)) !void {
-        _ = shutdown;
-
         const h = Handler{
             .server = self,
         };
@@ -79,9 +77,38 @@ pub const Server = struct {
         var router = try server.router(.{});
         router.get("/", index, .{});
 
+        const idle_thread = std.Thread.spawn(.{}, idleTimeoutThread, .{ self, shutdown }) catch null;
+        defer if (idle_thread) |t| t.join();
+
         std.log.info("Server running on {s}:{d}", .{ self.config.host, self.config.port });
 
         try server.listen();
+    }
+
+    fn idleTimeoutThread(self: *Server, shutdown: *std.atomic.Value(bool)) void {
+        const check_interval_ns: u64 = 30 * std.time.ns_per_s;
+
+        while (!shutdown.load(.acquire)) {
+            std.Thread.sleep(check_interval_ns);
+            if (shutdown.load(.acquire)) break;
+
+            if (self.config.idle_seconds == 0) continue;
+
+            const idle_conn_ids = self.subs.getIdleConnections(self.config.idle_seconds);
+            defer self.allocator.free(idle_conn_ids);
+
+            for (idle_conn_ids) |conn_id| {
+                if (self.subs.getConnection(conn_id)) |conn| {
+                    var buf: [128]u8 = undefined;
+                    const notice = nostr.RelayMsg.notice("connection closed: idle timeout", &buf) catch continue;
+                    conn.sendDirect(notice);
+                    if (conn.ws_conn) |ws| {
+                        ws.close(.{ .code = 1000, .reason = "idle timeout" }) catch {};
+                    }
+                    std.log.debug("Closed idle connection {d}", .{conn_id});
+                }
+            }
+        }
     }
 
     pub fn send(self: *Server, conn_id: u64, data: []const u8) void {
