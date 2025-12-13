@@ -291,9 +291,45 @@ pub const Store = struct {
         }
 
         try self.deleteEventInternal(&txn, &event);
-        try txn.put(self.deleted, event_id, "");
+        const now = std.time.timestamp();
+        const now_bytes = std.mem.asBytes(&now);
+        try txn.put(self.deleted, event_id, now_bytes);
         try txn.commit();
         return true;
+    }
+
+    pub fn cleanupDeletedEntries(self: *Store, max_age_seconds: i64) !u64 {
+        var txn = try self.lmdb.beginTxn(false);
+        errdefer txn.abort();
+
+        var cursor = try txn.cursor(self.deleted);
+        defer cursor.close();
+
+        const now = std.time.timestamp();
+        const cutoff = now - max_age_seconds;
+        var deleted_count: u64 = 0;
+
+        var entry = try cursor.get(.first);
+        while (entry != null) {
+            const e = entry.?;
+            if (e.value.len >= 8) {
+                const ts_ptr: *const i64 = @ptrCast(@alignCast(e.value[0..8]));
+                if (ts_ptr.* < cutoff) {
+                    try cursor.del();
+                    deleted_count += 1;
+                }
+            } else if (e.value.len == 0) {
+                try cursor.del();
+                deleted_count += 1;
+            }
+            entry = try cursor.get(.next);
+        }
+
+        try txn.commit();
+        if (deleted_count > 0) {
+            std.log.info("Cleaned up {d} old deleted event entries", .{deleted_count});
+        }
+        return deleted_count;
     }
 
     pub fn get(self: *Store, event_id: *const [32]u8) !?[]const u8 {

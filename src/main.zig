@@ -8,6 +8,7 @@ const Broadcaster = @import("broadcaster.zig").Broadcaster;
 const Server = @import("server.zig").Server;
 const Spider = @import("spider.zig").Spider;
 const nostr = @import("nostr.zig");
+const rate_limiter = @import("rate_limiter.zig");
 
 var g_server: ?*Server = null;
 var g_shutdown: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
@@ -134,7 +135,10 @@ pub fn main() !void {
 
     var broadcaster = Broadcaster.init(allocator, &subs, sendCallback);
 
-    var handler = Handler.init(allocator, &config, &store, &subs, &broadcaster, sendCallback);
+    var event_limiter = rate_limiter.EventRateLimiter.init(allocator, config.events_per_minute);
+    defer event_limiter.deinit();
+
+    var handler = Handler.init(allocator, &config, &store, &subs, &broadcaster, sendCallback, &event_limiter);
 
     var server = try Server.init(allocator, &config, &handler, &subs);
     defer server.deinit();
@@ -169,9 +173,28 @@ pub fn main() !void {
     std.posix.sigaction(std.posix.SIG.INT, &sa, null);
     std.posix.sigaction(std.posix.SIG.TERM, &sa, null);
 
+    const cleanup_thread = std.Thread.spawn(.{}, storeCleanupThread, .{ &store, &config, &g_shutdown }) catch null;
+    defer if (cleanup_thread) |t| t.join();
+
     try server.run(&g_shutdown);
 
     std.log.info("Shutdown complete", .{});
+}
+
+fn storeCleanupThread(store: *Store, config: *const Config, shutdown: *std.atomic.Value(bool)) void {
+    const hour_ns: u64 = 3600 * std.time.ns_per_s;
+
+    while (!shutdown.load(.acquire)) {
+        std.Thread.sleep(hour_ns);
+        if (shutdown.load(.acquire)) break;
+
+        if (config.deleted_retention_days > 0) {
+            const max_age_seconds: i64 = @as(i64, @intCast(config.deleted_retention_days)) * 86400;
+            _ = store.cleanupDeletedEntries(max_age_seconds) catch |err| {
+                std.log.err("Failed to cleanup deleted entries: {}", .{err});
+            };
+        }
+    }
 }
 
 fn runImport(allocator: std.mem.Allocator, db_path: []const u8) !void {
