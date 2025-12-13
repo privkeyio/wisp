@@ -16,6 +16,7 @@ pub const Store = struct {
     idx_pubkey: Dbi,
     idx_kind: Dbi,
     idx_tag: Dbi,
+    idx_expiration: Dbi,
     replaceable: Dbi,
     deleted: Dbi,
 
@@ -34,6 +35,7 @@ pub const Store = struct {
         const idx_pubkey = try lmdb.openDbi(&txn, "idx:pubkey");
         const idx_kind = try lmdb.openDbi(&txn, "idx:kind");
         const idx_tag = try lmdb.openDbi(&txn, "idx:tag");
+        const idx_expiration = try lmdb.openDbi(&txn, "idx:expiration");
         const replaceable = try lmdb.openDbi(&txn, "replaceable");
         const deleted = try lmdb.openDbi(&txn, "deleted");
 
@@ -48,6 +50,7 @@ pub const Store = struct {
             .idx_pubkey = idx_pubkey,
             .idx_kind = idx_kind,
             .idx_tag = idx_tag,
+            .idx_expiration = idx_expiration,
             .replaceable = replaceable,
             .deleted = deleted,
         };
@@ -189,6 +192,15 @@ pub const Store = struct {
         try txn.put(self.idx_kind, &kind_key, empty);
 
         try self.indexTags(txn, event, id, std.mem.asBytes(&created_at_be));
+
+        if (event.expiration_val) |exp| {
+            const exp_u64: u64 = @intCast(exp);
+            const exp_be = @byteSwap(exp_u64);
+            var exp_key: [40]u8 = undefined;
+            @memcpy(exp_key[0..8], std.mem.asBytes(&exp_be));
+            @memcpy(exp_key[8..40], id);
+            try txn.put(self.idx_expiration, &exp_key, empty);
+        }
     }
 
     fn indexTags(self: *Store, txn: *Txn, event: *const nostr.Event, id: *const [32]u8, created_at_be: *const [8]u8) !void {
@@ -242,6 +254,15 @@ pub const Store = struct {
         @memcpy(kind_key[10..42], id);
         txn.delete(self.idx_kind, &kind_key) catch {};
         self.deleteTags(txn, event, id, std.mem.asBytes(&created_at_be));
+
+        if (event.expiration_val) |exp| {
+            const exp_u64: u64 = @intCast(exp);
+            const exp_be = @byteSwap(exp_u64);
+            var exp_key: [40]u8 = undefined;
+            @memcpy(exp_key[0..8], std.mem.asBytes(&exp_be));
+            @memcpy(exp_key[8..40], id);
+            txn.delete(self.idx_expiration, &exp_key) catch {};
+        }
 
         txn.delete(self.events, id) catch {};
     }
@@ -330,6 +351,51 @@ pub const Store = struct {
             std.log.info("Cleaned up {d} old deleted event entries", .{deleted_count});
         }
         return deleted_count;
+    }
+
+    pub fn cleanupExpiredEvents(self: *Store) !u64 {
+        var txn = try self.lmdb.beginTxn(false);
+        errdefer txn.abort();
+
+        var cursor = try txn.cursor(self.idx_expiration);
+        defer cursor.close();
+
+        const now: u64 = @intCast(std.time.timestamp());
+        var expired_count: u64 = 0;
+
+        var entry = try cursor.get(.first);
+        while (entry != null) {
+            const e = entry.?;
+            if (e.key.len < 40) {
+                entry = try cursor.get(.next);
+                continue;
+            }
+
+            const exp_be: *const [8]u8 = @ptrCast(e.key[0..8]);
+            const exp_ts = @byteSwap(@as(u64, @bitCast(exp_be.*)));
+
+            if (exp_ts > now) break;
+
+            const event_id: *const [32]u8 = @ptrCast(e.key[8..40]);
+            if (try txn.get(self.events, event_id)) |json| {
+                var event = nostr.Event.parse(json) catch {
+                    entry = try cursor.get(.next);
+                    continue;
+                };
+                defer event.deinit();
+                try self.deleteEventInternal(&txn, &event);
+                expired_count += 1;
+            }
+            try cursor.del();
+            entry = try cursor.get(.next);
+        }
+
+        try txn.commit();
+        if (expired_count > 0) {
+            std.log.info("Cleaned up {d} expired events", .{expired_count});
+            self.query_cache.invalidate();
+        }
+        return expired_count;
     }
 
     pub fn get(self: *Store, event_id: *const [32]u8) !?[]const u8 {
