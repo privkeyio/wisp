@@ -370,7 +370,7 @@ pub const Handler = struct {
             return;
         }
 
-        const auth_tags = self.parseAuthTags(event.raw_json);
+        const auth_tags = nostr.Auth.extractTags(event.raw_json);
 
         var expected_challenge: [64]u8 = undefined;
         _ = std.fmt.bufPrint(&expected_challenge, "{x}", .{conn.auth_challenge}) catch {
@@ -384,7 +384,7 @@ pub const Handler = struct {
         }
 
         if (self.config.relay_url.len > 0) {
-            if (auth_tags.relay == null or !self.verifyRelayUrl(auth_tags.relay.?)) {
+            if (auth_tags.relay == null or !nostr.Auth.domainsMatch(self.config.relay_url, auth_tags.relay.?)) {
                 self.sendOk(conn, id, false, "invalid: relay URL mismatch");
                 return;
             }
@@ -401,145 +401,6 @@ pub const Handler = struct {
         };
 
         self.sendOk(conn, id, true, "");
-    }
-
-    const AuthTags = struct {
-        relay: ?[]const u8 = null,
-        challenge: ?[]const u8 = null,
-    };
-
-    fn parseAuthTags(_: *Handler, json: []const u8) AuthTags {
-        var result = AuthTags{};
-
-        const tags_start = std.mem.indexOf(u8, json, "\"tags\"") orelse return result;
-        var pos = tags_start + 6;
-
-        while (pos < json.len and json[pos] != '[') : (pos += 1) {}
-        if (pos >= json.len) return result;
-        pos += 1;
-
-        var depth: i32 = 0;
-        var in_string = false;
-        var escape = false;
-        var tag_start: ?usize = null;
-
-        while (pos < json.len) {
-            const c = json[pos];
-
-            if (escape) {
-                escape = false;
-                pos += 1;
-                continue;
-            }
-            if (c == '\\' and in_string) {
-                escape = true;
-                pos += 1;
-                continue;
-            }
-            if (c == '"') {
-                in_string = !in_string;
-                pos += 1;
-                continue;
-            }
-
-            if (!in_string) {
-                if (c == '[') {
-                    if (depth == 0) {
-                        tag_start = pos;
-                    }
-                    depth += 1;
-                } else if (c == ']') {
-                    depth -= 1;
-                    if (depth == 0 and tag_start != null) {
-                        const tag_json = json[tag_start.? .. pos + 1];
-                        extractAuthTag(tag_json, &result);
-                        tag_start = null;
-                    }
-                    if (depth < 0) break;
-                }
-            }
-
-            pos += 1;
-        }
-
-        return result;
-    }
-
-    fn extractAuthTag(tag_json: []const u8, result: *AuthTags) void {
-        var values: [2]?[]const u8 = .{ null, null };
-        var value_idx: usize = 0;
-        var pos: usize = 0;
-        var in_string = false;
-        var string_start: usize = 0;
-        var escape = false;
-
-        while (pos < tag_json.len and value_idx < 2) {
-            const c = tag_json[pos];
-
-            if (escape) {
-                escape = false;
-                pos += 1;
-                continue;
-            }
-            if (c == '\\' and in_string) {
-                escape = true;
-                pos += 1;
-                continue;
-            }
-
-            if (c == '"') {
-                if (in_string) {
-                    values[value_idx] = tag_json[string_start..pos];
-                    value_idx += 1;
-                } else {
-                    string_start = pos + 1;
-                }
-                in_string = !in_string;
-            }
-
-            pos += 1;
-        }
-
-        if (values[0] != null and values[1] != null) {
-            if (std.mem.eql(u8, values[0].?, "relay")) {
-                result.relay = values[1].?;
-            } else if (std.mem.eql(u8, values[0].?, "challenge")) {
-                result.challenge = values[1].?;
-            }
-        }
-    }
-
-    fn verifyRelayUrl(self: *Handler, provided: []const u8) bool {
-        const config_domain = extractDomain(self.config.relay_url);
-        const provided_domain = extractDomain(provided);
-
-        if (config_domain == null or provided_domain == null) return false;
-
-        return std.ascii.eqlIgnoreCase(config_domain.?, provided_domain.?);
-    }
-
-    fn extractDomain(url: []const u8) ?[]const u8 {
-        var start: usize = 0;
-        if (std.mem.startsWith(u8, url, "wss://")) {
-            start = 6;
-        } else if (std.mem.startsWith(u8, url, "ws://")) {
-            start = 5;
-        } else if (std.mem.startsWith(u8, url, "https://")) {
-            start = 8;
-        } else if (std.mem.startsWith(u8, url, "http://")) {
-            start = 7;
-        }
-
-        if (start >= url.len) return null;
-
-        var end = start;
-        while (end < url.len) {
-            if (url[end] == ':' or url[end] == '/' or url[end] == '?') break;
-            end += 1;
-        }
-
-        if (end <= start) return null;
-        return url[start..end];
     }
 
     fn sendOk(_: *Handler, conn: *Connection, event_id: *const [32]u8, success: bool, message: []const u8) void {

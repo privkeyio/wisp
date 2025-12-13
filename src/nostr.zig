@@ -24,3 +24,7 @@ pub const EventBuilder = nostr_lib.EventBuilder;
 pub const crypto = nostr_lib.crypto;
 pub const init = nostr_lib.init;
 pub const cleanup = nostr_lib.cleanup;
+
+pub const Auth = nostr_lib.Auth;
+pub const Replaceable = nostr_lib.Replaceable;
+pub const IndexKeys = nostr_lib.IndexKeys;

@@ -116,24 +116,9 @@ pub const Store = struct {
     };
 
     fn handleReplaceable(self: *Store, txn: *Txn, event: *const nostr.Event, kind_type: nostr.KindType) !ReplaceableResult {
+        _ = kind_type;
         var key_buf: [128]u8 = undefined;
-        var key_len: usize = 0;
-
-        @memcpy(key_buf[0..32], event.pubkey());
-        key_len = 32;
-
-        const kind_be = @byteSwap(@as(u32, @bitCast(event.kind())));
-        @memcpy(key_buf[key_len..][0..4], std.mem.asBytes(&kind_be));
-        key_len += 4;
-
-        if (kind_type == .addressable) {
-            if (event.dTag()) |d| {
-                const copy_len = @min(d.len, key_buf.len - key_len);
-                @memcpy(key_buf[key_len..][0..copy_len], d[0..copy_len]);
-                key_len += copy_len;
-            }
-        }
-
+        const key_len = nostr.Replaceable.buildKey(event, &key_buf);
         const key = key_buf[0..key_len];
 
         if (try txn.get(self.replaceable, key)) |existing_id_slice| {
@@ -141,16 +126,8 @@ pub const Store = struct {
                 var existing = try nostr.Event.parse(existing_json);
                 defer existing.deinit();
 
-                if (existing.createdAt() > event.createdAt()) {
+                if (nostr.Replaceable.shouldReplace(&existing, event) == .keep_old) {
                     return .rejected;
-                }
-
-                if (existing.createdAt() == event.createdAt()) {
-                    const existing_id = existing.id();
-                    const new_id = event.id();
-                    if (std.mem.order(u8, existing_id, new_id) == .lt) {
-                        return .rejected;
-                    }
                 }
 
                 var replaced: [32]u8 = undefined;
@@ -168,38 +145,26 @@ pub const Store = struct {
     }
 
     fn indexEvent(self: *Store, txn: *Txn, event: *const nostr.Event) !void {
-        const id = event.id();
-        const created_at_be = @byteSwap(@as(u64, @bitCast(event.createdAt())));
         const empty: []const u8 = "";
 
         var created_key: [40]u8 = undefined;
-        @memcpy(created_key[0..8], std.mem.asBytes(&created_at_be));
-        @memcpy(created_key[8..40], id);
+        nostr.IndexKeys.created(event, &created_key);
         try txn.put(self.idx_created, &created_key, empty);
 
         var pubkey_key: [72]u8 = undefined;
-        @memcpy(pubkey_key[0..32], event.pubkey());
-        @memcpy(pubkey_key[32..40], std.mem.asBytes(&created_at_be));
-        @memcpy(pubkey_key[40..72], id);
+        nostr.IndexKeys.pubkey(event, &pubkey_key);
         try txn.put(self.idx_pubkey, &pubkey_key, empty);
 
-        var kind_key: [42]u8 = undefined;
-        const kind_u16: u16 = @truncate(@as(u32, @bitCast(event.kind())));
-        const kind_be = @byteSwap(kind_u16);
-        @memcpy(kind_key[0..2], std.mem.asBytes(&kind_be));
-        @memcpy(kind_key[2..10], std.mem.asBytes(&created_at_be));
-        @memcpy(kind_key[10..42], id);
+        var kind_key: [44]u8 = undefined;
+        nostr.IndexKeys.kind(event, &kind_key);
         try txn.put(self.idx_kind, &kind_key, empty);
 
-        try self.indexTags(txn, event, id, std.mem.asBytes(&created_at_be));
+        const ts_be = nostr.IndexKeys.timestampBe(event);
+        try self.indexTags(txn, event, event.id(), &ts_be);
 
-        if (event.expiration_val) |exp| {
-            const exp_u64: u64 = @intCast(exp);
-            const exp_be = @byteSwap(exp_u64);
-            var exp_key: [40]u8 = undefined;
-            @memcpy(exp_key[0..8], std.mem.asBytes(&exp_be));
-            @memcpy(exp_key[8..40], id);
-            try txn.put(self.idx_expiration, &exp_key, empty);
+        var exp_key: [40]u8 = undefined;
+        if (nostr.IndexKeys.expiration(event, &exp_key)) |key| {
+            try txn.put(self.idx_expiration, key, empty);
         }
     }
 
@@ -232,39 +197,27 @@ pub const Store = struct {
     }
 
     fn deleteEventInternal(self: *Store, txn: *Txn, event: *const nostr.Event) !void {
-        const id = event.id();
-        const created_at_be = @byteSwap(@as(u64, @bitCast(event.createdAt())));
-
         var created_key: [40]u8 = undefined;
-        @memcpy(created_key[0..8], std.mem.asBytes(&created_at_be));
-        @memcpy(created_key[8..40], id);
+        nostr.IndexKeys.created(event, &created_key);
         txn.delete(self.idx_created, &created_key) catch {};
 
         var pubkey_key: [72]u8 = undefined;
-        @memcpy(pubkey_key[0..32], event.pubkey());
-        @memcpy(pubkey_key[32..40], std.mem.asBytes(&created_at_be));
-        @memcpy(pubkey_key[40..72], id);
+        nostr.IndexKeys.pubkey(event, &pubkey_key);
         txn.delete(self.idx_pubkey, &pubkey_key) catch {};
 
-        var kind_key: [42]u8 = undefined;
-        const kind_u16: u16 = @truncate(@as(u32, @bitCast(event.kind())));
-        const kind_be = @byteSwap(kind_u16);
-        @memcpy(kind_key[0..2], std.mem.asBytes(&kind_be));
-        @memcpy(kind_key[2..10], std.mem.asBytes(&created_at_be));
-        @memcpy(kind_key[10..42], id);
+        var kind_key: [44]u8 = undefined;
+        nostr.IndexKeys.kind(event, &kind_key);
         txn.delete(self.idx_kind, &kind_key) catch {};
-        self.deleteTags(txn, event, id, std.mem.asBytes(&created_at_be));
 
-        if (event.expiration_val) |exp| {
-            const exp_u64: u64 = @intCast(exp);
-            const exp_be = @byteSwap(exp_u64);
-            var exp_key: [40]u8 = undefined;
-            @memcpy(exp_key[0..8], std.mem.asBytes(&exp_be));
-            @memcpy(exp_key[8..40], id);
-            txn.delete(self.idx_expiration, &exp_key) catch {};
+        const ts_be = nostr.IndexKeys.timestampBe(event);
+        self.deleteTags(txn, event, event.id(), &ts_be);
+
+        var exp_key: [40]u8 = undefined;
+        if (nostr.IndexKeys.expiration(event, &exp_key)) |key| {
+            txn.delete(self.idx_expiration, key) catch {};
         }
 
-        txn.delete(self.events, id) catch {};
+        txn.delete(self.events, event.id()) catch {};
     }
 
     fn deleteTags(self: *Store, txn: *Txn, event: *const nostr.Event, id: *const [32]u8, created_at_be: *const [8]u8) void {
