@@ -15,7 +15,7 @@ pub fn write(config: *const Config, w: anytype) !void {
         try w.print(",\"contact\":\"{s}\"", .{contact});
     }
 
-    try w.writeAll(",\"supported_nips\":[1,9,11,40,45,50]");
+    try w.writeAll(",\"supported_nips\":[1,9,11,16,33,40,42,45,50]");
     try w.writeAll(",\"software\":\"https://github.com/privkeyio/wisp\"");
     try w.writeAll(",\"version\":\"0.1.0\"");
 
