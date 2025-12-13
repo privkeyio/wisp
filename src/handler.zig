@@ -213,6 +213,20 @@ pub const Handler = struct {
         self.broadcaster.broadcast(event);
     }
 
+    fn validateSearchFilters(filters: []const nostr.Filter) ?[]const u8 {
+        for (filters) |filter| {
+            if (filter.search()) |search_query| {
+                if (search_query.len > 256) {
+                    return "error: search query too long (max 256 chars)";
+                }
+                if (filter.kinds() == null) {
+                    return "error: search requires kinds filter";
+                }
+            }
+        }
+        return null;
+    }
+
     fn handleReq(self: *Handler, conn: *Connection, msg: *nostr.ClientMsg) void {
         const sub_id = msg.subscriptionId();
 
@@ -239,20 +253,10 @@ pub const Handler = struct {
             return;
         }
 
-        // NIP-50: Validate search filters before registering subscription
-        for (filters) |filter| {
-            if (filter.search()) |search_query| {
-                if (search_query.len > 256) {
-                    self.sendClosed(conn, sub_id, "error: search query too long (max 256 chars)");
-                    conn.allocator().free(filters);
-                    return;
-                }
-                if (filter.kinds() == null) {
-                    self.sendClosed(conn, sub_id, "error: search requires kinds filter");
-                    conn.allocator().free(filters);
-                    return;
-                }
-            }
+        if (validateSearchFilters(filters)) |err_msg| {
+            self.sendClosed(conn, sub_id, err_msg);
+            conn.allocator().free(filters);
+            return;
         }
 
         self.subs.subscribe(conn, sub_id, filters, self.config.max_subscriptions) catch |err| {
@@ -355,20 +359,9 @@ pub const Handler = struct {
             return;
         }
 
-        // NIP-50: Validate search filters
-        for (filters) |filter| {
-            if (filter.search()) |search_query| {
-                // Reject search queries over 256 characters
-                if (search_query.len > 256) {
-                    self.sendClosed(conn, sub_id, "error: search query too long (max 256 chars)");
-                    return;
-                }
-                // Require kinds filter with search to prevent full table scan
-                if (filter.kinds() == null) {
-                    self.sendClosed(conn, sub_id, "error: search requires kinds filter");
-                    return;
-                }
-            }
+        if (validateSearchFilters(filters)) |err_msg| {
+            self.sendClosed(conn, sub_id, err_msg);
+            return;
         }
 
         var total_count: u64 = 0;
