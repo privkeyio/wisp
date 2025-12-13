@@ -14,6 +14,9 @@ pub const Connection = struct {
 
     events_received: u64 = 0,
     events_sent: u64 = 0,
+    event_timestamps: [256]i64 = undefined,
+    event_ts_head: u8 = 0,
+    event_ts_count: u8 = 0,
 
     client_ip: [64]u8 = undefined,
     client_ip_len: u8 = 0,
@@ -130,6 +133,31 @@ pub const Connection = struct {
 
     pub fn touch(self: *Connection) void {
         self.last_activity = std.time.timestamp();
+    }
+
+    pub fn checkEventRateLimit(self: *Connection, max_events_per_minute: u32) bool {
+        if (max_events_per_minute == 0) return true;
+        const now = std.time.timestamp();
+        const window_start = now - 60;
+        var count: u32 = 0;
+        var i: u8 = 0;
+        while (i < self.event_ts_count) : (i += 1) {
+            const idx = self.event_ts_head -% i -% 1;
+            if (self.event_timestamps[idx] >= window_start) {
+                count += 1;
+            }
+        }
+        return count < max_events_per_minute;
+    }
+
+    pub fn recordEvent(self: *Connection) void {
+        const now = std.time.timestamp();
+        self.event_timestamps[self.event_ts_head] = now;
+        self.event_ts_head +%= 1;
+        if (self.event_ts_count < 255) {
+            self.event_ts_count += 1;
+        }
+        self.events_received += 1;
     }
 };
 

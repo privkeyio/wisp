@@ -4,7 +4,7 @@
 
 A lightweight [nostr](https://github.com/nostr-protocol/nostr) relay written in Zig.
 
-* Supports NIPs: 1, 9, 11, 40, 42, 45
+* Supports NIPs: 1, 9, 11, 16, 33, 40, 42, 45
 * LMDB storage (no external database)
 * Spider mode for syncing events from external relays
 * Single binary, minimal dependencies

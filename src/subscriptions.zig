@@ -160,4 +160,21 @@ pub const Subscriptions = struct {
             }
         }
     }
+
+    pub fn getIdleConnections(self: *Subscriptions, idle_seconds: u32) []u64 {
+        self.rwlock.lockShared();
+        defer self.rwlock.unlockShared();
+
+        const now = std.time.timestamp();
+        const threshold = now - @as(i64, @intCast(idle_seconds));
+
+        var result = std.ArrayListUnmanaged(u64){};
+        var conn_iter = self.connections.valueIterator();
+        while (conn_iter.next()) |conn| {
+            if (conn.*.last_activity < threshold) {
+                result.append(self.allocator, conn.*.id) catch continue;
+            }
+        }
+        return result.toOwnedSlice(self.allocator) catch &[_]u64{};
+    }
 };

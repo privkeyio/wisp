@@ -258,3 +258,111 @@ test "normalizeIp" {
     try std.testing.expectEqualStrings("::1", normalizeIp("[::1]:8080"));
     try std.testing.expectEqualStrings("192.168.1.1", normalizeIp("192.168.1.1"));
 }
+
+pub const EventRateLimiter = struct {
+    allocator: std.mem.Allocator,
+    mutex: std.Thread.Mutex,
+    ip_buckets: std.StringHashMap(EventBucket),
+    events_per_minute: u32,
+
+    const WINDOW_SIZE: usize = 60;
+
+    const EventBucket = struct {
+        timestamps: [256]i64,
+        head: u8,
+        count: u8,
+    };
+
+    pub fn init(allocator: std.mem.Allocator, events_per_minute: u32) EventRateLimiter {
+        return .{
+            .allocator = allocator,
+            .mutex = .{},
+            .ip_buckets = std.StringHashMap(EventBucket).init(allocator),
+            .events_per_minute = events_per_minute,
+        };
+    }
+
+    pub fn deinit(self: *EventRateLimiter) void {
+        var iter = self.ip_buckets.keyIterator();
+        while (iter.next()) |key| {
+            self.allocator.free(key.*);
+        }
+        self.ip_buckets.deinit();
+    }
+
+    pub fn checkAndRecord(self: *EventRateLimiter, ip: []const u8) bool {
+        if (self.events_per_minute == 0) return true;
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const now = std.time.timestamp();
+        const window_start = now - WINDOW_SIZE;
+
+        if (self.ip_buckets.getPtr(ip)) |bucket| {
+            var count: u32 = 0;
+            var i: u8 = 0;
+            while (i < bucket.count) : (i += 1) {
+                const idx = bucket.head -% i -% 1;
+                if (bucket.timestamps[idx] >= window_start) {
+                    count += 1;
+                }
+            }
+
+            if (count >= self.events_per_minute) {
+                return false;
+            }
+
+            bucket.timestamps[bucket.head] = now;
+            bucket.head +%= 1;
+            if (bucket.count < 255) {
+                bucket.count += 1;
+            }
+            return true;
+        }
+
+        const ip_copy = self.allocator.dupe(u8, ip) catch return false;
+        var new_bucket = EventBucket{
+            .timestamps = undefined,
+            .head = 1,
+            .count = 1,
+        };
+        new_bucket.timestamps[0] = now;
+        self.ip_buckets.put(ip_copy, new_bucket) catch {
+            self.allocator.free(ip_copy);
+            return false;
+        };
+        return true;
+    }
+
+    pub fn cleanup(self: *EventRateLimiter) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const now = std.time.timestamp();
+        const window_start = now - WINDOW_SIZE;
+        var to_remove = std.ArrayList([]const u8).init(self.allocator);
+        defer to_remove.deinit();
+
+        var iter = self.ip_buckets.iterator();
+        while (iter.next()) |entry| {
+            var has_recent = false;
+            var i: u8 = 0;
+            while (i < entry.value_ptr.count) : (i += 1) {
+                const idx = entry.value_ptr.head -% i -% 1;
+                if (entry.value_ptr.timestamps[idx] >= window_start) {
+                    has_recent = true;
+                    break;
+                }
+            }
+            if (!has_recent) {
+                to_remove.append(entry.key_ptr.*) catch continue;
+            }
+        }
+
+        for (to_remove.items) |key| {
+            _ = self.ip_buckets.remove(key);
+            self.allocator.free(key);
+        }
+    }
+};

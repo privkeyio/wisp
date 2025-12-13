@@ -200,6 +200,11 @@ pub const Cursor = struct {
             .value = @as([*]const u8, @ptrCast(v.mv_data))[0..v.mv_size],
         };
     }
+
+    pub fn del(self: *Cursor) !void {
+        const rc = c.mdb_cursor_del(self.cursor, 0);
+        if (rc != 0) return error.CursorDel;
+    }
 };
 
 pub const CursorOp = enum(c_uint) {

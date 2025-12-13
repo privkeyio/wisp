@@ -20,6 +20,8 @@ pub const Config = struct {
     storage_path: []const u8,
     storage_map_size_mb: u32,
     idle_seconds: u32,
+    events_per_minute: u32,
+    deleted_retention_days: u32,
 
     auth_required: bool,
     auth_to_write: bool,
@@ -60,6 +62,8 @@ pub const Config = struct {
             .storage_path = "./data",
             .storage_map_size_mb = 10240,
             .idle_seconds = 300,
+            .events_per_minute = 120,
+            .deleted_retention_days = 90,
             .auth_required = false,
             .auth_to_write = false,
             .relay_url = "",
@@ -162,6 +166,10 @@ pub const Config = struct {
             if (std.mem.eql(u8, key, "idle_seconds")) {
                 self.idle_seconds = try std.fmt.parseInt(u32, value, 10);
             }
+        } else if (std.mem.eql(u8, section, "rate_limits")) {
+            if (std.mem.eql(u8, key, "events_per_minute")) {
+                self.events_per_minute = try std.fmt.parseInt(u32, value, 10);
+            }
         } else if (std.mem.eql(u8, section, "auth")) {
             if (std.mem.eql(u8, key, "required")) {
                 self.auth_required = std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1");
@@ -224,6 +232,12 @@ pub const Config = struct {
         }
         if (std.posix.getenv("WISP_MAX_CONNECTIONS_PER_IP")) |v| {
             self.max_connections_per_ip = std.fmt.parseInt(u32, v, 10) catch self.max_connections_per_ip;
+        }
+        if (std.posix.getenv("WISP_EVENTS_PER_MINUTE")) |v| {
+            self.events_per_minute = std.fmt.parseInt(u32, v, 10) catch self.events_per_minute;
+        }
+        if (std.posix.getenv("WISP_IDLE_SECONDS")) |v| {
+            self.idle_seconds = std.fmt.parseInt(u32, v, 10) catch self.idle_seconds;
         }
         if (std.posix.getenv("WISP_IP_WHITELIST")) |v| self.ip_whitelist = v;
         if (std.posix.getenv("WISP_IP_BLACKLIST")) |v| self.ip_blacklist = v;
