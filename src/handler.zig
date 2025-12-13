@@ -219,7 +219,8 @@ pub const Handler = struct {
                 if (search_query.len > 256) {
                     return "error: search query too long (max 256 chars)";
                 }
-                if (filter.kinds() == null) {
+                const kinds = filter.kinds();
+                if (kinds == null or kinds.?.len == 0) {
                     return "error: search requires kinds filter";
                 }
             }
