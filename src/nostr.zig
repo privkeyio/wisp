@@ -28,3 +28,4 @@ pub const cleanup = nostr_lib.cleanup;
 pub const Auth = nostr_lib.Auth;
 pub const Replaceable = nostr_lib.Replaceable;
 pub const IndexKeys = nostr_lib.IndexKeys;
+pub const negentropy = nostr_lib.negentropy;

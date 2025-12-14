@@ -38,6 +38,10 @@ pub const Config = struct {
     spider_admin: []const u8,
     spider_pubkeys: []const u8,
 
+    // Negentropy (NIP-77) configuration
+    negentropy_enabled: bool,
+    negentropy_max_sync_events: u32,
+
     _allocated: std.ArrayListUnmanaged([]const u8),
     _allocator: ?std.mem.Allocator,
 
@@ -75,6 +79,8 @@ pub const Config = struct {
             .spider_relays = "",
             .spider_admin = "",
             .spider_pubkeys = "",
+            .negentropy_enabled = true,
+            .negentropy_max_sync_events = 1000000,
             ._allocated = undefined,
             ._allocator = null,
         };
@@ -198,6 +204,12 @@ pub const Config = struct {
             } else if (std.mem.eql(u8, key, "pubkeys")) {
                 self.spider_pubkeys = try self.allocString(value);
             }
+        } else if (std.mem.eql(u8, section, "negentropy")) {
+            if (std.mem.eql(u8, key, "enabled")) {
+                self.negentropy_enabled = std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1");
+            } else if (std.mem.eql(u8, key, "max_sync_events")) {
+                self.negentropy_max_sync_events = try std.fmt.parseInt(u32, value, 10);
+            }
         }
     }
 
@@ -247,6 +259,12 @@ pub const Config = struct {
         if (std.posix.getenv("WISP_SPIDER_RELAYS")) |v| self.spider_relays = v;
         if (std.posix.getenv("WISP_SPIDER_ADMIN")) |v| self.spider_admin = v;
         if (std.posix.getenv("WISP_SPIDER_PUBKEYS")) |v| self.spider_pubkeys = v;
+        if (std.posix.getenv("WISP_NEGENTROPY_ENABLED")) |v| {
+            self.negentropy_enabled = std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "1");
+        }
+        if (std.posix.getenv("WISP_NEGENTROPY_MAX_SYNC_EVENTS")) |v| {
+            self.negentropy_max_sync_events = std.fmt.parseInt(u32, v, 10) catch self.negentropy_max_sync_events;
+        }
     }
 
     pub fn deinit(self: *Config) void {

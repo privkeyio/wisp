@@ -3,7 +3,9 @@ const Config = @import("config.zig").Config;
 const Store = @import("store.zig").Store;
 const Subscriptions = @import("subscriptions.zig").Subscriptions;
 const Broadcaster = @import("broadcaster.zig").Broadcaster;
-const Connection = @import("connection.zig").Connection;
+const connection = @import("connection.zig");
+const Connection = connection.Connection;
+const NegSession = connection.NegSession;
 const nostr = @import("nostr.zig");
 const rate_limiter = @import("rate_limiter.zig");
 
@@ -74,6 +76,9 @@ pub const Handler = struct {
             .close => self.handleClose(conn, &msg),
             .auth => self.handleAuth(conn, &msg),
             .count => self.handleCount(conn, &msg),
+            .neg_open => self.handleNegOpen(conn, &msg),
+            .neg_msg => self.handleNegMsg(conn, &msg),
+            .neg_close => self.handleNegClose(conn, &msg),
         }
     }
 
@@ -401,6 +406,119 @@ pub const Handler = struct {
         };
 
         self.sendOk(conn, id, true, "");
+    }
+
+    fn handleNegOpen(self: *Handler, conn: *Connection, msg: *nostr.ClientMsg) void {
+        const sub_id = msg.subscriptionId();
+
+        if (!self.config.negentropy_enabled) {
+            self.sendNegErr(conn, sub_id, "blocked: negentropy not supported");
+            return;
+        }
+
+        if (sub_id.len == 0 or sub_id.len > 64) {
+            self.sendNegErr(conn, sub_id, "error: invalid subscription ID");
+            return;
+        }
+
+        var filter = msg.getNegFilter(conn.allocator()) catch {
+            self.sendNegErr(conn, sub_id, "error: invalid filter");
+            return;
+        } orelse {
+            self.sendNegErr(conn, sub_id, "error: missing filter");
+            return;
+        };
+        defer filter.deinit();
+
+        var payload_buf: [65536]u8 = undefined;
+        const payload = msg.getNegPayload(&payload_buf) catch {
+            self.sendNegErr(conn, sub_id, "error: invalid negentropy payload");
+            return;
+        };
+
+        const session = conn.addNegSession(sub_id) catch {
+            self.sendNegErr(conn, sub_id, "error: failed to create session");
+            return;
+        };
+
+        var iter = self.store.query(&[_]nostr.Filter{filter}, self.config.negentropy_max_sync_events) catch {
+            conn.removeNegSession(sub_id);
+            self.sendNegErr(conn, sub_id, "error: query failed");
+            return;
+        };
+        defer iter.deinit();
+
+        var count: u32 = 0;
+        while (iter.next() catch null) |json| {
+            var event = nostr.Event.parse(json) catch continue;
+            defer event.deinit();
+            session.storage.insert(@intCast(event.createdAt()), event.id()) catch continue;
+            count += 1;
+            if (count >= self.config.negentropy_max_sync_events) {
+                conn.removeNegSession(sub_id);
+                self.sendNegErr(conn, sub_id, "blocked: too many events");
+                return;
+            }
+        }
+
+        session.storage.seal();
+        session.sealed = true;
+
+        self.reconcileAndSend(conn, sub_id, session, payload);
+    }
+
+    fn handleNegMsg(self: *Handler, conn: *Connection, msg: *nostr.ClientMsg) void {
+        const sub_id = msg.subscriptionId();
+
+        if (!self.config.negentropy_enabled) {
+            self.sendNegErr(conn, sub_id, "blocked: negentropy not supported");
+            return;
+        }
+
+        const session = conn.getNegSession(sub_id) orelse {
+            self.sendNegErr(conn, sub_id, "closed: unknown subscription");
+            return;
+        };
+
+        if (!session.sealed) {
+            self.sendNegErr(conn, sub_id, "error: session not ready");
+            return;
+        }
+
+        var payload_buf: [65536]u8 = undefined;
+        const payload = msg.getNegPayload(&payload_buf) catch {
+            self.sendNegErr(conn, sub_id, "error: invalid negentropy payload");
+            return;
+        };
+
+        self.reconcileAndSend(conn, sub_id, session, payload);
+    }
+
+    fn handleNegClose(_: *Handler, conn: *Connection, msg: *nostr.ClientMsg) void {
+        conn.removeNegSession(msg.subscriptionId());
+    }
+
+    fn reconcileAndSend(_: *Handler, conn: *Connection, sub_id: []const u8, session: *NegSession, query: []const u8) void {
+        var out_buf: [65536]u8 = undefined;
+        var neg = nostr.negentropy.Negentropy.init(session.storage.storage(), 0);
+
+        var result = neg.reconcile(query, &out_buf, conn.allocator()) catch {
+            var err_buf: [512]u8 = undefined;
+            const err_msg = nostr.RelayMsg.negErr(sub_id, "error: reconciliation failed", &err_buf) catch return;
+            conn.sendDirect(err_msg);
+            return;
+        };
+        defer result.deinit();
+
+        var msg_buf: [131072]u8 = undefined;
+        const neg_msg = nostr.RelayMsg.negMsg(sub_id, result.output, &msg_buf) catch return;
+        conn.sendDirect(neg_msg);
+    }
+
+    fn sendNegErr(_: *Handler, conn: *Connection, sub_id: []const u8, reason: []const u8) void {
+        var buf: [512]u8 = undefined;
+        const msg = nostr.RelayMsg.negErr(sub_id, reason, &buf) catch return;
+        conn.sendDirect(msg);
     }
 
     fn sendOk(_: *Handler, conn: *Connection, event_id: *const [32]u8, success: bool, message: []const u8) void {

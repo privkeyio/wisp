@@ -54,3 +54,7 @@ idle_seconds = 300
 # relays = "wss://relay.damus.io,wss://nos.lol"
 # admin = ""  # hex pubkey - will fetch their kind 3 contact list
 # pubkeys = ""  # comma-separated hex pubkeys to follow
+
+[negentropy]
+# enabled = true
+# max_sync_events = 1000000
