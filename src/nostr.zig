@@ -22,6 +22,7 @@ pub const RelayMsg = nostr_lib.RelayMsg;
 pub const Keypair = nostr_lib.Keypair;
 pub const EventBuilder = nostr_lib.EventBuilder;
 pub const crypto = nostr_lib.crypto;
+pub const bech32 = nostr_lib.bech32;
 pub const init = nostr_lib.init;
 pub const cleanup = nostr_lib.cleanup;
 
