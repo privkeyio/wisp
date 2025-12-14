@@ -50,7 +50,7 @@ jobs:
 
           ../nostr-bench/zig-out/bin/nostr-bench \
             -r ws://localhost:7777 \
-            -e 10000 -w 8 --rate 1000 \
+            -e 2000 -w 4 --rate 500 --only-peak \
             --report-file benchmark/results.json || true
 
           kill $WISP_PID 2>/dev/null || true
