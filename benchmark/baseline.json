@@ -1,0 +1,28 @@
+{
+  "relay_name": "wisp",
+  "workers": 8,
+  "num_events": 10000,
+  "results": [
+    {
+      "test": "Peak Throughput",
+      "events_per_second": 6474.19,
+      "avg_latency_ms": 0.878,
+      "p99_latency_ms": 3.234,
+      "success_rate": 100.0
+    },
+    {
+      "test": "Burst Pattern",
+      "events_per_second": 89.70,
+      "avg_latency_ms": 0.582,
+      "p99_latency_ms": 5.186,
+      "success_rate": 100.0
+    },
+    {
+      "test": "Query Performance",
+      "events_per_second": 246.27,
+      "avg_latency_ms": 2.995,
+      "p99_latency_ms": 6.383,
+      "success_rate": 100.0
+    }
+  ]
+}

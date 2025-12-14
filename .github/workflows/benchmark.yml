@@ -1,0 +1,71 @@
+name: Benchmark
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'build.zig'
+      - 'build.zig.zon'
+      - 'benchmark/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'build.zig'
+      - 'build.zig.zon'
+      - 'benchmark/**'
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft != true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone dependencies
+        run: |
+          git clone https://github.com/privkeyio/libnostr-z ../libnostr-z
+          git clone https://github.com/VnUgE/noscrypt ../noscrypt
+          git clone https://github.com/privkeyio/nostr-bench ../nostr-bench
+          cp ../libnostr-z/deps/noscrypt-build.zig ../noscrypt/build.zig
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y liblmdb-dev libsecp256k1-dev libssl-dev
+
+      - name: Setup Zig
+        run: |
+          curl -L https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz | tar -xJ
+          echo "$PWD/zig-x86_64-linux-0.15.2" >> $GITHUB_PATH
+
+      - name: Build wisp
+        run: zig build -Doptimize=ReleaseFast
+
+      - name: Build nostr-bench
+        run: cd ../nostr-bench && zig build -Doptimize=ReleaseFast
+
+      - name: Run benchmark
+        run: |
+          mkdir -p /tmp/wisp-data
+          WISP_STORAGE_PATH=/tmp/wisp-data/wisp.lmdb ./zig-out/bin/wisp &
+          WISP_PID=$!
+          sleep 3
+
+          ../nostr-bench/zig-out/bin/nostr-bench \
+            -r ws://localhost:7777 \
+            -e 10000 -w 8 --rate 1000 \
+            --report-file benchmark/results.json
+
+          kill $WISP_PID 2>/dev/null || true
+
+      - name: Compare results
+        run: |
+          python3 benchmark/compare.py benchmark/baseline.json benchmark/results.json
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-results
+          path: benchmark/results.json
