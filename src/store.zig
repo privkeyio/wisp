@@ -526,10 +526,9 @@ pub const QueryIterator = struct {
                 if (f.authors() == null and f.ids() == null and !f.hasTagFilters()) {
                     if (kinds.len == 1) {
                         iter.index_type = .kind;
-                        const kind_u16: u16 = @truncate(@as(u32, @bitCast(kinds[0])));
-                        const kind_be = @byteSwap(kind_u16);
-                        @memcpy(iter.prefix[0..2], std.mem.asBytes(&kind_be));
-                        iter.prefix_len = 2;
+                        const kind_be = @byteSwap(@as(u32, @bitCast(kinds[0])));
+                        @memcpy(iter.prefix[0..4], std.mem.asBytes(&kind_be));
+                        iter.prefix_len = 4;
                         iter.skip_filter = true;
                         return iter;
                     }
@@ -623,8 +622,8 @@ pub const QueryIterator = struct {
     fn processEntry(self: *QueryIterator, entry: Entry) !?[]const u8 {
         const event_id = switch (self.index_type) {
             .kind => blk: {
-                if (entry.key.len < 42) return null;
-                break :blk entry.key[10..42];
+                if (entry.key.len < 44) return null;
+                break :blk entry.key[12..44];
             },
             .pubkey => blk: {
                 if (entry.key.len < 72) return null;

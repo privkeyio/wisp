@@ -83,9 +83,10 @@ pub const Handler = struct {
     }
 
     fn validateMessageStructure(message: []const u8) bool {
-        if (message.len < 5) return false;
-        if (message[0] != '[') return false;
-        if (message[message.len - 1] != ']') return false;
+        const trimmed = std.mem.trimRight(u8, message, " \t\r\n");
+        if (trimmed.len < 5) return false;
+        if (trimmed[0] != '[') return false;
+        if (trimmed[trimmed.len - 1] != ']') return false;
 
         for (message) |c| {
             if (c < 0x20 and c != '\t' and c != '\n' and c != '\r') {
