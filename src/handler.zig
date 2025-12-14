@@ -213,6 +213,21 @@ pub const Handler = struct {
         self.broadcaster.broadcast(event);
     }
 
+    fn validateSearchFilters(filters: []const nostr.Filter) ?[]const u8 {
+        for (filters) |filter| {
+            if (filter.search()) |search_query| {
+                if (search_query.len > 256) {
+                    return "error: search query too long (max 256 chars)";
+                }
+                const kinds = filter.kinds();
+                if (kinds == null or kinds.?.len == 0) {
+                    return "error: search requires kinds filter";
+                }
+            }
+        }
+        return null;
+    }
+
     fn handleReq(self: *Handler, conn: *Connection, msg: *nostr.ClientMsg) void {
         const sub_id = msg.subscriptionId();
 
@@ -235,6 +250,12 @@ pub const Handler = struct {
 
         if (filters.len > self.config.max_filters) {
             self.sendClosed(conn, sub_id, "error: too many filters");
+            conn.allocator().free(filters);
+            return;
+        }
+
+        if (validateSearchFilters(filters)) |err_msg| {
+            self.sendClosed(conn, sub_id, err_msg);
             conn.allocator().free(filters);
             return;
         }
@@ -336,6 +357,11 @@ pub const Handler = struct {
 
         if (filters.len > self.config.max_filters) {
             self.sendClosed(conn, sub_id, "error: too many filters");
+            return;
+        }
+
+        if (validateSearchFilters(filters)) |err_msg| {
+            self.sendClosed(conn, sub_id, err_msg);
             return;
         }
 
