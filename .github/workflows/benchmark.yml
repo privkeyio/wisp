@@ -36,10 +36,10 @@ jobs:
           echo "$PWD/zig-x86_64-linux-0.15.2" >> $GITHUB_PATH
 
       - name: Build wisp
-        run: zig build
+        run: zig build -Doptimize=ReleaseSafe
 
       - name: Build nostr-bench
-        run: cd ../nostr-bench && zig build
+        run: cd ../nostr-bench && zig build -Doptimize=ReleaseSafe
 
       - name: Run benchmark
         run: |
