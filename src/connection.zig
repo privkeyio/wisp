@@ -4,10 +4,24 @@ const httpz = @import("httpz");
 const websocket = httpz.websocket;
 const WriteQueue = @import("write_queue.zig").WriteQueue;
 
+pub const NegSession = struct {
+    storage: nostr.negentropy.VectorStorage,
+    sealed: bool = false,
+
+    pub fn init(allocator: std.mem.Allocator) NegSession {
+        return .{ .storage = nostr.negentropy.VectorStorage.init(allocator) };
+    }
+
+    pub fn deinit(self: *NegSession) void {
+        self.storage.deinit();
+    }
+};
+
 pub const Connection = struct {
     id: u64,
     arena: std.heap.ArenaAllocator,
     subscriptions: std.StringHashMap(Subscription),
+    neg_sessions: std.StringHashMap(NegSession),
     created_at: i64,
     last_activity: i64,
     ws_conn: ?*websocket.Conn = null,
@@ -33,6 +47,7 @@ pub const Connection = struct {
         self.backing_allocator = backing_allocator;
         self.arena = std.heap.ArenaAllocator.init(backing_allocator);
         self.subscriptions = std.StringHashMap(Subscription).init(self.arena.allocator());
+        self.neg_sessions = std.StringHashMap(NegSession).init(self.arena.allocator());
         self.created_at = now;
         self.last_activity = now;
         self.events_received = 0;
@@ -87,6 +102,10 @@ pub const Connection = struct {
     }
 
     pub fn deinit(self: *Connection) void {
+        var neg_iter = self.neg_sessions.valueIterator();
+        while (neg_iter.next()) |session| {
+            session.deinit();
+        }
         self.arena.deinit();
     }
 
@@ -118,6 +137,28 @@ pub const Connection = struct {
 
     pub fn removeSubscription(self: *Connection, sub_id: []const u8) void {
         _ = self.subscriptions.remove(sub_id);
+    }
+
+    pub fn addNegSession(self: *Connection, sub_id: []const u8) !*NegSession {
+        const alloc = self.allocator();
+        if (self.neg_sessions.getPtr(sub_id)) |existing| {
+            existing.deinit();
+            _ = self.neg_sessions.remove(sub_id);
+        }
+        const sub_id_copy = try alloc.dupe(u8, sub_id);
+        try self.neg_sessions.put(sub_id_copy, NegSession.init(self.backing_allocator));
+        return self.neg_sessions.getPtr(sub_id_copy).?;
+    }
+
+    pub fn getNegSession(self: *Connection, sub_id: []const u8) ?*NegSession {
+        return self.neg_sessions.getPtr(sub_id);
+    }
+
+    pub fn removeNegSession(self: *Connection, sub_id: []const u8) void {
+        if (self.neg_sessions.getPtr(sub_id)) |session| {
+            session.deinit();
+        }
+        _ = self.neg_sessions.remove(sub_id);
     }
 
     pub fn matchesEvent(self: *Connection, event: *const nostr.Event) ?[]const u8 {
