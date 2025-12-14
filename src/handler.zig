@@ -145,16 +145,16 @@ pub const Handler = struct {
             return;
         };
 
+        if (event.kind() == 22242) {
+            self.sendOk(conn, id, false, "invalid: AUTH events cannot be published");
+            return;
+        }
+
         if (nostr.isProtected(&event)) {
             if (!conn.isPubkeyAuthenticated(event.pubkey())) {
                 self.sendOk(conn, id, false, "auth-required: this event may only be published by its author");
                 return;
             }
-        }
-
-        if (event.kind() == 22242) {
-            self.sendOk(conn, id, false, "invalid: AUTH events cannot be published");
-            return;
         }
 
         if (nostr.isExpired(&event)) {
