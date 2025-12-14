@@ -36,29 +36,17 @@ jobs:
           echo "$PWD/zig-x86_64-linux-0.15.2" >> $GITHUB_PATH
 
       - name: Build wisp
-        run: zig build -Doptimize=ReleaseFast
+        run: zig build
 
       - name: Build nostr-bench
-        run: cd ../nostr-bench && zig build -Doptimize=ReleaseFast
+        run: cd ../nostr-bench && zig build
 
       - name: Run benchmark
         run: |
           mkdir -p /tmp/wisp-data
           WISP_STORAGE_PATH=/tmp/wisp-data/wisp.lmdb ./zig-out/bin/wisp &
           WISP_PID=$!
-
-          for i in {1..10}; do
-            if nc -z localhost 7777 2>/dev/null; then
-              break
-            fi
-            sleep 1
-          done
-
-          if ! nc -z localhost 7777 2>/dev/null; then
-            echo "ERROR: Wisp failed to start"
-            kill $WISP_PID 2>/dev/null || true
-            exit 1
-          fi
+          sleep 5
 
           ../nostr-bench/zig-out/bin/nostr-bench \
             -r ws://localhost:7777 \
