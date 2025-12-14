@@ -46,25 +46,37 @@ jobs:
           mkdir -p /tmp/wisp-data
           WISP_STORAGE_PATH=/tmp/wisp-data/wisp.lmdb ./zig-out/bin/wisp &
           WISP_PID=$!
-          sleep 5
+
+          for i in {1..30}; do
+            if nc -z 127.0.0.1 7777 2>/dev/null; then
+              echo "Wisp ready after ${i}s"
+              break
+            fi
+            sleep 1
+          done
 
           ../nostr-bench/zig-out/bin/nostr-bench \
-            -r ws://localhost:7777 \
+            -r ws://127.0.0.1:7777 \
             -e 2000 -w 4 --rate 500 --only-peak \
-            --report-file benchmark/peak.json || true
+            --report-file benchmark/peak.json
 
           ../nostr-bench/zig-out/bin/nostr-bench \
-            -r ws://localhost:7777 \
+            -r ws://127.0.0.1:7777 \
             -e 2000 -w 4 --rate 500 --only-query \
-            --report-file benchmark/query.json || true
+            --report-file benchmark/query.json
 
-          python3 -c "
-import json
-peak = json.load(open('benchmark/peak.json'))
-query = json.load(open('benchmark/query.json'))
-peak['results'].extend(query['results'])
-json.dump(peak, open('benchmark/results.json', 'w'), indent=2)
-"
+          python3 <<'EOF'
+          import json
+          import sys
+          try:
+              p = json.load(open('benchmark/peak.json'))
+              q = json.load(open('benchmark/query.json'))
+              p['results'].extend(q['results'])
+              json.dump(p, open('benchmark/results.json', 'w'), indent=2)
+          except Exception as e:
+              print(f"Error merging results: {e}")
+              sys.exit(1)
+          EOF
 
           kill $WISP_PID 2>/dev/null || true
 
