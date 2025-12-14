@@ -13,7 +13,6 @@ const BATCH_CREATION_DELAY_MS: u64 = 500;
 const RECONNECT_DELAY_MS: u64 = 10_000;
 const MAX_RECONNECT_DELAY_MS: u64 = 3600_000;
 const BLACKOUT_MS: u64 = 24 * 3600_000;
-const REFRESH_INTERVAL_MS: u64 = 300_000;
 const QUICK_DISCONNECT_MS: i64 = 120_000;
 const RATE_LIMIT_BACKOFF_MS: u64 = 60_000;
 const MAX_RATE_LIMIT_BACKOFF_MS: u64 = 1800_000;
@@ -244,8 +243,9 @@ pub const Spider = struct {
     }
 
     fn refreshLoop(self: *Spider) void {
+        const interval_ms: u64 = @as(u64, self.config.spider_sync_interval) * 1000;
         while (self.running.load(.acquire)) {
-            std.Thread.sleep(REFRESH_INTERVAL_MS * std.time.ns_per_ms);
+            std.Thread.sleep(interval_ms * std.time.ns_per_ms);
 
             if (!self.running.load(.acquire)) break;
 
