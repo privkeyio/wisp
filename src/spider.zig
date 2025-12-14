@@ -243,7 +243,8 @@ pub const Spider = struct {
     }
 
     fn refreshLoop(self: *Spider) void {
-        const interval_ms: u64 = @as(u64, self.config.spider_sync_interval) * 1000;
+        const interval_s: u64 = @max(1, @as(u64, self.config.spider_sync_interval));
+        const interval_ms: u64 = interval_s * 1000;
         while (self.running.load(.acquire)) {
             std.Thread.sleep(interval_ms * std.time.ns_per_ms);
 
@@ -546,9 +547,13 @@ pub const Spider = struct {
 
                     for (result.have_ids.items) |id| have_ids.append(self.allocator, id) catch {};
                     for (result.need_ids.items) |id| need_ids.append(self.allocator, id) catch {};
-                    result.deinit();
 
-                    if (result.output.len == 0 or (result.have_ids.items.len == 0 and result.need_ids.items.len == 0 and rounds > 1)) {
+                    const output_len = result.output.len;
+                    const have_count = result.have_ids.items.len;
+                    const need_count = result.need_ids.items.len;
+
+                    if (output_len == 0 or (have_count == 0 and need_count == 0 and rounds > 1)) {
+                        result.deinit();
                         log.info("{s}: Negentropy sync complete after {d} rounds", .{ relay_url, rounds });
                         break;
                     }
@@ -556,9 +561,19 @@ pub const Spider = struct {
                     var neg_msg_buf: [131072]u8 = undefined;
                     var fbs_msg = std.io.fixedBufferStream(&neg_msg_buf);
                     const msg_writer = fbs_msg.writer();
-                    msg_writer.writeAll("[\"NEG-MSG\",\"neg-sync\",\"") catch continue;
-                    for (result.output) |b| msg_writer.print("{x:0>2}", .{b}) catch continue;
-                    msg_writer.writeAll("\"]") catch continue;
+                    msg_writer.writeAll("[\"NEG-MSG\",\"neg-sync\",\"") catch {
+                        result.deinit();
+                        continue;
+                    };
+                    for (result.output) |b| msg_writer.print("{x:0>2}", .{b}) catch {
+                        result.deinit();
+                        continue;
+                    };
+                    msg_writer.writeAll("\"]") catch {
+                        result.deinit();
+                        continue;
+                    };
+                    result.deinit();
 
                     client.writeText(@constCast(fbs_msg.getWritten())) catch break;
                 }
@@ -589,16 +604,24 @@ pub const Spider = struct {
             var fbs = std.io.fixedBufferStream(&msg_buf);
             const writer = fbs.writer();
 
-            writer.writeAll("[\"REQ\",\"fetch\",{\"ids\":[") catch break;
-            for (batch, 0..) |id, j| {
-                if (j > 0) writer.writeAll(",") catch break;
-                writer.writeAll("\"") catch break;
-                for (id) |b| writer.print("{x:0>2}", .{b}) catch break;
-                writer.writeAll("\"") catch break;
-            }
-            writer.writeAll("]}]") catch break;
+            const req_msg = build_req: {
+                writer.writeAll("[\"REQ\",\"fetch\",{\"ids\":[") catch break :build_req null;
+                for (batch, 0..) |id, j| {
+                    if (j > 0) writer.writeAll(",") catch break :build_req null;
+                    writer.writeAll("\"") catch break :build_req null;
+                    for (id) |b| writer.print("{x:0>2}", .{b}) catch break :build_req null;
+                    writer.writeAll("\"") catch break :build_req null;
+                }
+                writer.writeAll("]}]") catch break :build_req null;
+                break :build_req fbs.getWritten();
+            };
 
-            client.writeText(@constCast(fbs.getWritten())) catch break;
+            if (req_msg) |msg| {
+                client.writeText(@constCast(msg)) catch break;
+            } else {
+                i = end;
+                continue;
+            }
 
             const fetch_start = std.time.milliTimestamp();
             while (std.time.milliTimestamp() - fetch_start < 30_000) {

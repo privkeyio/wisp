@@ -34,12 +34,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Clone dependencies
-        run: |
-          git clone https://github.com/privkeyio/libnostr-z ../libnostr-z
-          git clone https://github.com/VnUgE/noscrypt ../noscrypt
-          cp ../libnostr-z/deps/noscrypt-build.zig ../noscrypt/build.zig
-
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y liblmdb-dev libsecp256k1-dev libssl-dev
@@ -60,7 +54,7 @@ jobs:
           version: 0.15.2
 
       - name: Build
-        run: zig build -Doptimize=ReleaseFast
+        run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
 
       - name: Package (Unix)
         if: runner.os != 'Windows'

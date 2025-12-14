@@ -127,9 +127,9 @@ pub fn main() !void {
 
     config.loadEnv();
 
-    if (spider_admin_arg) |admin| {
+    if (spider_admin_arg) |*admin| {
         config.spider_enabled = true;
-        config.spider_admin = &admin;
+        config.spider_admin = admin;
         if (config.spider_relays.len == 0) {
             config.spider_relays = "wss://relay.damus.io,wss://nos.lol,wss://relay.nostr.band";
         }

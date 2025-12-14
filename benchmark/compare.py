@@ -9,13 +9,30 @@ def main():
         print(f"Usage: {sys.argv[0]} <baseline.json> <results.json>")
         sys.exit(1)
 
-    with open(sys.argv[1]) as f:
-        baseline = json.load(f)
-    with open(sys.argv[2]) as f:
-        results = json.load(f)
+    try:
+        with open(sys.argv[1]) as f:
+            baseline = json.load(f)
+        with open(sys.argv[2]) as f:
+            results = json.load(f)
+    except FileNotFoundError as e:
+        print(f"Error: File not found - {e.filename}")
+        sys.exit(1)
+    except json.JSONDecodeError as e:
+        print(f"Error: Invalid JSON - {e}")
+        sys.exit(1)
+
+    if "results" not in baseline or "results" not in results:
+        print("Error: JSON files must contain 'results' key")
+        sys.exit(1)
 
     baseline_map = {r["test"]: r for r in baseline["results"]}
     results_map = {r["test"]: r for r in results["results"]}
+
+    all_zero = all(r.get("events_per_second", 0) == 0 for r in results["results"])
+    if all_zero:
+        print("ERROR: Benchmark failed - all tests returned 0 events/sec")
+        print("This indicates a benchmark tool failure, not a regression")
+        sys.exit(1)
 
     regressions = []
     print("\n=== Benchmark Results ===\n")
@@ -27,6 +44,9 @@ def main():
         curr = results_map[test_name]
         base_eps = base["events_per_second"]
         curr_eps = curr["events_per_second"]
+        if base_eps == 0:
+            print(f"Warning: Baseline events_per_second is 0 for {test_name}, skipping")
+            continue
         change = (curr_eps - base_eps) / base_eps
 
         status = "OK" if change >= -REGRESSION_THRESHOLD else "REGRESSION"

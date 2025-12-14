@@ -24,15 +24,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Clone dependencies
-        run: |
-          git clone https://github.com/privkeyio/libnostr-z ../libnostr-z
-          git clone https://github.com/VnUgE/noscrypt ../noscrypt
-          git clone https://github.com/privkeyio/nostr-bench ../nostr-bench
-          cp ../libnostr-z/deps/noscrypt-build.zig ../noscrypt/build.zig
+      - name: Clone nostr-bench
+        run: git clone --depth 1 https://github.com/privkeyio/nostr-bench ../nostr-bench
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y liblmdb-dev libsecp256k1-dev libssl-dev
+        run: sudo apt-get update && sudo apt-get install -y liblmdb-dev libsecp256k1-dev libssl-dev netcat-openbsd
 
       - name: Setup Zig
         run: |
@@ -50,12 +46,24 @@ jobs:
           mkdir -p /tmp/wisp-data
           WISP_STORAGE_PATH=/tmp/wisp-data/wisp.lmdb ./zig-out/bin/wisp &
           WISP_PID=$!
-          sleep 3
+
+          for i in {1..10}; do
+            if nc -z localhost 7777 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+
+          if ! nc -z localhost 7777 2>/dev/null; then
+            echo "ERROR: Wisp failed to start"
+            kill $WISP_PID 2>/dev/null || true
+            exit 1
+          fi
 
           ../nostr-bench/zig-out/bin/nostr-bench \
             -r ws://localhost:7777 \
             -e 10000 -w 8 --rate 1000 \
-            --report-file benchmark/results.json
+            --report-file benchmark/results.json || true
 
           kill $WISP_PID 2>/dev/null || true
 
