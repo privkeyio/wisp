@@ -51,7 +51,20 @@ jobs:
           ../nostr-bench/zig-out/bin/nostr-bench \
             -r ws://localhost:7777 \
             -e 2000 -w 4 --rate 500 --only-peak \
-            --report-file benchmark/results.json || true
+            --report-file benchmark/peak.json || true
+
+          ../nostr-bench/zig-out/bin/nostr-bench \
+            -r ws://localhost:7777 \
+            -e 2000 -w 4 --rate 500 --only-query \
+            --report-file benchmark/query.json || true
+
+          python3 -c "
+import json
+peak = json.load(open('benchmark/peak.json'))
+query = json.load(open('benchmark/query.json'))
+peak['results'].extend(query['results'])
+json.dump(peak, open('benchmark/results.json', 'w'), indent=2)
+"
 
           kill $WISP_PID 2>/dev/null || true
 

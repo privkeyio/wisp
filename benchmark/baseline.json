@@ -9,6 +9,13 @@
       "avg_latency_ms": 5.0,
       "p99_latency_ms": 20.0,
       "success_rate": 5.0
+    },
+    {
+      "test": "Query Performance",
+      "events_per_second": 80.0,
+      "avg_latency_ms": 10.0,
+      "p99_latency_ms": 30.0,
+      "success_rate": 90.0
     }
   ]
 }
