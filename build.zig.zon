@@ -13,7 +13,7 @@
         },
         .nostr = .{
             .url = "https://github.com/privkeyio/libnostr-z/archive/refs/heads/nip-70.tar.gz",
-            .hash = "nostr-0.1.3-JY6OcFb7AQC0EXAiFMCRId9DKSTW0Knx5N-9TqyyxSBG",
+            .hash = "nostr-0.1.3-JY6OcPT9AQAhaTQOsFhE5LWjqNk_eHVRo9IPgHziXQ5Y",
         },
     },
     .paths = .{
