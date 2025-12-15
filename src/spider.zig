@@ -528,7 +528,7 @@ pub const Spider = struct {
                 if (msg.data.len == 0) continue;
 
                 if (std.mem.startsWith(u8, msg.data, "[\"NEG-ERR\"")) {
-                    log.warn("{s}: Negentropy not supported, falling back to REQ", .{relay_url});
+                    log.warn("{s}: Negentropy not supported, skipping historical sync", .{relay_url});
                     var close_buf: [64]u8 = undefined;
                     const close_msg = std.fmt.bufPrint(&close_buf, "[\"NEG-CLOSE\",\"neg-sync\"]", .{}) catch break;
                     client.writeText(@constCast(close_msg)) catch {};
@@ -548,11 +548,7 @@ pub const Spider = struct {
                     for (result.have_ids.items) |id| have_ids.append(self.allocator, id) catch {};
                     for (result.need_ids.items) |id| need_ids.append(self.allocator, id) catch {};
 
-                    const output_len = result.output.len;
-                    const have_count = result.have_ids.items.len;
-                    const need_count = result.need_ids.items.len;
-
-                    if (output_len == 0 or (have_count == 0 and need_count == 0 and rounds > 1)) {
+                    if (result.output.len == 0) {
                         result.deinit();
                         log.info("{s}: Negentropy sync complete after {d} rounds", .{ relay_url, rounds });
                         break;
