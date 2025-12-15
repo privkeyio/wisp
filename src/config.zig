@@ -43,6 +43,8 @@ pub const Config = struct {
     negentropy_enabled: bool,
     negentropy_max_sync_events: u32,
 
+    min_pow_difficulty: u8,
+
     _allocated: std.ArrayListUnmanaged([]const u8),
     _allocator: ?std.mem.Allocator,
 
@@ -83,6 +85,7 @@ pub const Config = struct {
             .spider_sync_interval = 300,
             .negentropy_enabled = true,
             .negentropy_max_sync_events = 1000000,
+            .min_pow_difficulty = 0,
             ._allocated = undefined,
             ._allocator = null,
         };
@@ -163,6 +166,8 @@ pub const Config = struct {
                 self.max_event_age = try std.fmt.parseInt(i64, value, 10);
             } else if (std.mem.eql(u8, key, "max_future_seconds")) {
                 self.max_future_seconds = try std.fmt.parseInt(i64, value, 10);
+            } else if (std.mem.eql(u8, key, "min_pow_difficulty")) {
+                self.min_pow_difficulty = try std.fmt.parseInt(u8, value, 10);
             }
         } else if (std.mem.eql(u8, section, "storage")) {
             if (std.mem.eql(u8, key, "path")) {
@@ -271,6 +276,9 @@ pub const Config = struct {
         }
         if (std.posix.getenv("WISP_NEGENTROPY_MAX_SYNC_EVENTS")) |v| {
             self.negentropy_max_sync_events = std.fmt.parseInt(u32, v, 10) catch self.negentropy_max_sync_events;
+        }
+        if (std.posix.getenv("WISP_MIN_POW_DIFFICULTY")) |v| {
+            self.min_pow_difficulty = std.fmt.parseInt(u8, v, 10) catch self.min_pow_difficulty;
         }
     }
 

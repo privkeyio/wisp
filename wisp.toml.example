@@ -33,6 +33,7 @@ events_per_minute = 60
 # max_event_age = 94608000
 # max_future_seconds = 900
 # deleted_retention_days = 90
+# min_pow_difficulty = 0
 
 [timeouts]
 idle_seconds = 300
