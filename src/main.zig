@@ -74,6 +74,7 @@ pub fn main() !void {
     var config_path: ?[]const u8 = null;
     var db_path: []const u8 = "./data";
     var spider_admin_arg: ?[]const u8 = null;
+    defer if (spider_admin_arg) |admin| allocator.free(admin);
     var cmd_set = false;
 
     var i: usize = 1;
