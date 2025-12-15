@@ -152,6 +152,7 @@ pub const Handler = struct {
 
         if (nostr.isProtected(&event)) {
             if (!conn.isPubkeyAuthenticated(event.pubkey())) {
+                self.sendAuthChallenge(conn);
                 self.sendOk(conn, id, false, "auth-required: this event may only be published by its author");
                 return;
             }
@@ -583,5 +584,13 @@ pub const Handler = struct {
         var buf: [512]u8 = undefined;
         const msg = nostr.RelayMsg.notice(message, &buf) catch return;
         conn.sendDirect(msg);
+    }
+
+    fn sendAuthChallenge(_: *Handler, conn: *Connection) void {
+        if (conn.challenge_sent) return;
+        var buf: [256]u8 = undefined;
+        const auth_msg = nostr.RelayMsg.auth(&conn.auth_challenge, &buf) catch return;
+        conn.sendDirect(auth_msg);
+        conn.challenge_sent = true;
     }
 };
