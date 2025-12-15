@@ -10,6 +10,7 @@ pub const KindType = nostr_lib.KindType;
 pub const kindType = nostr_lib.kindType;
 pub const isExpired = nostr_lib.isExpired;
 pub const isDeletion = nostr_lib.isDeletion;
+pub const isProtected = nostr_lib.isProtected;
 pub const getDeletionIds = nostr_lib.getDeletionIds;
 pub const FilterTagEntry = nostr_lib.FilterTagEntry;
 pub const Filter = nostr_lib.Filter;
