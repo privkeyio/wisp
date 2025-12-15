@@ -27,6 +27,119 @@ fn isKindOnlyQuery(f: *const nostr.Filter) bool {
     return true;
 }
 
+fn countLeadingZeroBits(id: *const [32]u8) u8 {
+    var count: u8 = 0;
+    for (id) |byte| {
+        if (byte == 0) {
+            count += 8;
+        } else {
+            count += @clz(byte);
+            break;
+        }
+    }
+    return count;
+}
+
+fn getCommittedDifficulty(raw_json: []const u8) ?u8 {
+    const tags_start = std.mem.indexOf(u8, raw_json, "\"tags\"") orelse return null;
+    var pos = tags_start + 6;
+
+    while (pos < raw_json.len and raw_json[pos] != '[') : (pos += 1) {}
+    if (pos >= raw_json.len) return null;
+    pos += 1;
+
+    var depth: i32 = 0;
+    var in_string = false;
+    var escape = false;
+    var tag_start: ?usize = null;
+
+    while (pos < raw_json.len) {
+        const c = raw_json[pos];
+
+        if (escape) {
+            escape = false;
+            pos += 1;
+            continue;
+        }
+        if (c == '\\' and in_string) {
+            escape = true;
+            pos += 1;
+            continue;
+        }
+        if (c == '"') {
+            in_string = !in_string;
+            pos += 1;
+            continue;
+        }
+
+        if (!in_string) {
+            if (c == '[') {
+                if (depth == 0) {
+                    tag_start = pos;
+                }
+                depth += 1;
+            } else if (c == ']') {
+                depth -= 1;
+                if (depth == 0 and tag_start != null) {
+                    const tag_json = raw_json[tag_start.? .. pos + 1];
+                    if (extractNonceTarget(tag_json)) |target| {
+                        return target;
+                    }
+                    tag_start = null;
+                }
+                if (depth < 0) break;
+            }
+        }
+
+        pos += 1;
+    }
+
+    return null;
+}
+
+fn extractNonceTarget(tag_json: []const u8) ?u8 {
+    var values: [3]?[]const u8 = .{ null, null, null };
+    var value_idx: usize = 0;
+    var pos: usize = 0;
+    var in_string = false;
+    var string_start: usize = 0;
+    var escape = false;
+
+    while (pos < tag_json.len and value_idx < 3) {
+        const c = tag_json[pos];
+
+        if (escape) {
+            escape = false;
+            pos += 1;
+            continue;
+        }
+        if (c == '\\' and in_string) {
+            escape = true;
+            pos += 1;
+            continue;
+        }
+
+        if (c == '"') {
+            if (in_string) {
+                values[value_idx] = tag_json[string_start..pos];
+                value_idx += 1;
+            } else {
+                string_start = pos + 1;
+            }
+            in_string = !in_string;
+        }
+
+        pos += 1;
+    }
+
+    if (values[0] != null and values[2] != null) {
+        if (std.mem.eql(u8, values[0].?, "nonce")) {
+            return std.fmt.parseInt(u8, values[2].?, 10) catch null;
+        }
+    }
+    return null;
+}
+
 pub const Handler = struct {
     allocator: std.mem.Allocator,
     config: *const Config,
@@ -144,6 +257,21 @@ pub const Handler = struct {
             self.sendOk(conn, id, false, nostr.errorMessage(err));
             return;
         };
+
+        if (self.config.min_pow_difficulty > 0) {
+            const pow_difficulty = countLeadingZeroBits(id);
+            const committed = getCommittedDifficulty(event.raw_json);
+            if (committed) |target| {
+                if (target < self.config.min_pow_difficulty) {
+                    self.sendOk(conn, id, false, "pow: committed target difficulty too low");
+                    return;
+                }
+            }
+            if (pow_difficulty < self.config.min_pow_difficulty) {
+                self.sendOk(conn, id, false, "pow: difficulty too low");
+                return;
+            }
+        }
 
         if (event.kind() == 22242) {
             self.sendOk(conn, id, false, "invalid: AUTH events cannot be published");
