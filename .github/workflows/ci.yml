@@ -14,12 +14,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Clone dependencies
-        run: |
-          git clone https://github.com/privkeyio/libnostr-z ../libnostr-z
-          git clone https://github.com/VnUgE/noscrypt ../noscrypt
-          cp ../libnostr-z/deps/noscrypt-build.zig ../noscrypt/build.zig
-
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y liblmdb-dev libsecp256k1-dev libssl-dev
 
