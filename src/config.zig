@@ -43,7 +43,6 @@ pub const Config = struct {
     negentropy_enabled: bool,
     negentropy_max_sync_events: u32,
 
-    // NIP-13 Proof of Work
     min_pow_difficulty: u8,
 
     _allocated: std.ArrayListUnmanaged([]const u8),
