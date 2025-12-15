@@ -32,6 +32,7 @@ query_limit_max = 5000
 events_per_minute = 60
 # max_event_age = 94608000
 # max_future_seconds = 900
+# deleted_retention_days = 90
 
 [timeouts]
 idle_seconds = 300
@@ -50,11 +51,12 @@ idle_seconds = 300
 # ip_blacklist = ""
 
 [spider]
-# enabled = false
-# relays = "wss://relay.damus.io,wss://nos.lol"
+enabled = true
+relays = "wss://relay.damus.io,wss://nos.lol,wss://relay.nostr.band"
+sync_interval = 300
 # admin = ""  # hex pubkey - will fetch their kind 3 contact list
 # pubkeys = ""  # comma-separated hex pubkeys to follow
 
 [negentropy]
-# enabled = true
-# max_sync_events = 1000000
+enabled = true
+max_sync_events = 1000000

@@ -6,13 +6,13 @@ const Config = @import("config.zig").Config;
 const websocket = @import("websocket");
 
 const log = std.log.scoped(.spider);
+const negentropy = nostr.negentropy;
 
 const BATCH_SIZE: usize = 20;
 const BATCH_CREATION_DELAY_MS: u64 = 500;
 const RECONNECT_DELAY_MS: u64 = 10_000;
 const MAX_RECONNECT_DELAY_MS: u64 = 3600_000;
 const BLACKOUT_MS: u64 = 24 * 3600_000;
-const REFRESH_INTERVAL_MS: u64 = 300_000;
 const QUICK_DISCONNECT_MS: i64 = 120_000;
 const RATE_LIMIT_BACKOFF_MS: u64 = 60_000;
 const MAX_RATE_LIMIT_BACKOFF_MS: u64 = 1800_000;
@@ -243,8 +243,10 @@ pub const Spider = struct {
     }
 
     fn refreshLoop(self: *Spider) void {
+        const interval_s: u64 = @max(1, @as(u64, self.config.spider_sync_interval));
+        const interval_ms: u64 = interval_s * 1000;
         while (self.running.load(.acquire)) {
-            std.Thread.sleep(REFRESH_INTERVAL_MS * std.time.ns_per_ms);
+            std.Thread.sleep(interval_ms * std.time.ns_per_ms);
 
             if (!self.running.load(.acquire)) break;
 
@@ -361,7 +363,9 @@ pub const Spider = struct {
         conn.state = .connected;
         const now = std.time.milliTimestamp();
 
-        if (conn.last_disconnect > 0 and conn.last_connect > 0) {
+        if (conn.last_connect == 0) {
+            self.performNegentropySync(&client, relay_url);
+        } else if (conn.last_disconnect > 0) {
             self.performCatchup(&client, conn, relay_url);
         }
 
@@ -436,6 +440,209 @@ pub const Spider = struct {
         client.writeText(@constCast(close_msg)) catch {};
 
         log.info("{s}: Catch-up finished with {d} events", .{ relay_url, catchup_events });
+    }
+
+    fn performNegentropySync(self: *Spider, client: *websocket.Client, relay_url: []const u8) void {
+        self.follow_mutex.lock();
+        const pubkeys = self.allocator.dupe([32]u8, self.follow_pubkeys.items) catch {
+            self.follow_mutex.unlock();
+            return;
+        };
+        self.follow_mutex.unlock();
+        defer self.allocator.free(pubkeys);
+
+        if (pubkeys.len == 0) return;
+
+        var local_storage = negentropy.VectorStorage.init(self.allocator);
+        defer local_storage.deinit();
+
+        const filters = [_]nostr.Filter{
+            .{ .authors_bytes = pubkeys },
+        };
+
+        var iter = self.store.query(&filters, 100000) catch {
+            log.err("{s}: Failed to query local events for negentropy", .{relay_url});
+            return;
+        };
+        defer iter.deinit();
+
+        var local_count: usize = 0;
+        while (iter.next() catch null) |json| {
+            var event = nostr.Event.parse(json) catch continue;
+            defer event.deinit();
+            local_storage.insert(@intCast(event.createdAt()), event.id()) catch continue;
+            local_count += 1;
+        }
+        local_storage.seal();
+
+        log.info("{s}: Negentropy sync starting with {d} local events", .{ relay_url, local_count });
+
+        var filter_buf: [32768]u8 = undefined;
+        const filter_json = buildNegentropyFilter(&filter_buf, pubkeys) catch {
+            log.err("{s}: Failed to build negentropy filter", .{relay_url});
+            return;
+        };
+
+        var neg = negentropy.Negentropy.init(local_storage.storage(), 0);
+        var init_buf: [65536]u8 = undefined;
+        const init_msg = neg.initiate(&init_buf) catch {
+            log.err("{s}: Failed to initiate negentropy", .{relay_url});
+            return;
+        };
+
+        var neg_open_buf: [131072]u8 = undefined;
+        var fbs_neg = std.io.fixedBufferStream(&neg_open_buf);
+        const neg_writer = fbs_neg.writer();
+        neg_writer.print("[\"NEG-OPEN\",\"neg-sync\",{s},\"", .{filter_json}) catch {
+            log.err("{s}: NEG-OPEN message too large", .{relay_url});
+            return;
+        };
+        for (init_msg) |b| neg_writer.print("{x:0>2}", .{b}) catch return;
+        neg_writer.writeAll("\"]") catch return;
+        const neg_open = fbs_neg.getWritten();
+
+        client.writeText(@constCast(neg_open)) catch |err| {
+            log.err("{s}: Failed to send NEG-OPEN: {}", .{ relay_url, err });
+            return;
+        };
+
+        var have_ids: std.ArrayListUnmanaged([32]u8) = .{};
+        defer have_ids.deinit(self.allocator);
+        var need_ids: std.ArrayListUnmanaged([32]u8) = .{};
+        defer need_ids.deinit(self.allocator);
+
+        const sync_start = std.time.milliTimestamp();
+        const initial_timeout_ms: i64 = 5_000;
+        const sync_timeout_ms: i64 = 60_000;
+        var rounds: usize = 0;
+        var got_response = false;
+
+        while (std.time.milliTimestamp() - sync_start < sync_timeout_ms) {
+            if (!got_response and std.time.milliTimestamp() - sync_start > initial_timeout_ms) {
+                log.warn("{s}: No negentropy response, relay may not support NIP-77", .{relay_url});
+                return;
+            }
+            const message = client.read() catch break;
+            if (message) |msg| {
+                defer client.done(msg);
+                if (msg.data.len == 0) continue;
+
+                if (std.mem.startsWith(u8, msg.data, "[\"NEG-ERR\"")) {
+                    log.warn("{s}: Negentropy not supported, falling back to REQ", .{relay_url});
+                    var close_buf: [64]u8 = undefined;
+                    const close_msg = std.fmt.bufPrint(&close_buf, "[\"NEG-CLOSE\",\"neg-sync\"]", .{}) catch break;
+                    client.writeText(@constCast(close_msg)) catch {};
+                    return;
+                }
+
+                if (std.mem.startsWith(u8, msg.data, "[\"NEG-MSG\"")) {
+                    got_response = true;
+                    rounds += 1;
+                    const payload = extractNegPayload(msg.data) orelse continue;
+                    const decoded = decodeHexPayload(payload, self.allocator) catch continue;
+                    defer self.allocator.free(decoded);
+
+                    var out_buf: [65536]u8 = undefined;
+                    var result = neg.reconcile(decoded, &out_buf, self.allocator) catch continue;
+
+                    for (result.have_ids.items) |id| have_ids.append(self.allocator, id) catch {};
+                    for (result.need_ids.items) |id| need_ids.append(self.allocator, id) catch {};
+
+                    const output_len = result.output.len;
+                    const have_count = result.have_ids.items.len;
+                    const need_count = result.need_ids.items.len;
+
+                    if (output_len == 0 or (have_count == 0 and need_count == 0 and rounds > 1)) {
+                        result.deinit();
+                        log.info("{s}: Negentropy sync complete after {d} rounds", .{ relay_url, rounds });
+                        break;
+                    }
+
+                    var neg_msg_buf: [131072]u8 = undefined;
+                    var fbs_msg = std.io.fixedBufferStream(&neg_msg_buf);
+                    const msg_writer = fbs_msg.writer();
+                    msg_writer.writeAll("[\"NEG-MSG\",\"neg-sync\",\"") catch {
+                        result.deinit();
+                        continue;
+                    };
+                    for (result.output) |b| msg_writer.print("{x:0>2}", .{b}) catch {
+                        result.deinit();
+                        continue;
+                    };
+                    msg_writer.writeAll("\"]") catch {
+                        result.deinit();
+                        continue;
+                    };
+                    result.deinit();
+
+                    client.writeText(@constCast(fbs_msg.getWritten())) catch break;
+                }
+            }
+        }
+
+        var close_buf: [64]u8 = undefined;
+        const close_msg = std.fmt.bufPrint(&close_buf, "[\"NEG-CLOSE\",\"neg-sync\"]", .{}) catch return;
+        client.writeText(@constCast(close_msg)) catch {};
+
+        log.info("{s}: Need {d} events, have {d} events to skip", .{ relay_url, need_ids.items.len, have_ids.items.len });
+
+        if (need_ids.items.len > 0) {
+            self.fetchEventsByIds(client, relay_url, need_ids.items);
+        }
+    }
+
+    fn fetchEventsByIds(self: *Spider, client: *websocket.Client, relay_url: []const u8, ids: [][32]u8) void {
+        const batch_size: usize = 100;
+        var fetched: u64 = 0;
+        var i: usize = 0;
+
+        while (i < ids.len) {
+            const end = @min(i + batch_size, ids.len);
+            const batch = ids[i..end];
+
+            var msg_buf: [65536]u8 = undefined;
+            var fbs = std.io.fixedBufferStream(&msg_buf);
+            const writer = fbs.writer();
+
+            const req_msg = build_req: {
+                writer.writeAll("[\"REQ\",\"fetch\",{\"ids\":[") catch break :build_req null;
+                for (batch, 0..) |id, j| {
+                    if (j > 0) writer.writeAll(",") catch break :build_req null;
+                    writer.writeAll("\"") catch break :build_req null;
+                    for (id) |b| writer.print("{x:0>2}", .{b}) catch break :build_req null;
+                    writer.writeAll("\"") catch break :build_req null;
+                }
+                writer.writeAll("]}]") catch break :build_req null;
+                break :build_req fbs.getWritten();
+            };
+
+            if (req_msg) |msg| {
+                client.writeText(@constCast(msg)) catch break;
+            } else {
+                i = end;
+                continue;
+            }
+
+            const fetch_start = std.time.milliTimestamp();
+            while (std.time.milliTimestamp() - fetch_start < 30_000) {
+                const message = client.read() catch break;
+                if (message) |msg| {
+                    defer client.done(msg);
+                    if (std.mem.startsWith(u8, msg.data, "[\"EOSE\"")) break;
+                    if (std.mem.startsWith(u8, msg.data, "[\"EVENT\"")) {
+                        self.handleRelayMessage(msg.data, relay_url, &fetched);
+                    }
+                }
+            }
+
+            var close_buf: [64]u8 = undefined;
+            const close_msg = std.fmt.bufPrint(&close_buf, "[\"CLOSE\",\"fetch\"]", .{}) catch break;
+            client.writeText(@constCast(close_msg)) catch {};
+
+            i = end;
+        }
+
+        log.info("{s}: Fetched {d} events via negentropy sync", .{ relay_url, fetched });
     }
 
     fn sendSubscriptions(self: *Spider, client: *websocket.Client, relay_url: []const u8) !void {
@@ -742,4 +949,59 @@ fn buildCatchupReqMessage(buf: []u8, pubkeys: [][32]u8, since: i64, until: i64) 
     try writer.print("],\"since\":{d},\"until\":{d}}}]", .{ since, until });
 
     return fbs.getWritten();
+}
+
+fn buildNegentropyFilter(buf: []u8, pubkeys: [][32]u8) ![]u8 {
+    var fbs = std.io.fixedBufferStream(buf);
+    const writer = fbs.writer();
+
+    try writer.writeAll("{\"authors\":[");
+    for (pubkeys, 0..) |pk, i| {
+        if (i > 0) try writer.writeAll(",");
+        try writer.print("\"{x}\"", .{pk});
+    }
+    try writer.writeAll("]}");
+
+    return fbs.getWritten();
+}
+
+fn extractNegPayload(data: []const u8) ?[]const u8 {
+    var comma_count: usize = 0;
+    var in_string = false;
+    var escape = false;
+    var payload_start: ?usize = null;
+
+    for (data, 0..) |c, i| {
+        if (escape) {
+            escape = false;
+            continue;
+        }
+        if (c == '\\' and in_string) {
+            escape = true;
+            continue;
+        }
+        if (c == '"') {
+            if (!in_string and comma_count == 2) {
+                payload_start = i + 1;
+            } else if (in_string and payload_start != null) {
+                return data[payload_start.?..i];
+            }
+            in_string = !in_string;
+            continue;
+        }
+        if (!in_string and c == ',') {
+            comma_count += 1;
+        }
+    }
+    return null;
+}
+
+fn decodeHexPayload(hex: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    if (hex.len % 2 != 0) return error.InvalidLength;
+    const out = try allocator.alloc(u8, hex.len / 2);
+    _ = std.fmt.hexToBytes(out, hex) catch {
+        allocator.free(out);
+        return error.InvalidHex;
+    };
+    return out;
 }

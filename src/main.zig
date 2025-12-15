@@ -39,7 +39,7 @@ fn parseCommand(arg: []const u8) Command {
 
 fn printHelp() void {
     const help =
-        \\Usage: wisp <command> [options]
+        \\Usage: wisp [command] [options]
         \\
         \\Commands:
         \\  relay [config]  Start the relay server (default)
@@ -48,14 +48,14 @@ fn printHelp() void {
         \\  help            Show this help
         \\
         \\Options:
-        \\  --db <path>     Database path (default: ./data)
+        \\  --spider-admin <npub|hex>  Enable spider, follow this pubkey's contacts
+        \\  --db <path>                Database path (default: ./data)
         \\
         \\Examples:
-        \\  wisp                          Start relay with defaults
-        \\  wisp relay config.ini         Start relay with config file
-        \\  wisp import < events.jsonl    Import events from file
-        \\  wisp export > backup.jsonl    Export all events to file
-        \\  wisp import --db ./mydata     Import to specific database
+        \\  wisp                                  Start relay with defaults
+        \\  wisp --spider-admin npub1abc...      Pull your feed automatically
+        \\  wisp relay config.toml                Start relay with config file
+        \\  wisp export > backup.jsonl            Export all events
         \\
     ;
     const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
@@ -73,6 +73,7 @@ pub fn main() !void {
     var cmd = Command.relay;
     var config_path: ?[]const u8 = null;
     var db_path: []const u8 = "./data";
+    var spider_admin_arg: ?[64]u8 = null;
     var cmd_set = false;
 
     var i: usize = 1;
@@ -82,6 +83,15 @@ pub fn main() !void {
             i += 1;
             if (i < args.len) {
                 db_path = args[i];
+            }
+        } else if (std.mem.eql(u8, arg, "--spider-admin")) {
+            i += 1;
+            if (i < args.len) {
+                const decoded = nostr.bech32.decodeNostr(allocator, args[i]) catch {
+                    std.log.err("Invalid pubkey: {s}", .{args[i]});
+                    return error.InvalidPubkey;
+                };
+                spider_admin_arg = std.fmt.bytesToHex(decoded.pubkey, .lower);
             }
         } else if (!cmd_set) {
             cmd = parseCommand(arg);
@@ -116,6 +126,14 @@ pub fn main() !void {
     defer if (config_path != null) config.deinit();
 
     config.loadEnv();
+
+    if (spider_admin_arg) |*admin| {
+        config.spider_enabled = true;
+        config.spider_admin = admin;
+        if (config.spider_relays.len == 0) {
+            config.spider_relays = "wss://relay.damus.io,wss://nos.lol,wss://relay.nostr.band";
+        }
+    }
 
     try nostr.init();
     defer nostr.cleanup();

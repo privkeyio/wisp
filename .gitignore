@@ -8,3 +8,4 @@ data-lock
 .venv/
 wisp.toml
 wisp-db-test/
+benchmark/results.json

@@ -40,6 +40,7 @@ pub const Connection = struct {
 
     write_queue: WriteQueue,
     backing_allocator: std.mem.Allocator,
+    deinitialized: bool = false,
 
     pub fn init(self: *Connection, backing_allocator: std.mem.Allocator, id: u64) void {
         const now = std.time.timestamp();
@@ -59,6 +60,7 @@ pub const Connection = struct {
         self.authenticated_pubkeys = std.AutoHashMap([32]u8, void).init(self.arena.allocator());
         self.challenge_sent = false;
         self.write_queue = WriteQueue.init(backing_allocator);
+        self.deinitialized = false;
     }
 
     pub fn startWriteQueue(self: *Connection, ws_conn: *websocket.Conn) void {
@@ -102,6 +104,8 @@ pub const Connection = struct {
     }
 
     pub fn deinit(self: *Connection) void {
+        if (self.deinitialized) return;
+        self.deinitialized = true;
         var neg_iter = self.neg_sessions.valueIterator();
         while (neg_iter.next()) |session| {
             session.deinit();

@@ -1,0 +1,91 @@
+name: Benchmark
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'build.zig'
+      - 'build.zig.zon'
+      - 'benchmark/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'build.zig'
+      - 'build.zig.zon'
+      - 'benchmark/**'
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone nostr-bench
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/privkeyio/nostr-bench ../nostr-bench
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y liblmdb-dev libsecp256k1-dev libssl-dev netcat-openbsd
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build wisp
+        run: zig build -Doptimize=ReleaseSafe
+
+      - name: Build nostr-bench
+        run: cd ../nostr-bench && zig build -Doptimize=ReleaseSafe
+
+      - name: Run benchmark
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/wisp-data
+          WISP_STORAGE_PATH=/tmp/wisp-data/wisp.lmdb ./zig-out/bin/wisp &
+          WISP_PID=$!
+          trap 'kill ${WISP_PID} 2>/dev/null || true' EXIT
+
+          for i in {1..30}; do
+            if nc -z 127.0.0.1 7777 2>/dev/null; then
+              echo "Wisp ready after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          if ! nc -z 127.0.0.1 7777 2>/dev/null; then
+            echo "Wisp did not become ready in time" >&2
+            exit 1
+          fi
+
+          ../nostr-bench/zig-out/bin/nostr-bench \
+            -r ws://127.0.0.1:7777 \
+            -e 2000 -w 4 --rate 500 --only-peak \
+            --report-file benchmark/peak.json
+
+          ../nostr-bench/zig-out/bin/nostr-bench \
+            -r ws://127.0.0.1:7777 \
+            -e 2000 -w 4 --rate 500 --only-query \
+            --report-file benchmark/query.json
+
+          python3 -c "
+          import json, sys
+          p = json.load(open('benchmark/peak.json'))
+          q = json.load(open('benchmark/query.json'))
+          p['results'].extend(q['results'])
+          json.dump(p, open('benchmark/results.json', 'w'), indent=2)
+          "
+
+      - name: Compare results
+        run: |
+          python3 benchmark/compare.py benchmark/baseline.json benchmark/results.json
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-results
+          path: benchmark/results.json
