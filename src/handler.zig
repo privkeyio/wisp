@@ -31,9 +31,9 @@ fn countLeadingZeroBits(id: *const [32]u8) u8 {
     var count: u8 = 0;
     for (id) |byte| {
         if (byte == 0) {
-            count += 8;
+            count +|= 8;
         } else {
-            count += @clz(byte);
+            count +|= @clz(byte);
             break;
         }
     }
