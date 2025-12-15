@@ -266,6 +266,10 @@ pub const Handler = struct {
                     self.sendOk(conn, id, false, "pow: committed target difficulty too low");
                     return;
                 }
+                if (pow_difficulty < target) {
+                    self.sendOk(conn, id, false, "pow: actual difficulty below committed target");
+                    return;
+                }
             }
             if (pow_difficulty < self.config.min_pow_difficulty) {
                 self.sendOk(conn, id, false, "pow: difficulty too low");
