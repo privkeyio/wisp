@@ -73,7 +73,8 @@ pub fn main() !void {
     var cmd = Command.relay;
     var config_path: ?[]const u8 = null;
     var db_path: []const u8 = "./data";
-    var spider_admin_arg: ?[64]u8 = null;
+    var spider_admin_arg: ?[]const u8 = null;
+    defer if (spider_admin_arg) |admin| allocator.free(admin);
     var cmd_set = false;
 
     var i: usize = 1;
@@ -91,7 +92,8 @@ pub fn main() !void {
                     std.log.err("Invalid pubkey: {s}", .{args[i]});
                     return error.InvalidPubkey;
                 };
-                spider_admin_arg = std.fmt.bytesToHex(decoded.pubkey, .lower);
+                const hex = std.fmt.bytesToHex(decoded.pubkey, .lower);
+                spider_admin_arg = try allocator.dupe(u8, &hex);
             }
         } else if (!cmd_set) {
             cmd = parseCommand(arg);
@@ -127,7 +129,7 @@ pub fn main() !void {
 
     config.loadEnv();
 
-    if (spider_admin_arg) |*admin| {
+    if (spider_admin_arg) |admin| {
         config.spider_enabled = true;
         config.spider_admin = admin;
         if (config.spider_relays.len == 0) {
