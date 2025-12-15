@@ -14,16 +14,12 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            target: x86_64-linux
             artifact: wisp-linux-x86_64
           - os: ubuntu-24.04-arm
-            target: aarch64-linux
             artifact: wisp-linux-arm64
           - os: macos-latest
-            target: aarch64-macos
             artifact: wisp-macos-arm64
           - os: macos-13
-            target: x86_64-macos
             artifact: wisp-macos-x86_64
 
     runs-on: ${{ matrix.os }}
@@ -51,7 +47,7 @@ jobs:
           version: 0.15.2
 
       - name: Build
-        run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
+        run: zig build -Doptimize=ReleaseFast
 
       - name: Package (Unix)
         if: runner.os != 'Windows'
