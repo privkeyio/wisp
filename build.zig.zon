@@ -12,8 +12,8 @@
             .hash = "websocket-0.1.0-ZPISdRNzAwAGszh62EpRtoQxu8wb1MSMVI6Ow0o2dmyJ",
         },
         .nostr = .{
-            .url = "https://github.com/privkeyio/libnostr-z/archive/refs/tags/v0.1.5.tar.gz",
-            .hash = "nostr-0.1.5-JY6OcIp8AwBkVmKt6L67rlQJ8f_VwUlawhXTX9QdVITe",
+            .url = "https://github.com/privkeyio/libnostr-z/archive/refs/tags/v0.1.6.tar.gz",
+            .hash = "nostr-0.1.6-JY6OcMPABABT9tx-BY8jcJpBa-boEF20VbZY-iX3DMMe",
         },
     },
     .paths = .{
