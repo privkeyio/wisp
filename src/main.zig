@@ -98,9 +98,8 @@ pub fn main() !void {
         } else if (!cmd_set) {
             cmd = parseCommand(arg);
             cmd_set = true;
-            if (cmd == .relay and !std.mem.startsWith(u8, arg, "-")) {
-                config_path = arg;
-            }
+        } else if (cmd == .relay and config_path == null and !std.mem.startsWith(u8, arg, "-")) {
+            config_path = arg;
         }
     }
 

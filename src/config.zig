@@ -118,6 +118,14 @@ pub const Config = struct {
             const key = std.mem.trim(u8, trimmed[0..eq_pos], " \t");
             var value = std.mem.trim(u8, trimmed[eq_pos + 1 ..], " \t");
 
+            if (value.len > 0 and value[0] == '"') {
+                if (std.mem.indexOfScalarPos(u8, value, 1, '"')) |close_quote| {
+                    value = value[0 .. close_quote + 1];
+                }
+            } else if (std.mem.indexOf(u8, value, "#")) |hash_pos| {
+                value = std.mem.trim(u8, value[0..hash_pos], " \t");
+            }
+
             if (value.len >= 2 and value[0] == '"' and value[value.len - 1] == '"') {
                 value = value[1 .. value.len - 1];
             }
