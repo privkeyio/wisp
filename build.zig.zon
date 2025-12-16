@@ -13,7 +13,7 @@
         },
         .nostr = .{
             .url = "https://github.com/privkeyio/libnostr-z/archive/refs/tags/v0.1.5.tar.gz",
-            .hash = "nostr-0.1.5-JY6OcCJ8AwAwjogdbVGytz441ubPbLHJNSie41ag2C3o",
+            .hash = "nostr-0.1.5-JY6OcIp8AwBkVmKt6L67rlQJ8f_VwUlawhXTX9QdVITe",
         },
     },
     .paths = .{
