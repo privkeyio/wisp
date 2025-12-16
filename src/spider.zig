@@ -364,7 +364,10 @@ pub const Spider = struct {
         const now = std.time.milliTimestamp();
 
         if (conn.last_connect == 0) {
-            self.performNegentropySync(&client, relay_url);
+            if (!self.performNegentropySync(&client, relay_url)) {
+                log.err("{s}: Connection lost during negentropy sync", .{relay_url});
+                return false;
+            }
         } else if (conn.last_disconnect > 0) {
             self.performCatchup(&client, conn, relay_url);
         }
@@ -442,16 +445,16 @@ pub const Spider = struct {
         log.info("{s}: Catch-up finished with {d} events", .{ relay_url, catchup_events });
     }
 
-    fn performNegentropySync(self: *Spider, client: *websocket.Client, relay_url: []const u8) void {
+    fn performNegentropySync(self: *Spider, client: *websocket.Client, relay_url: []const u8) bool {
         self.follow_mutex.lock();
         const pubkeys = self.allocator.dupe([32]u8, self.follow_pubkeys.items) catch {
             self.follow_mutex.unlock();
-            return;
+            return true;
         };
         self.follow_mutex.unlock();
         defer self.allocator.free(pubkeys);
 
-        if (pubkeys.len == 0) return;
+        if (pubkeys.len == 0) return true;
 
         var local_storage = negentropy.VectorStorage.init(self.allocator);
         defer local_storage.deinit();
@@ -462,7 +465,7 @@ pub const Spider = struct {
 
         var iter = self.store.query(&filters, 100000) catch {
             log.err("{s}: Failed to query local events for negentropy", .{relay_url});
-            return;
+            return true;
         };
         defer iter.deinit();
 
@@ -480,14 +483,14 @@ pub const Spider = struct {
         var filter_buf: [32768]u8 = undefined;
         const filter_json = buildNegentropyFilter(&filter_buf, pubkeys) catch {
             log.err("{s}: Failed to build negentropy filter", .{relay_url});
-            return;
+            return true;
         };
 
         var neg = negentropy.Negentropy.init(local_storage.storage(), 0);
         var init_buf: [65536]u8 = undefined;
         const init_msg = neg.initiate(&init_buf) catch {
             log.err("{s}: Failed to initiate negentropy", .{relay_url});
-            return;
+            return true;
         };
 
         var neg_open_buf: [131072]u8 = undefined;
@@ -495,15 +498,15 @@ pub const Spider = struct {
         const neg_writer = fbs_neg.writer();
         neg_writer.print("[\"NEG-OPEN\",\"neg-sync\",{s},\"", .{filter_json}) catch {
             log.err("{s}: NEG-OPEN message too large", .{relay_url});
-            return;
+            return true;
         };
-        for (init_msg) |b| neg_writer.print("{x:0>2}", .{b}) catch return;
-        neg_writer.writeAll("\"]") catch return;
+        for (init_msg) |b| neg_writer.print("{x:0>2}", .{b}) catch return true;
+        neg_writer.writeAll("\"]") catch return true;
         const neg_open = fbs_neg.getWritten();
 
         client.writeText(@constCast(neg_open)) catch |err| {
             log.err("{s}: Failed to send NEG-OPEN: {}", .{ relay_url, err });
-            return;
+            return false;
         };
 
         var have_ids: std.ArrayListUnmanaged([32]u8) = .{};
@@ -516,13 +519,17 @@ pub const Spider = struct {
         const sync_timeout_ms: i64 = 60_000;
         var rounds: usize = 0;
         var got_response = false;
+        var connection_alive = true;
 
         while (std.time.milliTimestamp() - sync_start < sync_timeout_ms) {
             if (!got_response and std.time.milliTimestamp() - sync_start > initial_timeout_ms) {
                 log.warn("{s}: No negentropy response, relay may not support NIP-77", .{relay_url});
-                return;
+                return true;
             }
-            const message = client.read() catch break;
+            const message = client.read() catch {
+                connection_alive = false;
+                break;
+            };
             if (message) |msg| {
                 defer client.done(msg);
                 if (msg.data.len == 0) continue;
@@ -532,7 +539,7 @@ pub const Spider = struct {
                     var close_buf: [64]u8 = undefined;
                     const close_msg = std.fmt.bufPrint(&close_buf, "[\"NEG-CLOSE\",\"neg-sync\"]", .{}) catch break;
                     client.writeText(@constCast(close_msg)) catch {};
-                    return;
+                    return true;
                 }
 
                 if (std.mem.startsWith(u8, msg.data, "[\"NEG-MSG\"")) {
@@ -571,20 +578,27 @@ pub const Spider = struct {
                     };
                     result.deinit();
 
-                    client.writeText(@constCast(fbs_msg.getWritten())) catch break;
+                    client.writeText(@constCast(fbs_msg.getWritten())) catch {
+                        connection_alive = false;
+                        break;
+                    };
                 }
             }
         }
 
-        var close_buf: [64]u8 = undefined;
-        const close_msg = std.fmt.bufPrint(&close_buf, "[\"NEG-CLOSE\",\"neg-sync\"]", .{}) catch return;
-        client.writeText(@constCast(close_msg)) catch {};
+        if (connection_alive) {
+            var close_buf: [64]u8 = undefined;
+            const close_msg = std.fmt.bufPrint(&close_buf, "[\"NEG-CLOSE\",\"neg-sync\"]", .{}) catch return true;
+            client.writeText(@constCast(close_msg)) catch {};
+        }
 
         log.info("{s}: Need {d} events, have {d} events to skip", .{ relay_url, need_ids.items.len, have_ids.items.len });
 
-        if (need_ids.items.len > 0) {
+        if (connection_alive and need_ids.items.len > 0) {
             self.fetchEventsByIds(client, relay_url, need_ids.items);
         }
+
+        return connection_alive;
     }
 
     fn fetchEventsByIds(self: *Spider, client: *websocket.Client, relay_url: []const u8, ids: [][32]u8) void {
