@@ -6,7 +6,7 @@ A fast, lightweight [nostr](https://github.com/nostr-protocol/nostr) relay writt
 
 ## Why Wisp?
 
-- **Fast**: 8x higher throughput than strfry, 15x lower latency
+- **Fast**: 6x higher throughput than strfry, 20x lower latency
 - **Small**: Single 1.2MB binary, ~15MB RAM at idle
 - **Simple**: One command to run your personal relay with your feed
 - **Spider Mode**: Automatically syncs events from people you follow
@@ -15,10 +15,10 @@ A fast, lightweight [nostr](https://github.com/nostr-protocol/nostr) relay writt
 
 | Relay | Events/sec | p50 Latency | p99 Latency |
 |-------|-----------|-------------|-------------|
-| Wisp | 7,983 | 0.39ms | 0.70ms |
-| strfry | 1,014 | 5.74ms | 10.70ms |
+| Wisp | 7,986 | 0.34ms | 0.69ms |
+| strfry | 1,265 | 6.20ms | 11.16ms |
 
-*8 concurrent workers, 10k events. [Full results](https://github.com/privkeyio/nostr-bench)*
+*8 concurrent workers, 10k events. [Full results](https://github.com/privkeyio/nostr-bench/blob/main/reports/BENCHMARK_RESULTS.md)*
 
 ## Quickstart
 
