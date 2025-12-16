@@ -55,7 +55,7 @@ idle_seconds = 300
 enabled = true
 relays = "wss://relay.damus.io,wss://nos.lol,wss://relay.nostr.band"
 sync_interval = 300
-# admin = ""  # hex pubkey - will fetch their kind 3 contact list
+admin = ""  # hex pubkey - fetches their kind 3 contact list (required for spider)
 # pubkeys = ""  # comma-separated hex pubkeys to follow
 
 [negentropy]
