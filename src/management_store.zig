@@ -315,7 +315,11 @@ pub const ManagementStore = struct {
         var entry = cursor.get(.first) catch null;
         while (entry != null) {
             const e = entry.?;
-            if (std.mem.startsWith(u8, ip, e.key)) {
+            // Only match exact IPs or proper CIDR prefixes with dot boundary
+            if (std.mem.eql(u8, ip, e.key) or
+                (std.mem.startsWith(u8, ip, e.key) and
+                e.key.len < ip.len and ip[e.key.len] == '.'))
+            {
                 return true;
             }
             entry = cursor.get(.next) catch null;
