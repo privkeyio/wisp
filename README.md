@@ -60,6 +60,14 @@ WISP_PORT=8080 ./zig-out/bin/wisp
 
 See `wisp.toml.example` for all options.
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on reporting issues and submitting pull requests.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for a history of changes to this project.
+
 ## License
 
 LGPL-2.1-or-later

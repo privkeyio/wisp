@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions & Discussions
+    url: https://github.com/privkeyio/wisp/discussions
+    about: Ask questions and discuss wisp usage (if discussions are enabled)
+  - name: Nostr Protocol
+    url: https://github.com/nostr-protocol/nostr
+    about: For questions about the Nostr protocol itself
