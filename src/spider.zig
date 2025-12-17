@@ -13,7 +13,7 @@ const BATCH_CREATION_DELAY_MS: u64 = 500;
 const RECONNECT_DELAY_MS: u64 = 10_000;
 const MAX_RECONNECT_DELAY_MS: u64 = 3600_000;
 const BLACKOUT_MS: u64 = 24 * 3600_000;
-const QUICK_DISCONNECT_MS: i64 = 120_000;
+const QUICK_DISCONNECT_MS: i64 = 30_000;
 const RATE_LIMIT_BACKOFF_MS: u64 = 60_000;
 const MAX_RATE_LIMIT_BACKOFF_MS: u64 = 1800_000;
 const CATCHUP_WINDOW_MS: i64 = 1800_000;
@@ -24,6 +24,7 @@ pub const Spider = struct {
     store: *Store,
     broadcaster: *Broadcaster,
     running: std.atomic.Value(bool),
+    global_shutdown: *std.atomic.Value(bool),
     relays: std.StringArrayHashMap(RelayConn),
     follow_pubkeys: std.ArrayListUnmanaged([32]u8),
     follow_mutex: std.Thread.Mutex,
@@ -35,6 +36,7 @@ pub const Spider = struct {
         config: *const Config,
         store: *Store,
         broadcaster: *Broadcaster,
+        global_shutdown: *std.atomic.Value(bool),
     ) !Spider {
         var spider = Spider{
             .allocator = allocator,
@@ -42,6 +44,7 @@ pub const Spider = struct {
             .store = store,
             .broadcaster = broadcaster,
             .running = std.atomic.Value(bool).init(false),
+            .global_shutdown = global_shutdown,
             .relays = std.StringArrayHashMap(RelayConn).init(allocator),
             .follow_pubkeys = .{},
             .follow_mutex = .{},
@@ -100,9 +103,27 @@ pub const Spider = struct {
         try self.threads.append(self.allocator, refresh_thread);
     }
 
+    fn shouldRun(self: *Spider) bool {
+        return self.running.load(.acquire) and !self.global_shutdown.load(.acquire);
+    }
+
+    fn interruptibleSleep(self: *Spider, ms: u64) void {
+        const interval_ms: u64 = 100;
+        var remaining = ms;
+        while (remaining > 0 and self.shouldRun()) {
+            const sleep_ms = @min(remaining, interval_ms);
+            std.Thread.sleep(sleep_ms * @as(u64, std.time.ns_per_ms));
+            remaining -|= sleep_ms;
+        }
+    }
+
     pub fn stop(self: *Spider) void {
         log.info("Spider stopping...", .{});
         self.running.store(false, .release);
+
+        for (self.relays.values()) |*conn| {
+            conn.closeClient();
+        }
 
         for (self.threads.items) |thread| {
             thread.join();
@@ -167,11 +188,16 @@ pub const Spider = struct {
 
             client.writeText(@constCast(req_msg)) catch continue;
 
+            client.readTimeout(5000) catch {};
+
             var events_received: u64 = 0;
             var got_kind3 = false;
-            var msg_count: usize = 0;
-            while (msg_count < 20) : (msg_count += 1) {
-                const message = client.read() catch break;
+            const bootstrap_start = std.time.milliTimestamp();
+            while (std.time.milliTimestamp() - bootstrap_start < 10_000) {
+                const message = client.read() catch |err| {
+                    if (err == error.WouldBlock) continue;
+                    break;
+                };
                 if (message) |msg| {
                     defer client.done(msg);
                     if (msg.data.len > 0) {
@@ -243,12 +269,11 @@ pub const Spider = struct {
     }
 
     fn refreshLoop(self: *Spider) void {
-        const interval_s: u64 = @max(1, @as(u64, self.config.spider_sync_interval));
-        const interval_ms: u64 = interval_s * 1000;
-        while (self.running.load(.acquire)) {
-            std.Thread.sleep(interval_ms * std.time.ns_per_ms);
+        const interval_ms: u64 = @max(1000, @as(u64, self.config.spider_sync_interval) * 1000);
+        while (self.shouldRun()) {
+            self.interruptibleSleep(interval_ms);
 
-            if (!self.running.load(.acquire)) break;
+            if (!self.shouldRun()) break;
 
             const old_count = blk: {
                 self.follow_mutex.lock();
@@ -275,13 +300,13 @@ pub const Spider = struct {
 
         var conn = self.relays.getPtr(relay_url) orelse return;
 
-        while (self.running.load(.acquire)) {
+        while (self.shouldRun()) {
             if (conn.blackout_until > 0) {
                 const now = std.time.milliTimestamp();
                 if (now < conn.blackout_until) {
                     const wait_ms: u64 = @intCast(conn.blackout_until - now);
                     log.info("{s}: In blackout for {d}ms more", .{ relay_url, wait_ms });
-                    std.Thread.sleep(@as(u64, @min(wait_ms, 60_000)) * std.time.ns_per_ms);
+                    self.interruptibleSleep(@min(wait_ms, 60_000));
                     continue;
                 }
                 conn.blackout_until = 0;
@@ -293,22 +318,21 @@ pub const Spider = struct {
             const success = self.connectAndSubscribe(conn, relay_url);
             const connection_duration = std.time.milliTimestamp() - connect_start;
 
+            if (!self.shouldRun()) break;
+
             if (success) {
                 if (connection_duration < QUICK_DISCONNECT_MS) {
-                    log.warn("{s}: Quick disconnect after {d}ms", .{ relay_url, connection_duration });
+                    log.warn("{s}: Quick disconnect after {d}ms, waiting {d}ms", .{ relay_url, connection_duration, conn.reconnect_delay_ms });
+                    self.interruptibleSleep(conn.reconnect_delay_ms);
                     conn.reconnect_delay_ms = @min(conn.reconnect_delay_ms * 2, MAX_RECONNECT_DELAY_MS);
                 } else {
                     log.info("{s}: Disconnected after {d}ms uptime", .{ relay_url, connection_duration });
-                    if (conn.reconnect_delay_ms > RECONNECT_DELAY_MS * 8) {
-                        conn.reconnect_delay_ms = conn.reconnect_delay_ms / 2;
-                    } else {
-                        conn.reconnect_delay_ms = RECONNECT_DELAY_MS;
-                    }
+                    conn.reconnect_delay_ms = RECONNECT_DELAY_MS;
+                    self.interruptibleSleep(5000);
                 }
-                std.Thread.sleep(5 * std.time.ns_per_s);
             } else {
                 log.warn("{s}: Connection failed, waiting {d}ms", .{ relay_url, conn.reconnect_delay_ms });
-                std.Thread.sleep(conn.reconnect_delay_ms * std.time.ns_per_ms);
+                self.interruptibleSleep(conn.reconnect_delay_ms);
                 conn.reconnect_delay_ms = @min(conn.reconnect_delay_ms * 2, MAX_RECONNECT_DELAY_MS);
             }
 
@@ -352,6 +376,9 @@ pub const Spider = struct {
             return false;
         };
 
+        conn.active_client = &client;
+        defer conn.active_client = null;
+
         client.handshake(parsed.path, .{
             .headers = host_header,
         }) catch |err| {
@@ -363,9 +390,12 @@ pub const Spider = struct {
         conn.state = .connected;
         const now = std.time.milliTimestamp();
 
-        if (conn.last_connect == 0) {
+        if (!self.shouldRun()) return false;
+
+        if (conn.last_connect == 0 and conn.negentropy_supported) {
             if (!self.performNegentropySync(&client, relay_url)) {
-                log.err("{s}: Connection lost during negentropy sync", .{relay_url});
+                log.warn("{s}: Negentropy sync failed, disabling for this relay", .{relay_url});
+                conn.negentropy_supported = false;
                 return false;
             }
         } else if (conn.last_disconnect > 0) {
@@ -471,6 +501,7 @@ pub const Spider = struct {
 
         var local_count: usize = 0;
         while (iter.next() catch null) |json| {
+            if (local_count % 1000 == 0 and !self.shouldRun()) return false;
             var event = nostr.Event.parse(json) catch continue;
             defer event.deinit();
             local_storage.insert(@intCast(event.createdAt()), event.id()) catch continue;
@@ -509,6 +540,8 @@ pub const Spider = struct {
             return false;
         };
 
+        client.readTimeout(1000) catch {};
+
         var have_ids: std.ArrayListUnmanaged([32]u8) = .{};
         defer have_ids.deinit(self.allocator);
         var need_ids: std.ArrayListUnmanaged([32]u8) = .{};
@@ -522,11 +555,14 @@ pub const Spider = struct {
         var connection_alive = true;
 
         while (std.time.milliTimestamp() - sync_start < sync_timeout_ms) {
+            if (!self.shouldRun()) return false;
+
             if (!got_response and std.time.milliTimestamp() - sync_start > initial_timeout_ms) {
                 log.warn("{s}: No negentropy response, relay may not support NIP-77", .{relay_url});
                 return true;
             }
-            const message = client.read() catch {
+            const message = client.read() catch |err| {
+                if (err == error.WouldBlock) continue;
                 connection_alive = false;
                 break;
             };
@@ -607,6 +643,8 @@ pub const Spider = struct {
         var i: usize = 0;
 
         while (i < ids.len) {
+            if (!self.shouldRun()) return;
+
             const end = @min(i + batch_size, ids.len);
             const batch = ids[i..end];
 
@@ -635,7 +673,11 @@ pub const Spider = struct {
 
             const fetch_start = std.time.milliTimestamp();
             while (std.time.milliTimestamp() - fetch_start < 30_000) {
-                const message = client.read() catch break;
+                if (!self.shouldRun()) return;
+                const message = client.read() catch |err| {
+                    if (err == error.WouldBlock) continue;
+                    break;
+                };
                 if (message) |msg| {
                     defer client.done(msg);
                     if (std.mem.startsWith(u8, msg.data, "[\"EOSE\"")) break;
@@ -668,6 +710,8 @@ pub const Spider = struct {
         var i: usize = 0;
 
         while (i < self.follow_pubkeys.items.len) {
+            if (!self.shouldRun()) return error.Shutdown;
+
             const end = @min(i + BATCH_SIZE, self.follow_pubkeys.items.len);
             const batch = self.follow_pubkeys.items[i..end];
 
@@ -698,8 +742,11 @@ pub const Spider = struct {
     fn readLoop(self: *Spider, client: *websocket.Client, relay_url: []const u8) void {
         var events_received: u64 = 0;
 
-        while (self.running.load(.acquire)) {
+        client.readTimeout(1000) catch {};
+
+        while (self.shouldRun()) {
             const message = client.read() catch |err| {
+                if (err == error.WouldBlock) continue;
                 if (err == error.Closed or err == error.ConnectionResetByPeer) {
                     log.info("{s}: Connection closed", .{relay_url});
                 } else {
@@ -850,11 +897,17 @@ const RelayConn = struct {
     last_disconnect: i64 = 0,
     rate_limit_until: i64 = 0,
     rate_limit_backoff_ms: u64 = RATE_LIMIT_BACKOFF_MS,
+    negentropy_supported: bool = true,
+    active_client: ?*websocket.Client = null,
 
     const State = enum { disconnected, connecting, connected };
 
     fn init(url: []const u8) RelayConn {
         return .{ .url = url };
+    }
+
+    fn closeClient(self: *RelayConn) void {
+        _ = self;
     }
 
     fn applyRateLimit(self: *RelayConn) void {

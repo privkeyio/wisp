@@ -157,7 +157,7 @@ pub fn main() !void {
     var event_limiter = rate_limiter.EventRateLimiter.init(allocator, config.events_per_minute);
     defer event_limiter.deinit();
 
-    var handler = Handler.init(allocator, &config, &store, &subs, &broadcaster, sendCallback, &event_limiter);
+    var handler = Handler.init(allocator, &config, &store, &subs, &broadcaster, sendCallback, &event_limiter, &g_shutdown);
 
     var server = try Server.init(allocator, &config, &handler, &subs);
     defer server.deinit();
@@ -165,10 +165,9 @@ pub fn main() !void {
     g_server = &server;
     defer g_server = null;
 
-    // Initialize Spider if enabled
     var spider: ?Spider = null;
     if (config.spider_enabled) {
-        spider = Spider.init(allocator, &config, &store, &broadcaster) catch |err| {
+        spider = Spider.init(allocator, &config, &store, &broadcaster, &g_shutdown) catch |err| {
             std.log.err("Failed to initialize Spider: {}", .{err});
             return err;
         };
@@ -196,16 +195,22 @@ pub fn main() !void {
     defer if (cleanup_thread) |t| t.join();
 
     try server.run(&g_shutdown);
+    server.deinit();
 
     std.log.info("Shutdown complete", .{});
 }
 
 fn storeCleanupThread(store: *Store, config: *const Config, shutdown: *std.atomic.Value(bool)) void {
-    const hour_ns: u64 = 3600 * std.time.ns_per_s;
+    const check_interval_ns: u64 = std.time.ns_per_s;
+    const hour_checks: u64 = 3600;
+    var checks: u64 = 0;
 
     while (!shutdown.load(.acquire)) {
-        std.Thread.sleep(hour_ns);
+        std.Thread.sleep(check_interval_ns);
         if (shutdown.load(.acquire)) break;
+        checks += 1;
+        if (checks < hour_checks) continue;
+        checks = 0;
 
         if (config.deleted_retention_days > 0) {
             const max_age_seconds: i64 = @as(i64, @intCast(config.deleted_retention_days)) * 86400;
@@ -282,7 +287,6 @@ fn processImportLine(allocator: std.mem.Allocator, store: *Store, line: []const 
         return;
     };
 
-    // Handle NIP-09 deletions
     if (nostr.isDeletion(&event)) {
         const ids_to_delete = nostr.getDeletionIds(allocator, &event) catch {
             failed.* += 1;

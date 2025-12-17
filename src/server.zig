@@ -25,6 +25,7 @@ pub const Server = struct {
     mutex: std.Thread.Mutex,
 
     http_server: ?HttpServer = null,
+    listener_failed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     conn_limiter: rate_limiter.ConnectionLimiter,
     ip_filter: rate_limiter.IpFilter,
@@ -55,9 +56,16 @@ pub const Server = struct {
     pub fn deinit(self: *Server) void {
         if (self.http_server) |*s| {
             s.deinit();
-        }
+            self.http_server = null;
+        } else return;
         self.conn_limiter.deinit();
         self.ip_filter.deinit();
+    }
+
+    pub fn stop(self: *Server) void {
+        if (self.http_server) |*s| {
+            s.stop();
+        }
     }
 
     pub fn run(self: *Server, shutdown: *std.atomic.Value(bool)) !void {
@@ -71,26 +79,57 @@ pub const Server = struct {
         }, h);
         self.http_server = server;
 
-        defer server.deinit();
-        defer server.stop();
-
         var router = try server.router(.{});
         router.get("/", index, .{});
 
-        const idle_thread = std.Thread.spawn(.{}, idleTimeoutThread, .{ self, shutdown }) catch null;
+        const idle_thread = std.Thread.spawn(.{}, idleTimeoutThread, .{ self, shutdown, &self.listener_failed }) catch null;
         defer if (idle_thread) |t| t.join();
 
         std.log.info("Server running on {s}:{d}", .{ self.config.host, self.config.port });
 
-        try server.listen();
-    }
-
-    fn idleTimeoutThread(self: *Server, shutdown: *std.atomic.Value(bool)) void {
-        const check_interval_ns: u64 = 30 * std.time.ns_per_s;
+        const listen_thread = std.Thread.spawn(.{}, listenWrapper, .{ &server, &self.listener_failed }) catch |err| {
+            std.log.err("Failed to start listener thread: {}", .{err});
+            return err;
+        };
 
         while (!shutdown.load(.acquire)) {
-            std.Thread.sleep(check_interval_ns);
-            if (shutdown.load(.acquire)) break;
+            if (self.listener_failed.load(.acquire)) {
+                std.log.err("Server listener failed, shutting down", .{});
+                shutdown.store(true, .release);
+                break;
+            }
+            std.Thread.sleep(100 * std.time.ns_per_ms);
+        }
+
+        std.log.info("Shutting down server...", .{});
+        if (!self.listener_failed.load(.acquire)) {
+            server.stop();
+        }
+        listen_thread.join();
+        std.Thread.sleep(50 * std.time.ns_per_ms);
+
+        if (self.listener_failed.load(.acquire)) {
+            return error.ListenerFailed;
+        }
+    }
+
+    fn listenWrapper(server: *HttpServer, failed_flag: *std.atomic.Value(bool)) void {
+        server.listen() catch |err| {
+            std.log.err("Server listen failed: {}", .{err});
+            failed_flag.store(true, .release);
+        };
+    }
+
+    fn idleTimeoutThread(self: *Server, shutdown: *std.atomic.Value(bool), listener_failed: *std.atomic.Value(bool)) void {
+        const check_interval_s: u64 = 30;
+        var seconds_waited: u64 = 0;
+
+        while (!shutdown.load(.acquire) and !listener_failed.load(.acquire)) {
+            std.Thread.sleep(std.time.ns_per_s);
+            if (shutdown.load(.acquire) or listener_failed.load(.acquire)) break;
+            seconds_waited += 1;
+            if (seconds_waited < check_interval_s) continue;
+            seconds_waited = 0;
 
             if (self.config.idle_seconds == 0) continue;
 
