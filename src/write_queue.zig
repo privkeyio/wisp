@@ -3,36 +3,36 @@ const httpz = @import("httpz");
 const websocket = httpz.websocket;
 
 pub const WriteQueue = struct {
-    ws_conn: ?*websocket.Conn,
+    ws_conn: std.atomic.Value(?*websocket.Conn),
     dropped_count: std.atomic.Value(u64),
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) WriteQueue {
         return .{
-            .ws_conn = null,
+            .ws_conn = std.atomic.Value(?*websocket.Conn).init(null),
             .dropped_count = std.atomic.Value(u64).init(0),
             .allocator = allocator,
         };
     }
 
     pub fn start(self: *WriteQueue, ws_conn: *websocket.Conn) void {
-        self.ws_conn = ws_conn;
+        self.ws_conn.store(ws_conn, .release);
     }
 
     pub fn stop(self: *WriteQueue) void {
-        self.ws_conn = null;
+        self.ws_conn.store(null, .release);
     }
 
     pub fn enqueue(self: *WriteQueue, data: []const u8) bool {
-        if (self.ws_conn) |conn| {
-            conn.write(data) catch {
-                _ = self.dropped_count.fetchAdd(1, .monotonic);
-                return false;
-            };
-            return true;
-        }
-        _ = self.dropped_count.fetchAdd(1, .monotonic);
-        return false;
+        const conn = self.ws_conn.load(.acquire) orelse {
+            _ = self.dropped_count.fetchAdd(1, .monotonic);
+            return false;
+        };
+        conn.write(data) catch {
+            _ = self.dropped_count.fetchAdd(1, .monotonic);
+            return false;
+        };
+        return true;
     }
 
     pub fn droppedCount(self: *WriteQueue) u64 {
