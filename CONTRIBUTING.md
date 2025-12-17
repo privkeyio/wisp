@@ -141,7 +141,7 @@ Use the following prefixes for branch names:
 
 Follow the [Conventional Commits](https://www.conventionalcommits.org/) specification:
 
-```
+```commit
 <type>(<scope>): <description>
 
 [optional body]
@@ -165,7 +165,7 @@ Follow the [Conventional Commits](https://www.conventionalcommits.org/) specific
 
 ### Examples
 
-```
+```commit
 feat(spider): add automatic reconnection on disconnect
 
 fix(handler): prevent double-free in connection cleanup
@@ -179,7 +179,7 @@ refactor(storage): simplify LMDB transaction handling
 
 For breaking changes, add `!` after the type or add `BREAKING CHANGE:` in the footer:
 
-```
+```commit
 feat(config)!: change default port from 7777 to 8080
 
 BREAKING CHANGE: Default port changed. Update your configuration if relying on the default.
@@ -228,7 +228,7 @@ When implementing support for a new [NIP](https://github.com/nostr-protocol/nips
 
 ### NIP Implementation Workflow
 
-```
+```text
 1. Check if NIP requires libnostr-z changes
    ├── Yes → Implement in libnostr-z first, then update wisp
    └── No  → Implement directly in wisp
