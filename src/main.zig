@@ -160,6 +160,7 @@ pub fn main() !void {
     var mgmt_store = try ManagementStore.init(allocator, &lmdb);
 
     var nip86_handler = Nip86Handler.init(allocator, &config, &mgmt_store);
+    defer nip86_handler.deinit();
     nip86_handler.loadRelaySettings();
 
     var subs = Subscriptions.init(allocator);
