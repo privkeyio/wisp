@@ -11,6 +11,7 @@ const Connection = @import("connection.zig").Connection;
 const nip11 = @import("nip11.zig");
 const rate_limiter = @import("rate_limiter.zig");
 const write_queue = @import("write_queue.zig");
+const Nip86Handler = @import("nip86.zig").Nip86Handler;
 
 const WsWriter = struct {
     stream: net.Stream,
@@ -73,6 +74,7 @@ pub const TcpServer = struct {
 
     listener: ?net.Server = null,
     shutdown: *std.atomic.Value(bool),
+    nip86_handler: *Nip86Handler,
 
     conn_limiter: rate_limiter.ConnectionLimiter,
     ip_filter: rate_limiter.IpFilter,
@@ -83,6 +85,7 @@ pub const TcpServer = struct {
         handler: *MsgHandler,
         subs: *Subscriptions,
         shutdown: *std.atomic.Value(bool),
+        nip86_handler: *Nip86Handler,
     ) !TcpServer {
         var ip_filter = rate_limiter.IpFilter.init(allocator);
         try ip_filter.loadWhitelist(config.ip_whitelist);
@@ -94,6 +97,7 @@ pub const TcpServer = struct {
             .handler = handler,
             .subs = subs,
             .shutdown = shutdown,
+            .nip86_handler = nip86_handler,
             .conn_limiter = rate_limiter.ConnectionLimiter.init(allocator, config.max_connections_per_ip),
             .ip_filter = ip_filter,
         };
@@ -186,6 +190,10 @@ pub const TcpServer = struct {
         if (self.shutdown.load(.acquire)) return;
 
         if (!self.ip_filter.isAllowed(client_ip)) {
+            return;
+        }
+
+        if (self.nip86_handler.mgmt_store.isIpBlocked(client_ip)) {
             return;
         }
 
@@ -343,14 +351,17 @@ pub const TcpServer = struct {
     }
 
     fn handleHttp(self: *TcpServer, conn: net.Server.Connection, req_data: []const u8) !void {
+        const is_nip86_rpc = std.mem.indexOf(u8, req_data, "application/nostr+json+rpc") != null;
         const accepts_json = std.mem.indexOf(u8, req_data, "application/nostr+json") != null;
 
-        if (accepts_json) {
+        if (is_nip86_rpc) {
+            try self.handleNip86(conn, req_data);
+        } else if (accepts_json) {
             var response_buf: [4096]u8 = undefined;
             var content_buf: [2048]u8 = undefined;
 
             var content_stream = std.io.fixedBufferStream(&content_buf);
-            try nip11.write(self.config, content_stream.writer());
+            try nip11.write(self.config, self.nip86_handler, content_stream.writer());
             const content = content_stream.getWritten();
 
             const response = try std.fmt.bufPrint(&response_buf, "HTTP/1.1 200 OK\r\nContent-Type: application/nostr+json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {d}\r\n\r\n{s}", .{ content.len, content });
@@ -367,6 +378,53 @@ pub const TcpServer = struct {
             const response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: " ++ std.fmt.comptimePrint("{d}", .{html.len}) ++ "\r\n\r\n" ++ html;
             try conn.stream.writeAll(response);
         }
+    }
+
+    fn handleNip86(self: *TcpServer, conn: net.Server.Connection, req_data: []const u8) !void {
+        if (self.config.admin_pubkeys.len == 0) {
+            const response = "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 39\r\n\r\n{\"error\":\"management API not enabled\"}";
+            try conn.stream.writeAll(response);
+            return;
+        }
+
+        const body_start = std.mem.indexOf(u8, req_data, "\r\n\r\n") orelse {
+            const response = "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 32\r\n\r\n{\"error\":\"missing request body\"}";
+            try conn.stream.writeAll(response);
+            return;
+        };
+        const body = req_data[body_start + 4 ..];
+
+        const auth_header = extractHeader(req_data, "Authorization: ");
+
+        var url_buf: [512]u8 = undefined;
+        const request_url = if (self.config.relay_url.len > 0)
+            self.config.relay_url
+        else
+            std.fmt.bufPrint(&url_buf, "http://{s}:{d}", .{ self.config.host, self.config.port }) catch "";
+
+        const result = self.nip86_handler.handle(body, auth_header, request_url);
+
+        var response_buf: [65536]u8 = undefined;
+        const response = std.fmt.bufPrint(&response_buf, "HTTP/1.1 {d} OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: *\r\nAccess-Control-Allow-Methods: POST, OPTIONS\r\nContent-Length: {d}\r\n\r\n{s}", .{ result.status, result.body.len, result.body }) catch return;
+        conn.stream.writeAll(response) catch {};
+
+        if (result.owned) {
+            self.allocator.free(result.body);
+        }
+    }
+
+    fn extractHeader(data: []const u8, header_name: []const u8) ?[]const u8 {
+        var pos: usize = 0;
+        while (pos < data.len) {
+            const line_end = std.mem.indexOfPos(u8, data, pos, "\r\n") orelse data.len;
+            const line = data[pos..line_end];
+            if (std.ascii.startsWithIgnoreCase(line, header_name)) {
+                return line[header_name.len..];
+            }
+            if (line.len == 0) break;
+            pos = line_end + 2;
+        }
+        return null;
     }
 
     fn isWebsocketUpgrade(data: []const u8) bool {
