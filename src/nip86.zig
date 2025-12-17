@@ -24,7 +24,23 @@ pub const Nip86Handler = struct {
         };
     }
 
+    pub fn deinit(self: *Nip86Handler) void {
+        if (self.relay_name) |name| {
+            self.allocator.free(name);
+            self.relay_name = null;
+        }
+        if (self.relay_description) |desc| {
+            self.allocator.free(desc);
+            self.relay_description = null;
+        }
+        if (self.relay_icon) |icon| {
+            self.allocator.free(icon);
+            self.relay_icon = null;
+        }
+    }
+
     pub fn loadRelaySettings(self: *Nip86Handler) void {
+        self.deinit();
         self.relay_name = self.mgmt_store.getRelaySetting("name", self.allocator) catch null;
         self.relay_description = self.mgmt_store.getRelaySetting("description", self.allocator) catch null;
         self.relay_icon = self.mgmt_store.getRelaySetting("icon", self.allocator) catch null;
@@ -120,7 +136,8 @@ pub const Nip86Handler = struct {
     }
 
     fn banPubkey(self: *Nip86Handler, params: []const u8) Response {
-        const parsed = parseStringParams(params, 2);
+        var parsed = parseStringParams(params, 2, self.allocator);
+        defer parsed.deinit();
         if (parsed.values[0] == null) {
             return Response{ .status = 400, .body = "{\"error\":\"missing pubkey parameter\"}" };
         }
@@ -162,7 +179,8 @@ pub const Nip86Handler = struct {
     }
 
     fn allowPubkey(self: *Nip86Handler, params: []const u8) Response {
-        const parsed = parseStringParams(params, 2);
+        var parsed = parseStringParams(params, 2, self.allocator);
+        defer parsed.deinit();
         if (parsed.values[0] == null) {
             return Response{ .status = 400, .body = "{\"error\":\"missing pubkey parameter\"}" };
         }
@@ -204,7 +222,8 @@ pub const Nip86Handler = struct {
     }
 
     fn banEvent(self: *Nip86Handler, params: []const u8) Response {
-        const parsed = parseStringParams(params, 2);
+        var parsed = parseStringParams(params, 2, self.allocator);
+        defer parsed.deinit();
         if (parsed.values[0] == null) {
             return Response{ .status = 400, .body = "{\"error\":\"missing event_id parameter\"}" };
         }
@@ -220,7 +239,8 @@ pub const Nip86Handler = struct {
     }
 
     fn allowEvent(self: *Nip86Handler, params: []const u8) Response {
-        const parsed = parseStringParams(params, 2);
+        var parsed = parseStringParams(params, 2, self.allocator);
+        defer parsed.deinit();
         if (parsed.values[0] == null) {
             return Response{ .status = 400, .body = "{\"error\":\"missing event_id parameter\"}" };
         }
@@ -265,7 +285,8 @@ pub const Nip86Handler = struct {
     }
 
     fn changeRelayName(self: *Nip86Handler, params: []const u8) Response {
-        const parsed = parseStringParams(params, 1);
+        var parsed = parseStringParams(params, 1, self.allocator);
+        defer parsed.deinit();
         if (parsed.values[0] == null) {
             return Response{ .status = 400, .body = "{\"error\":\"missing name parameter\"}" };
         }
@@ -278,7 +299,8 @@ pub const Nip86Handler = struct {
     }
 
     fn changeRelayDescription(self: *Nip86Handler, params: []const u8) Response {
-        const parsed = parseStringParams(params, 1);
+        var parsed = parseStringParams(params, 1, self.allocator);
+        defer parsed.deinit();
         if (parsed.values[0] == null) {
             return Response{ .status = 400, .body = "{\"error\":\"missing description parameter\"}" };
         }
@@ -291,7 +313,8 @@ pub const Nip86Handler = struct {
     }
 
     fn changeRelayIcon(self: *Nip86Handler, params: []const u8) Response {
-        const parsed = parseStringParams(params, 1);
+        var parsed = parseStringParams(params, 1, self.allocator);
+        defer parsed.deinit();
         if (parsed.values[0] == null) {
             return Response{ .status = 400, .body = "{\"error\":\"missing icon url parameter\"}" };
         }
@@ -346,7 +369,8 @@ pub const Nip86Handler = struct {
     }
 
     fn blockIp(self: *Nip86Handler, params: []const u8) Response {
-        const parsed = parseStringParams(params, 2);
+        var parsed = parseStringParams(params, 2, self.allocator);
+        defer parsed.deinit();
         if (parsed.values[0] == null) {
             return Response{ .status = 400, .body = "{\"error\":\"missing ip parameter\"}" };
         }
@@ -358,7 +382,8 @@ pub const Nip86Handler = struct {
     }
 
     fn unblockIp(self: *Nip86Handler, params: []const u8) Response {
-        const parsed = parseStringParams(params, 1);
+        var parsed = parseStringParams(params, 1, self.allocator);
+        defer parsed.deinit();
         if (parsed.values[0] == null) {
             return Response{ .status = 400, .body = "{\"error\":\"missing ip parameter\"}" };
         }
@@ -506,7 +531,14 @@ fn parseRequest(body: []const u8) ?Request {
     pos += 1;
 
     const method_start = pos;
-    while (pos < body.len and body[pos] != '"') pos += 1;
+    while (pos < body.len) {
+        if (body[pos] == '\\' and pos + 1 < body.len) {
+            pos += 2;
+            continue;
+        }
+        if (body[pos] == '"') break;
+        pos += 1;
+    }
     if (pos >= body.len) return null;
     const method = body[method_start..pos];
 
@@ -519,13 +551,22 @@ fn parseRequest(body: []const u8) ?Request {
 
     const params_start = pos;
     var depth: i32 = 0;
+    var in_string = false;
     while (pos < body.len) {
-        if (body[pos] == '[') depth += 1;
-        if (body[pos] == ']') {
-            depth -= 1;
-            if (depth == 0) {
-                pos += 1;
-                break;
+        if (body[pos] == '\\' and in_string and pos + 1 < body.len) {
+            pos += 2;
+            continue;
+        }
+        if (body[pos] == '"') {
+            in_string = !in_string;
+        } else if (!in_string) {
+            if (body[pos] == '[') depth += 1;
+            if (body[pos] == ']') {
+                depth -= 1;
+                if (depth == 0) {
+                    pos += 1;
+                    break;
+                }
             }
         }
         pos += 1;
@@ -536,33 +577,54 @@ fn parseRequest(body: []const u8) ?Request {
 
 const ParsedParams = struct {
     values: [4]?[]const u8,
+    allocator: ?std.mem.Allocator,
+    allocated: [4]bool,
+
+    pub fn deinit(self: *ParsedParams) void {
+        if (self.allocator) |alloc| {
+            for (0..4) |i| {
+                if (self.allocated[i]) {
+                    if (self.values[i]) |v| {
+                        alloc.free(v);
+                    }
+                }
+            }
+        }
+    }
 };
 
-fn parseStringParams(params: []const u8, comptime max_count: usize) ParsedParams {
-    var result = ParsedParams{ .values = .{ null, null, null, null } };
+fn parseStringParams(params: []const u8, comptime max_count: usize, allocator: std.mem.Allocator) ParsedParams {
+    var result = ParsedParams{
+        .values = .{ null, null, null, null },
+        .allocator = allocator,
+        .allocated = .{ false, false, false, false },
+    };
     var count: usize = 0;
     var pos: usize = 0;
     var in_string = false;
     var string_start: usize = 0;
-    var escape = false;
 
     while (pos < params.len and count < max_count) {
         const c = params[pos];
 
-        if (escape) {
-            escape = false;
-            pos += 1;
-            continue;
-        }
-        if (c == '\\' and in_string) {
-            escape = true;
-            pos += 1;
+        if (c == '\\' and in_string and pos + 1 < params.len) {
+            pos += 2;
             continue;
         }
 
         if (c == '"') {
             if (in_string) {
-                result.values[count] = params[string_start..pos];
+                const raw = params[string_start..pos];
+                if (std.mem.indexOf(u8, raw, "\\") != null) {
+                    if (unescapeString(raw, allocator)) |unescaped| {
+                        result.values[count] = unescaped;
+                        result.allocated[count] = true;
+                    } else {
+                        result.values[count] = raw;
+                    }
+                } else {
+                    result.values[count] = raw;
+                }
                 count += 1;
             } else {
                 string_start = pos + 1;
@@ -576,6 +638,62 @@ fn parseStringParams(params: []const u8, comptime max_count: usize) ParsedParams
     return result;
 }
 
+fn unescapeString(raw: []const u8, allocator: std.mem.Allocator) ?[]const u8 {
+    var buf = allocator.alloc(u8, raw.len) catch return null;
+    var write_pos: usize = 0;
+    var read_pos: usize = 0;
+
+    while (read_pos < raw.len) {
+        if (raw[read_pos] == '\\' and read_pos + 1 < raw.len) {
+            const next = raw[read_pos + 1];
+            switch (next) {
+                '"' => {
+                    buf[write_pos] = '"';
+                    write_pos += 1;
+                    read_pos += 2;
+                },
+                '\\' => {
+                    buf[write_pos] = '\\';
+                    write_pos += 1;
+                    read_pos += 2;
+                },
+                'n' => {
+                    buf[write_pos] = '\n';
+                    write_pos += 1;
+                    read_pos += 2;
+                },
+                'r' => {
+                    buf[write_pos] = '\r';
+                    write_pos += 1;
+                    read_pos += 2;
+                },
+                't' => {
+                    buf[write_pos] = '\t';
+                    write_pos += 1;
+                    read_pos += 2;
+                },
+                else => {
+                    buf[write_pos] = raw[read_pos];
+                    write_pos += 1;
+                    read_pos += 1;
+                },
+            }
+        } else {
+            buf[write_pos] = raw[read_pos];
+            write_pos += 1;
+            read_pos += 1;
+        }
+    }
+
+    if (write_pos < buf.len) {
+        const shrunk = allocator.realloc(buf, write_pos) catch {
+            return buf[0..write_pos];
+        };
+        return shrunk;
+    }
+    return buf;
+}
+
 fn parseKindParam(params: []const u8) ?i32 {
     var pos: usize = 0;
     while (pos < params.len and (params[pos] == '[' or params[pos] == ' ' or params[pos] == '\t')) pos += 1;
@@ -585,7 +703,12 @@ fn parseKindParam(params: []const u8) ?i32 {
     while (pos < params.len) {
         const c = params[pos];
         if (c >= '0' and c <= '9') {
-            num = num * 10 + @as(i32, @intCast(c - '0'));
+            const digit: i32 = @intCast(c - '0');
+            const mul_result = @mulWithOverflow(num, 10);
+            if (mul_result[1] != 0) return null;
+            const add_result = @addWithOverflow(mul_result[0], digit);
+            if (add_result[1] != 0) return null;
+            num = add_result[0];
             found_digit = true;
         } else if (found_digit) {
             break;

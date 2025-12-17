@@ -77,7 +77,10 @@ pub const ManagementStore = struct {
         defer cursor.close();
 
         var list: std.ArrayListUnmanaged(PubkeyEntry) = .{};
-        errdefer list.deinit(allocator);
+        errdefer {
+            for (list.items) |*e| e.deinit(allocator);
+            list.deinit(allocator);
+        }
 
         var entry = try cursor.get(.first);
         while (entry != null) {
@@ -94,7 +97,7 @@ pub const ManagementStore = struct {
             entry = try cursor.get(.next);
         }
 
-        return list.toOwnedSlice(allocator);
+        return try list.toOwnedSlice(allocator);
     }
 
     pub fn allowPubkey(self: *ManagementStore, pubkey: *const [32]u8, reason: []const u8) !void {
@@ -139,7 +142,10 @@ pub const ManagementStore = struct {
         defer cursor.close();
 
         var list: std.ArrayListUnmanaged(PubkeyEntry) = .{};
-        errdefer list.deinit(allocator);
+        errdefer {
+            for (list.items) |*e| e.deinit(allocator);
+            list.deinit(allocator);
+        }
 
         var entry = try cursor.get(.first);
         while (entry != null) {
@@ -156,7 +162,7 @@ pub const ManagementStore = struct {
             entry = try cursor.get(.next);
         }
 
-        return list.toOwnedSlice(allocator);
+        return try list.toOwnedSlice(allocator);
     }
 
     pub fn banEvent(self: *ManagementStore, event_id: *const [32]u8, reason: []const u8) !void {
@@ -193,7 +199,10 @@ pub const ManagementStore = struct {
         defer cursor.close();
 
         var list: std.ArrayListUnmanaged(EventEntry) = .{};
-        errdefer list.deinit(allocator);
+        errdefer {
+            for (list.items) |*e| e.deinit(allocator);
+            list.deinit(allocator);
+        }
 
         var entry = try cursor.get(.first);
         while (entry != null) {
@@ -210,7 +219,7 @@ pub const ManagementStore = struct {
             entry = try cursor.get(.next);
         }
 
-        return list.toOwnedSlice(allocator);
+        return try list.toOwnedSlice(allocator);
     }
 
     pub fn allowKind(self: *ManagementStore, kind: i32) !void {
@@ -323,12 +332,16 @@ pub const ManagementStore = struct {
         defer cursor.close();
 
         var list: std.ArrayListUnmanaged(IpEntry) = .{};
-        errdefer list.deinit(allocator);
+        errdefer {
+            for (list.items) |*e| e.deinit(allocator);
+            list.deinit(allocator);
+        }
 
         var entry = try cursor.get(.first);
         while (entry != null) {
             const e = entry.?;
             const ip = try allocator.dupe(u8, e.key);
+            errdefer allocator.free(ip);
             const reason = if (e.value.len > 0)
                 try allocator.dupe(u8, e.value)
             else
@@ -337,7 +350,7 @@ pub const ManagementStore = struct {
             entry = try cursor.get(.next);
         }
 
-        return list.toOwnedSlice(allocator);
+        return try list.toOwnedSlice(allocator);
     }
 
     pub fn setRelaySetting(self: *ManagementStore, key: []const u8, value: []const u8) !void {
