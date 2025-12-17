@@ -8,6 +8,7 @@ const Connection = connection.Connection;
 const NegSession = connection.NegSession;
 const nostr = @import("nostr.zig");
 const rate_limiter = @import("rate_limiter.zig");
+const ManagementStore = @import("management_store.zig").ManagementStore;
 
 fn isMultiKindOnly(f: *const nostr.Filter) bool {
     const kinds = f.kinds() orelse return false;
@@ -149,6 +150,7 @@ pub const Handler = struct {
     send_fn: *const fn (conn_id: u64, data: []const u8) void,
     event_limiter: *rate_limiter.EventRateLimiter,
     shutdown: *std.atomic.Value(bool),
+    mgmt_store: *ManagementStore,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -159,6 +161,7 @@ pub const Handler = struct {
         send_fn: *const fn (conn_id: u64, data: []const u8) void,
         event_limiter: *rate_limiter.EventRateLimiter,
         shutdown: *std.atomic.Value(bool),
+        mgmt_store: *ManagementStore,
     ) Handler {
         return .{
             .allocator = allocator,
@@ -169,6 +172,7 @@ pub const Handler = struct {
             .send_fn = send_fn,
             .event_limiter = event_limiter,
             .shutdown = shutdown,
+            .mgmt_store = mgmt_store,
         };
     }
 
@@ -227,6 +231,28 @@ pub const Handler = struct {
                 self.sendOk(conn, id, false, "auth-required: authentication required to publish events");
                 return;
             }
+        }
+
+        if (self.mgmt_store.isPubkeyBanned(event.pubkey())) {
+            self.sendOk(conn, id, false, "blocked: pubkey is banned");
+            return;
+        }
+
+        if (self.mgmt_store.hasAllowedPubkeys()) {
+            if (!self.mgmt_store.isPubkeyAllowed(event.pubkey())) {
+                self.sendOk(conn, id, false, "blocked: pubkey not in allowlist");
+                return;
+            }
+        }
+
+        if (!self.mgmt_store.isKindAllowed(event.kind())) {
+            self.sendOk(conn, id, false, "blocked: event kind not allowed");
+            return;
+        }
+
+        if (self.mgmt_store.isEventBanned(id)) {
+            self.sendOk(conn, id, false, "blocked: event is banned");
+            return;
         }
 
         if (!self.event_limiter.checkAndRecord(conn.getClientIp())) {
