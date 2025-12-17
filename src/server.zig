@@ -106,7 +106,7 @@ pub const Server = struct {
             server.stop();
         }
         listen_thread.join();
-        std.Thread.sleep(50 * std.time.ns_per_ms);
+        std.Thread.sleep(500 * std.time.ns_per_ms);
 
         if (self.listener_failed.load(.acquire)) {
             return error.ListenerFailed;
@@ -172,6 +172,7 @@ const WsClient = struct {
     conn: *websocket.Conn,
     connection: *Connection,
     server: *Server,
+    closed: bool = false,
 
     pub const Context = struct {
         server: *Server,
@@ -252,6 +253,9 @@ const WsClient = struct {
     }
 
     pub fn close(self: *WsClient) void {
+        if (self.closed) return;
+        self.closed = true;
+
         const server = self.server;
         const allocator = server.allocator;
 

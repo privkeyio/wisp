@@ -350,7 +350,8 @@ pub const Spider = struct {
         if (conn.isRateLimited()) {
             const wait_ms: u64 = @intCast(@max(0, conn.rate_limit_until - std.time.milliTimestamp()));
             log.info("{s}: Rate limited, waiting {d}ms", .{ relay_url, wait_ms });
-            std.Thread.sleep(wait_ms * std.time.ns_per_ms);
+            self.interruptibleSleep(wait_ms);
+            if (!self.shouldRun()) return false;
         }
 
         const parsed = parseRelayUrl(relay_url) orelse {
@@ -389,6 +390,8 @@ pub const Spider = struct {
         log.info("{s}: Connected{s}", .{ relay_url, if (parsed.use_tls) " (TLS)" else "" });
         conn.state = .connected;
         const now = std.time.milliTimestamp();
+
+        client.readTimeout(1000) catch {};
 
         if (!self.shouldRun()) return false;
 
@@ -444,9 +447,13 @@ pub const Spider = struct {
         var catchup_events: u64 = 0;
         const catchup_start = std.time.milliTimestamp();
         const catchup_timeout_ms: i64 = 30_000;
+        var read_error = false;
 
         while (std.time.milliTimestamp() - catchup_start < catchup_timeout_ms) {
-            const message = client.read() catch break;
+            const message = client.read() catch {
+                read_error = true;
+                break;
+            };
             if (message) |msg_data| {
                 defer client.done(msg_data);
                 if (msg_data.data.len > 0) {
@@ -468,9 +475,11 @@ pub const Spider = struct {
             }
         }
 
-        var close_buf: [64]u8 = undefined;
-        const close_msg = std.fmt.bufPrint(&close_buf, "[\"CLOSE\",\"catchup\"]", .{}) catch return;
-        client.writeText(@constCast(close_msg)) catch {};
+        if (!read_error) {
+            var close_buf: [64]u8 = undefined;
+            const close_msg = std.fmt.bufPrint(&close_buf, "[\"CLOSE\",\"catchup\"]", .{}) catch return;
+            client.writeText(@constCast(close_msg)) catch {};
+        }
 
         log.info("{s}: Catch-up finished with {d} events", .{ relay_url, catchup_events });
     }
@@ -672,10 +681,12 @@ pub const Spider = struct {
             }
 
             const fetch_start = std.time.milliTimestamp();
+            var read_error = false;
             while (std.time.milliTimestamp() - fetch_start < 30_000) {
                 if (!self.shouldRun()) return;
                 const message = client.read() catch |err| {
                     if (err == error.WouldBlock) continue;
+                    read_error = true;
                     break;
                 };
                 if (message) |msg| {
@@ -686,6 +697,8 @@ pub const Spider = struct {
                     }
                 }
             }
+
+            if (read_error) return;
 
             var close_buf: [64]u8 = undefined;
             const close_msg = std.fmt.bufPrint(&close_buf, "[\"CLOSE\",\"fetch\"]", .{}) catch break;

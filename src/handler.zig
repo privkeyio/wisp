@@ -427,6 +427,7 @@ pub const Handler = struct {
         if (filters.len == 1 and isKindOnlyQuery(&filters[0])) {
             const kinds = filters[0].kinds().?;
             if (kinds.len == 1) {
+                if (self.shutdown.load(.acquire)) return;
                 var iter = self.store.query(filters, limit) catch {
                     self.sendClosed(conn, sub_id, "error: query failed");
                     return;
@@ -442,6 +443,7 @@ pub const Handler = struct {
                     conn.events_sent += 1;
                 }
             } else {
+                if (self.shutdown.load(.acquire)) return;
                 var mk_iter = self.store.queryMultiKind(kinds, limit) catch {
                     self.sendClosed(conn, sub_id, "error: query failed");
                     return;
@@ -458,6 +460,7 @@ pub const Handler = struct {
                 }
             }
         } else {
+            if (self.shutdown.load(.acquire)) return;
             var iter = self.store.query(filters, limit) catch {
                 self.sendClosed(conn, sub_id, "error: query failed");
                 return;
@@ -625,6 +628,7 @@ pub const Handler = struct {
             return;
         };
 
+        if (self.shutdown.load(.acquire)) return;
         var iter = self.store.query(&[_]nostr.Filter{filter}, self.config.negentropy_max_sync_events) catch {
             conn.removeNegSession(sub_id);
             self.sendNegErr(conn, sub_id, "error: query failed");
