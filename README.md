@@ -62,4 +62,4 @@ See `wisp.toml.example` for all options.
 
 ## License
 
-LGPL-2.1-or-later
+AGPL-3.0

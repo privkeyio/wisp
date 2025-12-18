@@ -56,6 +56,35 @@ pub const Subscriptions = struct {
         return self.connections.get(conn_id);
     }
 
+    pub fn withConnection(self: *Subscriptions, conn_id: u64, comptime func: fn (*Connection) void) void {
+        self.rwlock.lockShared();
+        defer self.rwlock.unlockShared();
+        if (self.connections.get(conn_id)) |conn| {
+            func(conn);
+        }
+    }
+
+    pub fn sendToConnection(self: *Subscriptions, conn_id: u64, data: []const u8) bool {
+        self.rwlock.lockShared();
+        defer self.rwlock.unlockShared();
+        if (self.connections.get(conn_id)) |conn| {
+            return conn.send(data);
+        }
+        return false;
+    }
+
+    pub fn closeIdleConnection(self: *Subscriptions, conn_id: u64, notice: []const u8) bool {
+        self.rwlock.lockShared();
+        defer self.rwlock.unlockShared();
+        if (self.connections.get(conn_id)) |conn| {
+            conn.sendDirect(notice);
+            conn.stopWriteQueue();
+            conn.clearDirectWriter();
+            return true;
+        }
+        return false;
+    }
+
     pub fn connectionCount(self: *Subscriptions) usize {
         self.rwlock.lockShared();
         defer self.rwlock.unlockShared();

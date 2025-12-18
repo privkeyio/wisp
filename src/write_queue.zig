@@ -1,37 +1,51 @@
 const std = @import("std");
-const httpz = @import("httpz");
-const websocket = httpz.websocket;
+const net = std.net;
+
+pub const WriteFn = *const fn (ctx: *anyopaque, data: []const u8) void;
 
 pub const WriteQueue = struct {
-    ws_conn: std.atomic.Value(?*websocket.Conn),
+    write_fn: ?WriteFn,
+    write_ctx: ?*anyopaque,
     dropped_count: std.atomic.Value(u64),
     allocator: std.mem.Allocator,
+    mutex: std.Thread.Mutex,
 
     pub fn init(allocator: std.mem.Allocator) WriteQueue {
         return .{
-            .ws_conn = std.atomic.Value(?*websocket.Conn).init(null),
+            .write_fn = null,
+            .write_ctx = null,
             .dropped_count = std.atomic.Value(u64).init(0),
             .allocator = allocator,
+            .mutex = .{},
         };
     }
 
-    pub fn start(self: *WriteQueue, ws_conn: *websocket.Conn) void {
-        self.ws_conn.store(ws_conn, .release);
+    pub fn start(self: *WriteQueue, write_fn: WriteFn, write_ctx: *anyopaque) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.write_fn = write_fn;
+        self.write_ctx = write_ctx;
     }
 
     pub fn stop(self: *WriteQueue) void {
-        self.ws_conn.store(null, .release);
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.write_fn = null;
+        self.write_ctx = null;
     }
 
     pub fn enqueue(self: *WriteQueue, data: []const u8) bool {
-        const conn = self.ws_conn.load(.acquire) orelse {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const write_fn = self.write_fn orelse {
             _ = self.dropped_count.fetchAdd(1, .monotonic);
             return false;
         };
-        conn.write(data) catch {
+        const ctx = self.write_ctx orelse {
             _ = self.dropped_count.fetchAdd(1, .monotonic);
             return false;
         };
+        write_fn(ctx, data);
         return true;
     }
 
@@ -40,6 +54,6 @@ pub const WriteQueue = struct {
     }
 
     pub fn queueDepth(_: *WriteQueue) usize {
-        return 0; // No queue
+        return 0;
     }
 };

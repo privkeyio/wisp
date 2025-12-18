@@ -4,17 +4,12 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Import dependencies
-    const httpz = b.dependency("httpz", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    // Get websocket from httpz to avoid version conflicts
-    const httpz_dep = httpz.builder.dependency("websocket", .{
-        .target = target,
-        .optimize = optimize,
-    });
     const nostr = b.dependency("nostr", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    // websocket client for spider outbound connections
+    const websocket = b.dependency("websocket", .{
         .target = target,
         .optimize = optimize,
     });
@@ -26,9 +21,8 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "httpz", .module = httpz.module("httpz") },
-                .{ .name = "websocket", .module = httpz_dep.module("websocket") },
                 .{ .name = "nostr", .module = nostr.module("nostr") },
+                .{ .name = "websocket", .module = websocket.module("websocket") },
             },
         }),
     });

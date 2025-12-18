@@ -1,19 +1,15 @@
 .{
     .name = .wisp,
-    .version = "0.1.2",
+    .version = "0.1.3",
     .fingerprint = 0xc4bdec9fe6401a8d,
     .dependencies = .{
-        .httpz = .{
-            .url = "https://github.com/karlseguin/http.zig/archive/refs/heads/master.tar.gz",
-            .hash = "httpz-0.0.0-PNVzrEktBwCzPoiua-S8LAYo2tILqczm3tSpneEzLQ9L",
-        },
+        // websocket client for spider outbound connections
         .websocket = .{
             .url = "https://github.com/karlseguin/websocket.zig/archive/refs/heads/master.tar.gz",
-            .hash = "websocket-0.1.0-ZPISdRNzAwAGszh62EpRtoQxu8wb1MSMVI6Ow0o2dmyJ",
+            .hash = "websocket-0.1.0-ZPISdZJxAwAt6Ys_JpoHQQV3NpWCof_N9Jg-Ul2g7OoV",
         },
         .nostr = .{
-            .url = "https://github.com/privkeyio/libnostr-z/archive/refs/tags/v0.1.6.tar.gz",
-            .hash = "nostr-0.1.6-JY6OcMPABABT9tx-BY8jcJpBa-boEF20VbZY-iX3DMMe",
+            .path = "../libnostr-z",
         },
     },
     .paths = .{

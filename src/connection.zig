@@ -1,8 +1,8 @@
 const std = @import("std");
 const nostr = @import("nostr.zig");
-const httpz = @import("httpz");
-const websocket = httpz.websocket;
-const WriteQueue = @import("write_queue.zig").WriteQueue;
+const write_queue = @import("write_queue.zig");
+const WriteQueue = write_queue.WriteQueue;
+const WriteFn = write_queue.WriteFn;
 
 pub const NegSession = struct {
     storage: nostr.negentropy.VectorStorage,
@@ -24,7 +24,9 @@ pub const Connection = struct {
     neg_sessions: std.StringHashMap(NegSession),
     created_at: i64,
     last_activity: i64,
-    ws_conn: ?*websocket.Conn = null,
+    direct_write_fn: ?WriteFn = null,
+    direct_write_ctx: ?*anyopaque = null,
+    write_mutex: std.Thread.Mutex = .{},
 
     events_received: u64 = 0,
     events_sent: u64 = 0,
@@ -55,7 +57,9 @@ pub const Connection = struct {
         self.events_sent = 0;
         self.client_ip = undefined;
         self.client_ip_len = 0;
-        self.ws_conn = null;
+        self.direct_write_fn = null;
+        self.direct_write_ctx = null;
+        self.write_mutex = .{};
         std.crypto.random.bytes(&self.auth_challenge);
         self.authenticated_pubkeys = std.AutoHashMap([32]u8, void).init(self.arena.allocator());
         self.challenge_sent = false;
@@ -63,8 +67,8 @@ pub const Connection = struct {
         self.deinitialized = false;
     }
 
-    pub fn startWriteQueue(self: *Connection, ws_conn: *websocket.Conn) void {
-        self.write_queue.start(ws_conn);
+    pub fn startWriteQueue(self: *Connection, write_fn: WriteFn, write_ctx: *anyopaque) void {
+        self.write_queue.start(write_fn, write_ctx);
     }
 
     pub fn stopWriteQueue(self: *Connection) void {
@@ -98,9 +102,27 @@ pub const Connection = struct {
     }
 
     pub fn sendDirect(self: *Connection, data: []const u8) void {
-        if (self.ws_conn) |conn| {
-            conn.write(data) catch {};
+        self.write_mutex.lock();
+        defer self.write_mutex.unlock();
+        if (self.direct_write_fn) |write_fn| {
+            if (self.direct_write_ctx) |ctx| {
+                write_fn(ctx, data);
+            }
         }
+    }
+
+    pub fn setDirectWriter(self: *Connection, write_fn: WriteFn, ctx: *anyopaque) void {
+        self.write_mutex.lock();
+        defer self.write_mutex.unlock();
+        self.direct_write_fn = write_fn;
+        self.direct_write_ctx = ctx;
+    }
+
+    pub fn clearDirectWriter(self: *Connection) void {
+        self.write_mutex.lock();
+        defer self.write_mutex.unlock();
+        self.direct_write_fn = null;
+        self.direct_write_ctx = null;
     }
 
     pub fn deinit(self: *Connection) void {
