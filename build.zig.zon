@@ -6,7 +6,7 @@
         // websocket client for spider outbound connections
         .websocket = .{
             .url = "https://github.com/karlseguin/websocket.zig/archive/refs/heads/master.tar.gz",
-            .hash = "websocket-0.1.0-ZPISdZJxAwAt6Ys_JpoHQQV3NpWCof_N9Jg-Ul2g7OoV",
+            .hash = "websocket-0.1.0-ZPISdRNzAwAGszh62EpRtoQxu8wb1MSMVI6Ow0o2dmyJ",
         },
         .nostr = .{
             .path = "../libnostr-z",
