@@ -8,7 +8,6 @@ pub const WriteQueue = struct {
     write_ctx: ?*anyopaque,
     dropped_count: std.atomic.Value(u64),
     allocator: std.mem.Allocator,
-    mutex: std.Thread.Mutex,
 
     pub fn init(allocator: std.mem.Allocator) WriteQueue {
         return .{
@@ -16,27 +15,20 @@ pub const WriteQueue = struct {
             .write_ctx = null,
             .dropped_count = std.atomic.Value(u64).init(0),
             .allocator = allocator,
-            .mutex = .{},
         };
     }
 
     pub fn start(self: *WriteQueue, write_fn: WriteFn, write_ctx: *anyopaque) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
         self.write_fn = write_fn;
         self.write_ctx = write_ctx;
     }
 
     pub fn stop(self: *WriteQueue) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
         self.write_fn = null;
         self.write_ctx = null;
     }
 
     pub fn enqueue(self: *WriteQueue, data: []const u8) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
         const write_fn = self.write_fn orelse {
             _ = self.dropped_count.fetchAdd(1, .monotonic);
             return false;

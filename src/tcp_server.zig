@@ -27,7 +27,7 @@ const WsWriter = struct {
         var header: [14]u8 = undefined;
         var header_len: usize = 2;
 
-        header[0] = 0x81; // FIN + text opcode
+        header[0] = 0x81;
 
         if (data.len < 126) {
             header[1] = @intCast(data.len);
@@ -50,8 +50,11 @@ const WsWriter = struct {
             header_len = 10;
         }
 
-        try self.stream.writeAll(header[0..header_len]);
-        try self.stream.writeAll(data);
+        var iovecs = [_]std.posix.iovec_const{
+            .{ .base = &header, .len = header_len },
+            .{ .base = data.ptr, .len = data.len },
+        };
+        _ = try self.stream.writev(&iovecs);
     }
 };
 

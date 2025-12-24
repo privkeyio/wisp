@@ -26,7 +26,6 @@ pub const Connection = struct {
     last_activity: i64,
     direct_write_fn: ?WriteFn = null,
     direct_write_ctx: ?*anyopaque = null,
-    write_mutex: std.Thread.Mutex = .{},
 
     events_received: u64 = 0,
     events_sent: u64 = 0,
@@ -59,7 +58,6 @@ pub const Connection = struct {
         self.client_ip_len = 0;
         self.direct_write_fn = null;
         self.direct_write_ctx = null;
-        self.write_mutex = .{};
         std.crypto.random.bytes(&self.auth_challenge);
         self.authenticated_pubkeys = std.AutoHashMap([32]u8, void).init(self.arena.allocator());
         self.challenge_sent = false;
@@ -102,8 +100,6 @@ pub const Connection = struct {
     }
 
     pub fn sendDirect(self: *Connection, data: []const u8) void {
-        self.write_mutex.lock();
-        defer self.write_mutex.unlock();
         if (self.direct_write_fn) |write_fn| {
             if (self.direct_write_ctx) |ctx| {
                 write_fn(ctx, data);
@@ -112,15 +108,11 @@ pub const Connection = struct {
     }
 
     pub fn setDirectWriter(self: *Connection, write_fn: WriteFn, ctx: *anyopaque) void {
-        self.write_mutex.lock();
-        defer self.write_mutex.unlock();
         self.direct_write_fn = write_fn;
         self.direct_write_ctx = ctx;
     }
 
     pub fn clearDirectWriter(self: *Connection) void {
-        self.write_mutex.lock();
-        defer self.write_mutex.unlock();
         self.direct_write_fn = null;
         self.direct_write_ctx = null;
     }

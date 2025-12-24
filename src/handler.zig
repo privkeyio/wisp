@@ -434,9 +434,7 @@ pub const Handler = struct {
                 };
                 defer iter.deinit();
 
-                while (true) {
-                    if (self.shutdown.load(.acquire)) return;
-                    const json = iter.next() catch null orelse break;
+                while (iter.next() catch null) |json| {
                     var buf: [65536]u8 = undefined;
                     const event_msg = nostr.RelayMsg.eventRaw(sub_id, json, &buf) catch continue;
                     _ = conn.send(event_msg);
@@ -450,9 +448,7 @@ pub const Handler = struct {
                 };
                 defer mk_iter.deinit();
 
-                while (true) {
-                    if (self.shutdown.load(.acquire)) return;
-                    const json = mk_iter.next() catch null orelse break;
+                while (mk_iter.next() catch null) |json| {
                     var buf: [65536]u8 = undefined;
                     const event_msg = nostr.RelayMsg.eventRaw(sub_id, json, &buf) catch continue;
                     _ = conn.send(event_msg);
@@ -467,9 +463,7 @@ pub const Handler = struct {
             };
             defer iter.deinit();
 
-            while (true) {
-                if (self.shutdown.load(.acquire)) return;
-                const json = iter.next() catch null orelse break;
+            while (iter.next() catch null) |json| {
                 var buf: [65536]u8 = undefined;
                 const event_msg = nostr.RelayMsg.eventRaw(sub_id, json, &buf) catch continue;
                 _ = conn.send(event_msg);
@@ -525,16 +519,13 @@ pub const Handler = struct {
 
         var total_count: u64 = 0;
         for (filters) |filter| {
-            if (self.shutdown.load(.acquire)) return;
             var iter = self.store.query(&[_]nostr.Filter{filter}, self.config.query_limit_max) catch {
                 self.sendClosed(conn, sub_id, "error: query failed");
                 return;
             };
             defer iter.deinit();
 
-            while (true) {
-                if (self.shutdown.load(.acquire)) return;
-                _ = iter.next() catch null orelse break;
+            while (iter.next() catch null) |_| {
                 total_count += 1;
             }
         }
@@ -637,9 +628,7 @@ pub const Handler = struct {
         defer iter.deinit();
 
         var count: u32 = 0;
-        while (true) {
-            if (self.shutdown.load(.acquire)) return;
-            const json = iter.next() catch null orelse break;
+        while (iter.next() catch null) |json| {
             var event = nostr.Event.parse(json) catch continue;
             defer event.deinit();
             session.storage.insert(@intCast(event.createdAt()), event.id()) catch continue;
