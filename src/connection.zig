@@ -1,4 +1,5 @@
 const std = @import("std");
+const posix = std.posix;
 const nostr = @import("nostr.zig");
 const write_queue = @import("write_queue.zig");
 const WriteQueue = write_queue.WriteQueue;
@@ -26,6 +27,7 @@ pub const Connection = struct {
     last_activity: i64,
     direct_write_fn: ?WriteFn = null,
     direct_write_ctx: ?*anyopaque = null,
+    socket_handle: ?posix.socket_t = null,
 
     events_received: u64 = 0,
     events_sent: u64 = 0,
@@ -58,6 +60,7 @@ pub const Connection = struct {
         self.client_ip_len = 0;
         self.direct_write_fn = null;
         self.direct_write_ctx = null;
+        self.socket_handle = null;
         std.crypto.random.bytes(&self.auth_challenge);
         self.authenticated_pubkeys = std.AutoHashMap([32]u8, void).init(self.arena.allocator());
         self.challenge_sent = false;
@@ -115,6 +118,17 @@ pub const Connection = struct {
     pub fn clearDirectWriter(self: *Connection) void {
         self.direct_write_fn = null;
         self.direct_write_ctx = null;
+    }
+
+    pub fn setSocketHandle(self: *Connection, handle: posix.socket_t) void {
+        self.socket_handle = handle;
+    }
+
+    pub fn shutdown(self: *Connection) void {
+        if (self.socket_handle) |handle| {
+            posix.shutdown(handle, .both) catch {};
+            self.socket_handle = null;
+        }
     }
 
     pub fn deinit(self: *Connection) void {

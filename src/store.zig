@@ -490,7 +490,6 @@ pub const MultiKindResult = struct {
 pub const QueryIterator = struct {
     store: *Store,
     filters: []const nostr.Filter,
-    owned_filters: ?[]nostr.Filter = null,
     limit: u32,
     returned: u32 = 0,
     txn: ?Txn = null,
@@ -504,35 +503,14 @@ pub const QueryIterator = struct {
     const IndexType = enum { created, kind, pubkey, tag };
 
     pub fn init(store: *Store, filters: []const nostr.Filter, limit: u32) QueryIterator {
-        const allocator = store.allocator;
-        const owned = allocator.alloc(nostr.Filter, filters.len) catch {
-            return QueryIterator{
-                .store = store,
-                .filters = &.{},
-                .limit = limit,
-            };
-        };
-        for (filters, 0..) |f, i| {
-            owned[i] = f.clone(allocator) catch {
-                for (0..i) |j| owned[j].deinit();
-                allocator.free(owned);
-                return QueryIterator{
-                    .store = store,
-                    .filters = &.{},
-                    .limit = limit,
-                };
-            };
-        }
-
         var iter = QueryIterator{
             .store = store,
-            .filters = owned,
-            .owned_filters = owned,
+            .filters = filters,
             .limit = limit,
         };
 
-        if (owned.len > 0) {
-            const f = owned[0];
+        if (filters.len > 0) {
+            const f = filters[0];
 
             if (f.authors()) |authors| {
                 if (authors.len == 1) {
@@ -684,9 +662,5 @@ pub const QueryIterator = struct {
     pub fn deinit(self: *QueryIterator) void {
         if (self.cursor) |*cur| cur.close();
         if (self.txn) |*t| t.abort();
-        if (self.owned_filters) |owned| {
-            for (owned) |*f| f.deinit();
-            self.store.allocator.free(owned);
-        }
     }
 };

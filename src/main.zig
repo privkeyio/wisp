@@ -202,15 +202,6 @@ pub fn main() !void {
 
     try server.run();
 
-    if (spider) |*s| {
-        s.stop();
-        s.deinit();
-    }
-    spider = null;
-
-    // server.deinit() will be called by defer
-    std.Thread.sleep(200 * std.time.ns_per_ms);
-
     std.log.info("Shutdown complete", .{});
 }
 

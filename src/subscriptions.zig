@@ -33,6 +33,13 @@ pub const Subscriptions = struct {
         try self.connections.put(conn.id, conn);
     }
 
+    pub fn tryAddConnection(self: *Subscriptions, conn: *Connection, max_connections: usize) !void {
+        self.rwlock.lock();
+        defer self.rwlock.unlock();
+        if (self.connections.count() >= max_connections) return error.TooManyConnections;
+        try self.connections.put(conn.id, conn);
+    }
+
     pub fn removeConnection(self: *Subscriptions, conn_id: u64) void {
         self.rwlock.lock();
         defer self.rwlock.unlock();
@@ -80,6 +87,7 @@ pub const Subscriptions = struct {
             conn.sendDirect(notice);
             conn.stopWriteQueue();
             conn.clearDirectWriter();
+            conn.shutdown();
             return true;
         }
         return false;

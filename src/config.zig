@@ -45,8 +45,6 @@ pub const Config = struct {
 
     min_pow_difficulty: u8,
 
-    log_level: []const u8,
-
     _allocated: std.ArrayListUnmanaged([]const u8),
     _allocator: ?std.mem.Allocator,
 
@@ -88,7 +86,6 @@ pub const Config = struct {
             .negentropy_enabled = true,
             .negentropy_max_sync_events = 1000000,
             .min_pow_difficulty = 0,
-            .log_level = "info",
             ._allocated = undefined,
             ._allocator = null,
         };
@@ -230,10 +227,6 @@ pub const Config = struct {
             } else if (std.mem.eql(u8, key, "max_sync_events")) {
                 self.negentropy_max_sync_events = try std.fmt.parseInt(u32, value, 10);
             }
-        } else if (std.mem.eql(u8, section, "logging")) {
-            if (std.mem.eql(u8, key, "level")) {
-                self.log_level = try self.allocString(value);
-            }
         }
     }
 
@@ -295,7 +288,6 @@ pub const Config = struct {
         if (std.posix.getenv("WISP_MIN_POW_DIFFICULTY")) |v| {
             self.min_pow_difficulty = std.fmt.parseInt(u8, v, 10) catch self.min_pow_difficulty;
         }
-        if (std.posix.getenv("WISP_LOG_LEVEL")) |v| self.log_level = v;
     }
 
     pub fn deinit(self: *Config) void {

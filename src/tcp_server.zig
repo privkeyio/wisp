@@ -15,12 +15,16 @@ const write_queue = @import("write_queue.zig");
 const WsWriter = struct {
     stream: net.Stream,
     mutex: std.Thread.Mutex = .{},
+    failed: bool = false,
 
     fn write(ctx: *anyopaque, data: []const u8) void {
         const self: *WsWriter = @ptrCast(@alignCast(ctx));
         self.mutex.lock();
         defer self.mutex.unlock();
-        self.writeWsFrame(data) catch {};
+        if (self.failed) return;
+        self.writeWsFrame(data) catch {
+            self.failed = true;
+        };
     }
 
     fn writeWsFrame(self: *WsWriter, data: []const u8) !void {
@@ -100,14 +104,8 @@ pub const TcpServer = struct {
             l.deinit();
             self.listener = null;
         }
-        // Only deinit limiters if they haven't been freed
-        // This makes deinit idempotent
-        if (self.conn_limiter.ip_buckets.capacity() > 0) {
-            self.conn_limiter.deinit();
-        }
-        if (self.ip_filter.whitelist.capacity() > 0) {
-            self.ip_filter.deinit();
-        }
+        self.conn_limiter.deinit();
+        self.ip_filter.deinit();
     }
 
     pub fn run(self: *TcpServer) !void {
@@ -140,7 +138,6 @@ pub const TcpServer = struct {
             l.deinit();
             self.listener = null;
         }
-        // Give connection threads time to finish
         std.Thread.sleep(200 * std.time.ns_per_ms);
     }
 
@@ -212,6 +209,9 @@ pub const TcpServer = struct {
     }
 
     fn handleWebsocket(self: *TcpServer, conn: net.Server.Connection, client_ip: []const u8, initial_data: []const u8) !void {
+        const TCP_NODELAY = 1;
+        posix.setsockopt(conn.stream.handle, posix.IPPROTO.TCP, TCP_NODELAY, &std.mem.toBytes(@as(i32, 1))) catch {};
+
         const req, const consumed = try ws.handshake.Req.parse(initial_data);
         _ = consumed;
 
@@ -220,24 +220,27 @@ pub const TcpServer = struct {
         const response = try std.fmt.bufPrint(&response_buf, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {s}\r\n\r\n", .{&accept});
         try conn.stream.writeAll(response);
 
+        var ws_writer = WsWriter{ .stream = conn.stream };
+
         self.mutex.lock();
-        if (self.subs.connectionCount() >= self.config.max_connections) {
-            self.mutex.unlock();
-            return error.TooManyConnections;
-        }
         const conn_id = self.next_id;
         self.next_id += 1;
         self.mutex.unlock();
 
-        var ws_writer = WsWriter{ .stream = conn.stream };
-
         const connection = try self.allocator.create(Connection);
         connection.init(self.allocator, conn_id);
         connection.setClientIp(client_ip);
+        connection.setSocketHandle(conn.stream.handle);
         connection.setDirectWriter(WsWriter.write, @ptrCast(&ws_writer));
         connection.startWriteQueue(WsWriter.write, @ptrCast(&ws_writer));
 
-        try self.subs.addConnection(connection);
+        self.subs.tryAddConnection(connection, self.config.max_connections) catch |err| {
+            connection.stopWriteQueue();
+            connection.clearDirectWriter();
+            connection.deinit();
+            self.allocator.destroy(connection);
+            return err;
+        };
         self.conn_limiter.addConnection(client_ip);
 
         defer {
@@ -260,6 +263,14 @@ pub const TcpServer = struct {
         var read_pos: usize = 0;
 
         while (!self.shutdown.load(.acquire)) {
+            if (read_pos >= frame_buf.len) {
+                var close_response: [16]u8 = undefined;
+                const close_frame = ws.Frame{ .fin = 1, .opcode = .close, .payload = &.{}, .mask = 0 };
+                const close_len = close_frame.encode(&close_response, 1002);
+                conn.stream.writeAll(close_response[0..close_len]) catch {};
+                return;
+            }
+
             const bytes_read = conn.stream.read(frame_buf[read_pos..]) catch |err| {
                 if (err == error.ConnectionResetByPeer or err == error.BrokenPipe) break;
                 return err;
@@ -270,6 +281,8 @@ pub const TcpServer = struct {
             connection.touch();
 
             while (read_pos > 0) {
+                if (try self.checkOversizedFrame(connection, conn, frame_buf[0..read_pos])) return;
+
                 const frame, const frame_len = ws.Frame.parse(frame_buf[0..read_pos]) catch |err| {
                     if (err == error.SplitBuffer) break;
                     return err;
@@ -289,13 +302,7 @@ pub const TcpServer = struct {
                     const pong_len = pong_frame.encode(&pong_buf, 0);
                     conn.stream.writeAll(pong_buf[0..pong_len]) catch {};
                 } else if (frame.opcode == .text or frame.opcode == .binary) {
-                    if (frame.payload.len <= self.config.max_message_size) {
-                        self.handler.handle(connection, frame.payload);
-                    } else {
-                        var notice_buf: [256]u8 = undefined;
-                        const notice = nostr.RelayMsg.notice("error: message too large", &notice_buf) catch continue;
-                        connection.sendDirect(notice);
-                    }
+                    self.handler.handle(connection, frame.payload);
                 }
 
                 if (frame_len < read_pos) {
@@ -304,6 +311,35 @@ pub const TcpServer = struct {
                 read_pos -= frame_len;
             }
         }
+    }
+
+    fn checkOversizedFrame(self: *TcpServer, connection: *Connection, conn: net.Server.Connection, data: []const u8) !bool {
+        if (data.len < 2) return false;
+        const payload_len_byte: u8 = data[1] & 0b0111_1111;
+        const payload_len: u64 = switch (payload_len_byte) {
+            126 => blk: {
+                if (data.len < 4) return false;
+                break :blk std.mem.readInt(u16, data[2..4], .big);
+            },
+            127 => blk: {
+                if (data.len < 10) return false;
+                break :blk std.mem.readInt(u64, data[2..10], .big);
+            },
+            else => payload_len_byte,
+        };
+        if (payload_len > self.config.max_message_size) {
+            var notice_buf: [256]u8 = undefined;
+            const notice = nostr.RelayMsg.notice("error: message too large", &notice_buf) catch {
+                return true;
+            };
+            connection.sendDirect(notice);
+            var close_response: [16]u8 = undefined;
+            const close_frame = ws.Frame{ .fin = 1, .opcode = .close, .payload = &.{}, .mask = 0 };
+            const close_len = close_frame.encode(&close_response, 1009);
+            conn.stream.writeAll(close_response[0..close_len]) catch {};
+            return true;
+        }
+        return false;
     }
 
     fn handleHttp(self: *TcpServer, conn: net.Server.Connection, req_data: []const u8) !void {
