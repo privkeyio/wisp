@@ -1,5 +1,6 @@
 const std = @import("std");
 const Config = @import("config.zig").Config;
+const Nip86Handler = @import("nip86.zig").Nip86Handler;
 
 fn writeJsonString(w: anytype, value: []const u8) !void {
     try w.writeByte('"');
@@ -17,13 +18,18 @@ fn writeJsonString(w: anytype, value: []const u8) !void {
     try w.writeByte('"');
 }
 
-pub fn write(config: *const Config, w: anytype) !void {
+pub fn write(config: *const Config, nip86: *const Nip86Handler, w: anytype) !void {
     try w.writeAll("{");
 
     try w.writeAll("\"name\":");
-    try writeJsonString(w, config.name);
+    try writeJsonString(w, nip86.getRelayName());
     try w.writeAll(",\"description\":");
-    try writeJsonString(w, config.description);
+    try writeJsonString(w, nip86.getRelayDescription());
+
+    if (nip86.getRelayIcon()) |icon| {
+        try w.writeAll(",\"icon\":");
+        try writeJsonString(w, icon);
+    }
 
     if (config.pubkey) |pk| {
         try w.writeAll(",\"pubkey\":");
@@ -35,7 +41,7 @@ pub fn write(config: *const Config, w: anytype) !void {
         try writeJsonString(w, contact);
     }
 
-    try w.writeAll(",\"supported_nips\":[1,2,9,11,13,16,33,40,42,45,50,65,70,77]");
+    try w.writeAll(",\"supported_nips\":[1,2,9,11,13,16,33,40,42,45,50,65,70,77,86]");
     try w.writeAll(",\"software\":\"https://github.com/privkeyio/wisp\"");
     try w.writeAll(",\"version\":\"0.1.0\"");
 
