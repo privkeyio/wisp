@@ -38,7 +38,7 @@ Spider reads your follow list and pulls your feed. Point your client at `ws://lo
 
 ## Features
 
-* NIPs: 1, 9, 11, 13, 16, 33, 40, 42, 45, 50, 65, 70, 77
+* NIPs: 1, 2, 9, 11, 13, 16, 33, 40, 42, 45, 50, 65, 70, 77
 * LMDB storage (no external database)
 * Spider mode for syncing events from external relays
 * Import/export to JSONL
@@ -62,4 +62,4 @@ See `wisp.toml.example` for all options.
 
 ## License
 
-LGPL-2.1-or-later
+AGPL-3.0

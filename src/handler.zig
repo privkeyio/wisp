@@ -148,6 +148,7 @@ pub const Handler = struct {
     broadcaster: *Broadcaster,
     send_fn: *const fn (conn_id: u64, data: []const u8) void,
     event_limiter: *rate_limiter.EventRateLimiter,
+    shutdown: *std.atomic.Value(bool),
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -157,6 +158,7 @@ pub const Handler = struct {
         broadcaster: *Broadcaster,
         send_fn: *const fn (conn_id: u64, data: []const u8) void,
         event_limiter: *rate_limiter.EventRateLimiter,
+        shutdown: *std.atomic.Value(bool),
     ) Handler {
         return .{
             .allocator = allocator,
@@ -166,10 +168,12 @@ pub const Handler = struct {
             .broadcaster = broadcaster,
             .send_fn = send_fn,
             .event_limiter = event_limiter,
+            .shutdown = shutdown,
         };
     }
 
     pub fn handle(self: *Handler, conn: *Connection, message: []const u8) void {
+        if (self.shutdown.load(.acquire)) return;
         conn.touch();
 
         if (!validateMessageStructure(message)) {
@@ -370,12 +374,16 @@ pub const Handler = struct {
     }
 
     fn handleReq(self: *Handler, conn: *Connection, msg: *nostr.ClientMsg) void {
-        const sub_id = msg.subscriptionId();
+        const sub_id_raw = msg.subscriptionId();
 
-        if (sub_id.len == 0 or sub_id.len > 64) {
-            self.sendClosed(conn, sub_id, "error: invalid subscription ID");
+        if (sub_id_raw.len == 0 or sub_id_raw.len > 64) {
+            self.sendClosed(conn, sub_id_raw, "error: invalid subscription ID");
             return;
         }
+
+        var sub_id_buf: [64]u8 = undefined;
+        @memcpy(sub_id_buf[0..sub_id_raw.len], sub_id_raw);
+        const sub_id = sub_id_buf[0..sub_id_raw.len];
 
         if (self.config.auth_required) {
             if (!conn.isAuthenticated()) {
@@ -419,6 +427,7 @@ pub const Handler = struct {
         if (filters.len == 1 and isKindOnlyQuery(&filters[0])) {
             const kinds = filters[0].kinds().?;
             if (kinds.len == 1) {
+                if (self.shutdown.load(.acquire)) return;
                 var iter = self.store.query(filters, limit) catch {
                     self.sendClosed(conn, sub_id, "error: query failed");
                     return;
@@ -432,6 +441,7 @@ pub const Handler = struct {
                     conn.events_sent += 1;
                 }
             } else {
+                if (self.shutdown.load(.acquire)) return;
                 var mk_iter = self.store.queryMultiKind(kinds, limit) catch {
                     self.sendClosed(conn, sub_id, "error: query failed");
                     return;
@@ -446,6 +456,7 @@ pub const Handler = struct {
                 }
             }
         } else {
+            if (self.shutdown.load(.acquire)) return;
             var iter = self.store.query(filters, limit) catch {
                 self.sendClosed(conn, sub_id, "error: query failed");
                 return;
@@ -608,6 +619,7 @@ pub const Handler = struct {
             return;
         };
 
+        if (self.shutdown.load(.acquire)) return;
         var iter = self.store.query(&[_]nostr.Filter{filter}, self.config.negentropy_max_sync_events) catch {
             conn.removeNegSession(sub_id);
             self.sendNegErr(conn, sub_id, "error: query failed");
@@ -665,11 +677,13 @@ pub const Handler = struct {
         conn.removeNegSession(msg.subscriptionId());
     }
 
-    fn reconcileAndSend(_: *Handler, conn: *Connection, sub_id: []const u8, session: *NegSession, query: []const u8) void {
+    fn reconcileAndSend(self: *Handler, conn: *Connection, sub_id: []const u8, session: *NegSession, query: []const u8) void {
+        if (self.shutdown.load(.acquire)) return;
         var out_buf: [65536]u8 = undefined;
         var neg = nostr.negentropy.Negentropy.init(session.storage.storage(), 0);
 
         var result = neg.reconcile(query, &out_buf, conn.allocator()) catch {
+            if (self.shutdown.load(.acquire)) return;
             var err_buf: [512]u8 = undefined;
             const err_msg = nostr.RelayMsg.negErr(sub_id, "error: reconciliation failed", &err_buf) catch return;
             conn.sendDirect(err_msg);
@@ -677,48 +691,56 @@ pub const Handler = struct {
         };
         defer result.deinit();
 
+        if (self.shutdown.load(.acquire)) return;
         var msg_buf: [131072]u8 = undefined;
         const neg_msg = nostr.RelayMsg.negMsg(sub_id, result.output, &msg_buf) catch return;
         conn.sendDirect(neg_msg);
     }
 
-    fn sendNegErr(_: *Handler, conn: *Connection, sub_id: []const u8, reason: []const u8) void {
+    fn sendNegErr(self: *Handler, conn: *Connection, sub_id: []const u8, reason: []const u8) void {
+        if (self.shutdown.load(.acquire)) return;
         var buf: [512]u8 = undefined;
         const msg = nostr.RelayMsg.negErr(sub_id, reason, &buf) catch return;
         conn.sendDirect(msg);
     }
 
-    fn sendOk(_: *Handler, conn: *Connection, event_id: *const [32]u8, success: bool, message: []const u8) void {
+    fn sendOk(self: *Handler, conn: *Connection, event_id: *const [32]u8, success: bool, message: []const u8) void {
+        if (self.shutdown.load(.acquire)) return;
         var buf: [512]u8 = undefined;
         const msg = nostr.RelayMsg.ok(event_id, success, message, &buf) catch return;
         conn.sendDirect(msg);
     }
 
-    fn sendEose(_: *Handler, conn: *Connection, sub_id: []const u8) void {
+    fn sendEose(self: *Handler, conn: *Connection, sub_id: []const u8) void {
+        if (self.shutdown.load(.acquire)) return;
         var buf: [256]u8 = undefined;
         const msg = nostr.RelayMsg.eose(sub_id, &buf) catch return;
         conn.sendDirect(msg);
     }
 
-    fn sendClosed(_: *Handler, conn: *Connection, sub_id: []const u8, message: []const u8) void {
+    fn sendClosed(self: *Handler, conn: *Connection, sub_id: []const u8, message: []const u8) void {
+        if (self.shutdown.load(.acquire)) return;
         var buf: [512]u8 = undefined;
         const msg = nostr.RelayMsg.closed(sub_id, message, &buf) catch return;
         conn.sendDirect(msg);
     }
 
-    fn sendCount(_: *Handler, conn: *Connection, sub_id: []const u8, count_val: u64) void {
+    fn sendCount(self: *Handler, conn: *Connection, sub_id: []const u8, count_val: u64) void {
+        if (self.shutdown.load(.acquire)) return;
         var buf: [256]u8 = undefined;
         const msg = nostr.RelayMsg.count(sub_id, count_val, &buf) catch return;
         conn.sendDirect(msg);
     }
 
-    fn sendNotice(_: *Handler, conn: *Connection, message: []const u8) void {
+    fn sendNotice(self: *Handler, conn: *Connection, message: []const u8) void {
+        if (self.shutdown.load(.acquire)) return;
         var buf: [512]u8 = undefined;
         const msg = nostr.RelayMsg.notice(message, &buf) catch return;
         conn.sendDirect(msg);
     }
 
-    fn sendAuthChallenge(_: *Handler, conn: *Connection) void {
+    fn sendAuthChallenge(self: *Handler, conn: *Connection) void {
+        if (self.shutdown.load(.acquire)) return;
         if (conn.challenge_sent) return;
         var buf: [256]u8 = undefined;
         const auth_msg = nostr.RelayMsg.auth(&conn.auth_challenge, &buf) catch return;
