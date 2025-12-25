@@ -2,6 +2,8 @@ const std = @import("std");
 const Config = @import("config.zig").Config;
 const ManagementStore = @import("management_store.zig").ManagementStore;
 const nostr = @import("nostr.zig");
+const nip86 = nostr.nip86;
+const hex = nostr.hex;
 
 pub const Nip86Handler = struct {
     config: *const Config,
@@ -76,7 +78,7 @@ pub const Nip86Handler = struct {
             return Response{ .status = 403, .body = "{\"error\":\"forbidden: not an admin\"}" };
         }
 
-        const request = parseRequest(body) orelse {
+        const request = nip86.Request.parse(body) orelse {
             return Response{ .status = 400, .body = "{\"error\":\"invalid request\"}" };
         };
 
@@ -84,45 +86,30 @@ pub const Nip86Handler = struct {
     }
 
     fn dispatch(self: *Nip86Handler, method: []const u8, params: []const u8) Response {
-        if (std.mem.eql(u8, method, "supportedmethods")) {
-            return self.supportedMethods();
-        } else if (std.mem.eql(u8, method, "banpubkey")) {
-            return self.banPubkey(params);
-        } else if (std.mem.eql(u8, method, "listbannedpubkeys")) {
-            return self.listBannedPubkeys();
-        } else if (std.mem.eql(u8, method, "allowpubkey")) {
-            return self.allowPubkey(params);
-        } else if (std.mem.eql(u8, method, "listallowedpubkeys")) {
-            return self.listAllowedPubkeys();
-        } else if (std.mem.eql(u8, method, "banevent")) {
-            return self.banEvent(params);
-        } else if (std.mem.eql(u8, method, "allowevent")) {
-            return self.allowEvent(params);
-        } else if (std.mem.eql(u8, method, "listbannedevents")) {
-            return self.listBannedEvents();
-        } else if (std.mem.eql(u8, method, "listeventsneedingmoderation")) {
-            return self.listEventsNeedingModeration();
-        } else if (std.mem.eql(u8, method, "changerelayname")) {
-            return self.changeRelayName(params);
-        } else if (std.mem.eql(u8, method, "changerelaydescription")) {
-            return self.changeRelayDescription(params);
-        } else if (std.mem.eql(u8, method, "changerelayicon")) {
-            return self.changeRelayIcon(params);
-        } else if (std.mem.eql(u8, method, "allowkind")) {
-            return self.allowKind(params);
-        } else if (std.mem.eql(u8, method, "disallowkind")) {
-            return self.disallowKind(params);
-        } else if (std.mem.eql(u8, method, "listallowedkinds")) {
-            return self.listAllowedKinds();
-        } else if (std.mem.eql(u8, method, "blockip")) {
-            return self.blockIp(params);
-        } else if (std.mem.eql(u8, method, "unblockip")) {
-            return self.unblockIp(params);
-        } else if (std.mem.eql(u8, method, "listblockedips")) {
-            return self.listBlockedIps();
-        } else {
+        const m = nip86.Method.fromString(method) orelse {
             return Response{ .status = 400, .body = "{\"error\":\"unknown method\"}" };
-        }
+        };
+
+        return switch (m) {
+            .supportedmethods => self.supportedMethods(),
+            .banpubkey => self.banPubkey(params),
+            .listbannedpubkeys => self.listBannedPubkeys(),
+            .allowpubkey => self.allowPubkey(params),
+            .listallowedpubkeys => self.listAllowedPubkeys(),
+            .banevent => self.banEvent(params),
+            .allowevent => self.allowEvent(params),
+            .listbannedevents => self.listBannedEvents(),
+            .listeventsneedingmoderation => self.listEventsNeedingModeration(),
+            .changerelayname => self.changeRelayName(params),
+            .changerelaydescription => self.changeRelayDescription(params),
+            .changerelayicon => self.changeRelayIcon(params),
+            .allowkind => self.allowKind(params),
+            .disallowkind => self.disallowKind(params),
+            .listallowedkinds => self.listAllowedKinds(),
+            .blockip => self.blockIp(params),
+            .unblockip => self.unblockIp(params),
+            .listblockedips => self.listBlockedIps(),
+        };
     }
 
     fn supportedMethods(self: *Nip86Handler) Response {
@@ -136,14 +123,11 @@ pub const Nip86Handler = struct {
     }
 
     fn banPubkey(self: *Nip86Handler, params: []const u8) Response {
-        var parsed = parseStringParams(params, 2, self.allocator);
+        var parsed = nip86.ParsedParams.parseStrings(params, 2, self.allocator);
         defer parsed.deinit();
-        if (parsed.values[0] == null) {
-            return Response{ .status = 400, .body = "{\"error\":\"missing pubkey parameter\"}" };
-        }
         var pubkey: [32]u8 = undefined;
-        if (!hexToBytes(parsed.values[0].?, &pubkey)) {
-            return Response{ .status = 400, .body = "{\"error\":\"invalid pubkey hex\"}" };
+        if (!parsed.parsePubkey(&pubkey)) {
+            return Response{ .status = 400, .body = "{\"error\":\"missing or invalid pubkey parameter\"}" };
         }
         const reason = parsed.values[1] orelse "";
         self.mgmt_store.banPubkey(&pubkey, reason) catch {
@@ -166,10 +150,10 @@ pub const Nip86Handler = struct {
             if (i > 0) buf.append(self.allocator, ',') catch return errorResponse();
             buf.appendSlice(self.allocator, "{\"pubkey\":\"") catch return errorResponse();
             var hex_buf: [64]u8 = undefined;
-            _ = bytesToHex(&entry.pubkey, &hex_buf);
+            hex.encode(&entry.pubkey, &hex_buf);
             buf.appendSlice(self.allocator, &hex_buf) catch return errorResponse();
             buf.appendSlice(self.allocator, "\",\"reason\":") catch return errorResponse();
-            writeJsonStringUnmanaged(&buf, self.allocator, entry.reason) catch return errorResponse();
+            nip86.writeJsonString(&buf, self.allocator, entry.reason) catch return errorResponse();
             buf.append(self.allocator, '}') catch return errorResponse();
         }
         buf.appendSlice(self.allocator, "]}") catch return errorResponse();
@@ -179,14 +163,11 @@ pub const Nip86Handler = struct {
     }
 
     fn allowPubkey(self: *Nip86Handler, params: []const u8) Response {
-        var parsed = parseStringParams(params, 2, self.allocator);
+        var parsed = nip86.ParsedParams.parseStrings(params, 2, self.allocator);
         defer parsed.deinit();
-        if (parsed.values[0] == null) {
-            return Response{ .status = 400, .body = "{\"error\":\"missing pubkey parameter\"}" };
-        }
         var pubkey: [32]u8 = undefined;
-        if (!hexToBytes(parsed.values[0].?, &pubkey)) {
-            return Response{ .status = 400, .body = "{\"error\":\"invalid pubkey hex\"}" };
+        if (!parsed.parsePubkey(&pubkey)) {
+            return Response{ .status = 400, .body = "{\"error\":\"missing or invalid pubkey parameter\"}" };
         }
         const reason = parsed.values[1] orelse "";
         self.mgmt_store.allowPubkey(&pubkey, reason) catch {
@@ -209,10 +190,10 @@ pub const Nip86Handler = struct {
             if (i > 0) buf.append(self.allocator, ',') catch return errorResponse();
             buf.appendSlice(self.allocator, "{\"pubkey\":\"") catch return errorResponse();
             var hex_buf: [64]u8 = undefined;
-            _ = bytesToHex(&entry.pubkey, &hex_buf);
+            hex.encode(&entry.pubkey, &hex_buf);
             buf.appendSlice(self.allocator, &hex_buf) catch return errorResponse();
             buf.appendSlice(self.allocator, "\",\"reason\":") catch return errorResponse();
-            writeJsonStringUnmanaged(&buf, self.allocator, entry.reason) catch return errorResponse();
+            nip86.writeJsonString(&buf, self.allocator, entry.reason) catch return errorResponse();
             buf.append(self.allocator, '}') catch return errorResponse();
         }
         buf.appendSlice(self.allocator, "]}") catch return errorResponse();
@@ -222,14 +203,11 @@ pub const Nip86Handler = struct {
     }
 
     fn banEvent(self: *Nip86Handler, params: []const u8) Response {
-        var parsed = parseStringParams(params, 2, self.allocator);
+        var parsed = nip86.ParsedParams.parseStrings(params, 2, self.allocator);
         defer parsed.deinit();
-        if (parsed.values[0] == null) {
-            return Response{ .status = 400, .body = "{\"error\":\"missing event_id parameter\"}" };
-        }
         var event_id: [32]u8 = undefined;
-        if (!hexToBytes(parsed.values[0].?, &event_id)) {
-            return Response{ .status = 400, .body = "{\"error\":\"invalid event_id hex\"}" };
+        if (!parsed.parseEventId(&event_id)) {
+            return Response{ .status = 400, .body = "{\"error\":\"missing or invalid event_id parameter\"}" };
         }
         const reason = parsed.values[1] orelse "";
         self.mgmt_store.banEvent(&event_id, reason) catch {
@@ -239,14 +217,11 @@ pub const Nip86Handler = struct {
     }
 
     fn allowEvent(self: *Nip86Handler, params: []const u8) Response {
-        var parsed = parseStringParams(params, 2, self.allocator);
+        var parsed = nip86.ParsedParams.parseStrings(params, 2, self.allocator);
         defer parsed.deinit();
-        if (parsed.values[0] == null) {
-            return Response{ .status = 400, .body = "{\"error\":\"missing event_id parameter\"}" };
-        }
         var event_id: [32]u8 = undefined;
-        if (!hexToBytes(parsed.values[0].?, &event_id)) {
-            return Response{ .status = 400, .body = "{\"error\":\"invalid event_id hex\"}" };
+        if (!parsed.parseEventId(&event_id)) {
+            return Response{ .status = 400, .body = "{\"error\":\"missing or invalid event_id parameter\"}" };
         }
         self.mgmt_store.unbanEvent(&event_id) catch {
             return Response{ .status = 500, .body = "{\"error\":\"storage error\"}" };
@@ -272,10 +247,10 @@ pub const Nip86Handler = struct {
             if (i > 0) buf.append(self.allocator, ',') catch return errorResponse();
             buf.appendSlice(self.allocator, "{\"id\":\"") catch return errorResponse();
             var hex_buf: [64]u8 = undefined;
-            _ = bytesToHex(&entry.id, &hex_buf);
+            hex.encode(&entry.id, &hex_buf);
             buf.appendSlice(self.allocator, &hex_buf) catch return errorResponse();
             buf.appendSlice(self.allocator, "\",\"reason\":") catch return errorResponse();
-            writeJsonStringUnmanaged(&buf, self.allocator, entry.reason) catch return errorResponse();
+            nip86.writeJsonString(&buf, self.allocator, entry.reason) catch return errorResponse();
             buf.append(self.allocator, '}') catch return errorResponse();
         }
         buf.appendSlice(self.allocator, "]}") catch return errorResponse();
@@ -285,49 +260,49 @@ pub const Nip86Handler = struct {
     }
 
     fn changeRelayName(self: *Nip86Handler, params: []const u8) Response {
-        var parsed = parseStringParams(params, 1, self.allocator);
+        var parsed = nip86.ParsedParams.parseStrings(params, 1, self.allocator);
         defer parsed.deinit();
-        if (parsed.values[0] == null) {
+        const name = parsed.values[0] orelse {
             return Response{ .status = 400, .body = "{\"error\":\"missing name parameter\"}" };
-        }
-        self.mgmt_store.setRelaySetting("name", parsed.values[0].?) catch {
+        };
+        self.mgmt_store.setRelaySetting("name", name) catch {
             return Response{ .status = 500, .body = "{\"error\":\"storage error\"}" };
         };
         if (self.relay_name) |old| self.allocator.free(old);
-        self.relay_name = self.allocator.dupe(u8, parsed.values[0].?) catch null;
+        self.relay_name = self.allocator.dupe(u8, name) catch null;
         return Response{ .status = 200, .body = "{\"result\":true}" };
     }
 
     fn changeRelayDescription(self: *Nip86Handler, params: []const u8) Response {
-        var parsed = parseStringParams(params, 1, self.allocator);
+        var parsed = nip86.ParsedParams.parseStrings(params, 1, self.allocator);
         defer parsed.deinit();
-        if (parsed.values[0] == null) {
+        const desc = parsed.values[0] orelse {
             return Response{ .status = 400, .body = "{\"error\":\"missing description parameter\"}" };
-        }
-        self.mgmt_store.setRelaySetting("description", parsed.values[0].?) catch {
+        };
+        self.mgmt_store.setRelaySetting("description", desc) catch {
             return Response{ .status = 500, .body = "{\"error\":\"storage error\"}" };
         };
         if (self.relay_description) |old| self.allocator.free(old);
-        self.relay_description = self.allocator.dupe(u8, parsed.values[0].?) catch null;
+        self.relay_description = self.allocator.dupe(u8, desc) catch null;
         return Response{ .status = 200, .body = "{\"result\":true}" };
     }
 
     fn changeRelayIcon(self: *Nip86Handler, params: []const u8) Response {
-        var parsed = parseStringParams(params, 1, self.allocator);
+        var parsed = nip86.ParsedParams.parseStrings(params, 1, self.allocator);
         defer parsed.deinit();
-        if (parsed.values[0] == null) {
+        const icon = parsed.values[0] orelse {
             return Response{ .status = 400, .body = "{\"error\":\"missing icon url parameter\"}" };
-        }
-        self.mgmt_store.setRelaySetting("icon", parsed.values[0].?) catch {
+        };
+        self.mgmt_store.setRelaySetting("icon", icon) catch {
             return Response{ .status = 500, .body = "{\"error\":\"storage error\"}" };
         };
         if (self.relay_icon) |old| self.allocator.free(old);
-        self.relay_icon = self.allocator.dupe(u8, parsed.values[0].?) catch null;
+        self.relay_icon = self.allocator.dupe(u8, icon) catch null;
         return Response{ .status = 200, .body = "{\"result\":true}" };
     }
 
     fn allowKind(self: *Nip86Handler, params: []const u8) Response {
-        const kind = parseKindParam(params) orelse {
+        const kind = nip86.ParsedParams.parseKind(params) orelse {
             return Response{ .status = 400, .body = "{\"error\":\"invalid kind parameter\"}" };
         };
         self.mgmt_store.allowKind(kind) catch {
@@ -337,7 +312,7 @@ pub const Nip86Handler = struct {
     }
 
     fn disallowKind(self: *Nip86Handler, params: []const u8) Response {
-        const kind = parseKindParam(params) orelse {
+        const kind = nip86.ParsedParams.parseKind(params) orelse {
             return Response{ .status = 400, .body = "{\"error\":\"invalid kind parameter\"}" };
         };
         self.mgmt_store.disallowKind(kind) catch {
@@ -369,25 +344,25 @@ pub const Nip86Handler = struct {
     }
 
     fn blockIp(self: *Nip86Handler, params: []const u8) Response {
-        var parsed = parseStringParams(params, 2, self.allocator);
+        var parsed = nip86.ParsedParams.parseStrings(params, 2, self.allocator);
         defer parsed.deinit();
-        if (parsed.values[0] == null) {
+        const ip = parsed.values[0] orelse {
             return Response{ .status = 400, .body = "{\"error\":\"missing ip parameter\"}" };
-        }
+        };
         const reason = parsed.values[1] orelse "";
-        self.mgmt_store.blockIp(parsed.values[0].?, reason) catch {
+        self.mgmt_store.blockIp(ip, reason) catch {
             return Response{ .status = 500, .body = "{\"error\":\"storage error\"}" };
         };
         return Response{ .status = 200, .body = "{\"result\":true}" };
     }
 
     fn unblockIp(self: *Nip86Handler, params: []const u8) Response {
-        var parsed = parseStringParams(params, 1, self.allocator);
+        var parsed = nip86.ParsedParams.parseStrings(params, 1, self.allocator);
         defer parsed.deinit();
-        if (parsed.values[0] == null) {
+        const ip = parsed.values[0] orelse {
             return Response{ .status = 400, .body = "{\"error\":\"missing ip parameter\"}" };
-        }
-        self.mgmt_store.unblockIp(parsed.values[0].?) catch {
+        };
+        self.mgmt_store.unblockIp(ip) catch {
             return Response{ .status = 500, .body = "{\"error\":\"storage error\"}" };
         };
         return Response{ .status = 200, .body = "{\"result\":true}" };
@@ -406,9 +381,9 @@ pub const Nip86Handler = struct {
         for (entries, 0..) |entry, i| {
             if (i > 0) buf.append(self.allocator, ',') catch return errorResponse();
             buf.appendSlice(self.allocator, "{\"ip\":") catch return errorResponse();
-            writeJsonStringUnmanaged(&buf, self.allocator, entry.ip) catch return errorResponse();
+            nip86.writeJsonString(&buf, self.allocator, entry.ip) catch return errorResponse();
             buf.appendSlice(self.allocator, ",\"reason\":") catch return errorResponse();
-            writeJsonStringUnmanaged(&buf, self.allocator, entry.reason) catch return errorResponse();
+            nip86.writeJsonString(&buf, self.allocator, entry.reason) catch return errorResponse();
             buf.append(self.allocator, '}') catch return errorResponse();
         }
         buf.appendSlice(self.allocator, "]}") catch return errorResponse();
@@ -462,7 +437,7 @@ pub const Nip86Handler = struct {
             return AuthResult{ .err = "{\"error\":\"invalid event signature\"}" };
         };
 
-        const tags = Nip98Tags.extract(decoded);
+        const tags = nip86.Nip98Tags.extract(decoded);
 
         if (tags.url == null) {
             return AuthResult{ .err = "{\"error\":\"missing u tag in authorization\"}" };
@@ -480,7 +455,7 @@ pub const Nip86Handler = struct {
             var sha256 = std.crypto.hash.sha2.Sha256.init(.{});
             sha256.update(body);
             const digest = sha256.finalResult();
-            _ = bytesToHex(&digest, &actual_hash);
+            hex.encode(&digest, &actual_hash);
             if (!std.mem.eql(u8, expected_hash, &actual_hash)) {
                 return AuthResult{ .err = "{\"error\":\"payload hash mismatch\"}" };
             }
@@ -497,7 +472,7 @@ pub const Nip86Handler = struct {
         if (self.config.admin_pubkeys.len == 0) return false;
 
         var hex_buf: [64]u8 = undefined;
-        _ = bytesToHex(pubkey, &hex_buf);
+        hex.encode(pubkey, &hex_buf);
 
         var iter = std.mem.splitScalar(u8, self.config.admin_pubkeys, ',');
         while (iter.next()) |admin| {
@@ -516,365 +491,6 @@ pub const Nip86Handler = struct {
     };
 };
 
-const Request = struct {
-    method: []const u8,
-    params: []const u8,
-};
-
-fn parseRequest(body: []const u8) ?Request {
-    const method_key = "\"method\"";
-    const method_idx = std.mem.indexOf(u8, body, method_key) orelse return null;
-    var pos = method_idx + method_key.len;
-
-    while (pos < body.len and (body[pos] == ':' or body[pos] == ' ' or body[pos] == '\t')) pos += 1;
-    if (pos >= body.len or body[pos] != '"') return null;
-    pos += 1;
-
-    const method_start = pos;
-    while (pos < body.len) {
-        if (body[pos] == '\\' and pos + 1 < body.len) {
-            pos += 2;
-            continue;
-        }
-        if (body[pos] == '"') break;
-        pos += 1;
-    }
-    if (pos >= body.len) return null;
-    const method = body[method_start..pos];
-
-    const params_key = "\"params\"";
-    const params_idx = std.mem.indexOf(u8, body, params_key) orelse return Request{ .method = method, .params = "[]" };
-    pos = params_idx + params_key.len;
-
-    while (pos < body.len and (body[pos] == ':' or body[pos] == ' ' or body[pos] == '\t')) pos += 1;
-    if (pos >= body.len or body[pos] != '[') return Request{ .method = method, .params = "[]" };
-
-    const params_start = pos;
-    var depth: i32 = 0;
-    var in_string = false;
-    while (pos < body.len) {
-        if (body[pos] == '\\' and in_string and pos + 1 < body.len) {
-            pos += 2;
-            continue;
-        }
-        if (body[pos] == '"') {
-            in_string = !in_string;
-        } else if (!in_string) {
-            if (body[pos] == '[') depth += 1;
-            if (body[pos] == ']') {
-                depth -= 1;
-                if (depth == 0) {
-                    pos += 1;
-                    break;
-                }
-            }
-        }
-        pos += 1;
-    }
-
-    return Request{ .method = method, .params = body[params_start..pos] };
-}
-
-const ParsedParams = struct {
-    values: [4]?[]const u8,
-    allocator: ?std.mem.Allocator,
-    allocated: [4]bool,
-
-    pub fn deinit(self: *ParsedParams) void {
-        if (self.allocator) |alloc| {
-            for (0..4) |i| {
-                if (self.allocated[i]) {
-                    if (self.values[i]) |v| {
-                        alloc.free(v);
-                    }
-                }
-            }
-        }
-    }
-};
-
-fn parseStringParams(params: []const u8, comptime max_count: usize, allocator: std.mem.Allocator) ParsedParams {
-    var result = ParsedParams{
-        .values = .{ null, null, null, null },
-        .allocator = allocator,
-        .allocated = .{ false, false, false, false },
-    };
-    var count: usize = 0;
-    var pos: usize = 0;
-    var in_string = false;
-    var string_start: usize = 0;
-
-    while (pos < params.len and count < max_count) {
-        const c = params[pos];
-
-        if (c == '\\' and in_string and pos + 1 < params.len) {
-            pos += 2;
-            continue;
-        }
-
-        if (c == '"') {
-            if (in_string) {
-                const raw = params[string_start..pos];
-                if (std.mem.indexOf(u8, raw, "\\") != null) {
-                    if (unescapeString(raw, allocator)) |unescaped| {
-                        result.values[count] = unescaped;
-                        result.allocated[count] = true;
-                    } else {
-                        result.values[count] = raw;
-                    }
-                } else {
-                    result.values[count] = raw;
-                }
-                count += 1;
-            } else {
-                string_start = pos + 1;
-            }
-            in_string = !in_string;
-        }
-
-        pos += 1;
-    }
-
-    return result;
-}
-
-fn unescapeString(raw: []const u8, allocator: std.mem.Allocator) ?[]const u8 {
-    var buf = allocator.alloc(u8, raw.len) catch return null;
-    var write_pos: usize = 0;
-    var read_pos: usize = 0;
-
-    while (read_pos < raw.len) {
-        if (raw[read_pos] == '\\' and read_pos + 1 < raw.len) {
-            const next = raw[read_pos + 1];
-            switch (next) {
-                '"' => {
-                    buf[write_pos] = '"';
-                    write_pos += 1;
-                    read_pos += 2;
-                },
-                '\\' => {
-                    buf[write_pos] = '\\';
-                    write_pos += 1;
-                    read_pos += 2;
-                },
-                'n' => {
-                    buf[write_pos] = '\n';
-                    write_pos += 1;
-                    read_pos += 2;
-                },
-                'r' => {
-                    buf[write_pos] = '\r';
-                    write_pos += 1;
-                    read_pos += 2;
-                },
-                't' => {
-                    buf[write_pos] = '\t';
-                    write_pos += 1;
-                    read_pos += 2;
-                },
-                else => {
-                    buf[write_pos] = raw[read_pos];
-                    write_pos += 1;
-                    read_pos += 1;
-                },
-            }
-        } else {
-            buf[write_pos] = raw[read_pos];
-            write_pos += 1;
-            read_pos += 1;
-        }
-    }
-
-    if (write_pos < buf.len) {
-        const shrunk = allocator.realloc(buf, write_pos) catch {
-            return buf[0..write_pos];
-        };
-        return shrunk;
-    }
-    return buf;
-}
-
-fn parseKindParam(params: []const u8) ?i32 {
-    var pos: usize = 0;
-    while (pos < params.len and (params[pos] == '[' or params[pos] == ' ' or params[pos] == '\t')) pos += 1;
-
-    var num: i32 = 0;
-    var found_digit = false;
-    while (pos < params.len) {
-        const c = params[pos];
-        if (c >= '0' and c <= '9') {
-            const digit: i32 = @intCast(c - '0');
-            const mul_result = @mulWithOverflow(num, 10);
-            if (mul_result[1] != 0) return null;
-            const add_result = @addWithOverflow(mul_result[0], digit);
-            if (add_result[1] != 0) return null;
-            num = add_result[0];
-            found_digit = true;
-        } else if (found_digit) {
-            break;
-        }
-        pos += 1;
-    }
-
-    if (found_digit) return num;
-    return null;
-}
-
-fn hexToBytes(hex: []const u8, out: *[32]u8) bool {
-    if (hex.len != 64) return false;
-    for (0..32) |i| {
-        const high = hexDigit(hex[i * 2]) orelse return false;
-        const low = hexDigit(hex[i * 2 + 1]) orelse return false;
-        out[i] = (high << 4) | low;
-    }
-    return true;
-}
-
-fn hexDigit(c: u8) ?u8 {
-    if (c >= '0' and c <= '9') return c - '0';
-    if (c >= 'a' and c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' and c <= 'F') return c - 'A' + 10;
-    return null;
-}
-
-fn writeJsonStringUnmanaged(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, value: []const u8) !void {
-    try buf.append(allocator, '"');
-    for (value) |c| {
-        switch (c) {
-            '"' => try buf.appendSlice(allocator, "\\\""),
-            '\\' => try buf.appendSlice(allocator, "\\\\"),
-            '\n' => try buf.appendSlice(allocator, "\\n"),
-            '\r' => try buf.appendSlice(allocator, "\\r"),
-            '\t' => try buf.appendSlice(allocator, "\\t"),
-            0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f => {
-                var escape_buf: [6]u8 = undefined;
-                const escape = std.fmt.bufPrint(&escape_buf, "\\u{x:0>4}", .{c}) catch continue;
-                try buf.appendSlice(allocator, escape);
-            },
-            else => try buf.append(allocator, c),
-        }
-    }
-    try buf.append(allocator, '"');
-}
-
 fn errorResponse() Nip86Handler.Response {
     return Nip86Handler.Response{ .status = 500, .body = "{\"error\":\"internal error\"}" };
-}
-
-fn bytesToHex(bytes: []const u8, out: []u8) []u8 {
-    const hex_chars = "0123456789abcdef";
-    for (bytes, 0..) |b, i| {
-        out[i * 2] = hex_chars[b >> 4];
-        out[i * 2 + 1] = hex_chars[b & 0x0f];
-    }
-    return out[0 .. bytes.len * 2];
-}
-
-const Nip98Tags = struct {
-    url: ?[]const u8 = null,
-    method: ?[]const u8 = null,
-    payload: ?[]const u8 = null,
-
-    pub fn extract(json: []const u8) Nip98Tags {
-        var result = Nip98Tags{};
-
-        const tags_start = std.mem.indexOf(u8, json, "\"tags\"") orelse return result;
-        var pos = tags_start + 6;
-
-        while (pos < json.len and json[pos] != '[') : (pos += 1) {}
-        if (pos >= json.len) return result;
-        pos += 1;
-
-        var depth: i32 = 0;
-        var in_string = false;
-        var escape = false;
-        var tag_start: ?usize = null;
-
-        while (pos < json.len) {
-            const c = json[pos];
-
-            if (escape) {
-                escape = false;
-                pos += 1;
-                continue;
-            }
-            if (c == '\\' and in_string) {
-                escape = true;
-                pos += 1;
-                continue;
-            }
-            if (c == '"') {
-                in_string = !in_string;
-                pos += 1;
-                continue;
-            }
-
-            if (!in_string) {
-                if (c == '[') {
-                    if (depth == 0) {
-                        tag_start = pos;
-                    }
-                    depth += 1;
-                } else if (c == ']') {
-                    depth -= 1;
-                    if (depth == 0 and tag_start != null) {
-                        const tag_json = json[tag_start.? .. pos + 1];
-                        extractNip98TagValue(tag_json, &result);
-                        tag_start = null;
-                    }
-                    if (depth < 0) break;
-                }
-            }
-
-            pos += 1;
-        }
-
-        return result;
-    }
-};
-
-fn extractNip98TagValue(tag_json: []const u8, result: *Nip98Tags) void {
-    var values: [2]?[]const u8 = .{ null, null };
-    var value_idx: usize = 0;
-    var pos: usize = 0;
-    var in_string = false;
-    var string_start: usize = 0;
-    var escape = false;
-
-    while (pos < tag_json.len and value_idx < 2) {
-        const c = tag_json[pos];
-
-        if (escape) {
-            escape = false;
-            pos += 1;
-            continue;
-        }
-        if (c == '\\' and in_string) {
-            escape = true;
-            pos += 1;
-            continue;
-        }
-
-        if (c == '"') {
-            if (in_string) {
-                values[value_idx] = tag_json[string_start..pos];
-                value_idx += 1;
-            } else {
-                string_start = pos + 1;
-            }
-            in_string = !in_string;
-        }
-
-        pos += 1;
-    }
-
-    if (values[0] != null and values[1] != null) {
-        if (std.mem.eql(u8, values[0].?, "u")) {
-            result.url = values[1].?;
-        } else if (std.mem.eql(u8, values[0].?, "method")) {
-            result.method = values[1].?;
-        } else if (std.mem.eql(u8, values[0].?, "payload")) {
-            result.payload = values[1].?;
-        }
-    }
 }

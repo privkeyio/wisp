@@ -9,8 +9,7 @@
             .hash = "websocket-0.1.0-ZPISdRNzAwAGszh62EpRtoQxu8wb1MSMVI6Ow0o2dmyJ",
         },
         .nostr = .{
-            .url = "https://github.com/privkeyio/libnostr-z/archive/refs/tags/v0.1.8.tar.gz",
-            .hash = "nostr-0.1.8-JY6OcM8yBgBerCkIS-c3a_YdGedXYw_PHRPT1ey73eSw",
+            .path = "../libnostr-z",
         },
     },
     .paths = .{
