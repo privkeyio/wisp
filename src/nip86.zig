@@ -60,38 +60,35 @@ pub const Nip86Handler = struct {
         return self.relay_icon;
     }
 
-    pub fn handle(
-        self: *Nip86Handler,
-        body: []const u8,
-        auth_header: ?[]const u8,
-        request_url: []const u8,
-    ) Response {
-        const auth_result = self.validateAuth(auth_header, body, request_url);
+    pub fn handle(self: *Nip86Handler, body: []const u8, auth_header: ?[]const u8, request_url: []const u8) nip86.Response {
+        const auth_result = nip86.validateNip98Auth(auth_header, body, request_url);
         if (auth_result.err) |err| {
-            return Response{ .status = 401, .body = err };
+            return nip86.Response.unauthorized(err);
         }
         const admin_pubkey = auth_result.pubkey orelse {
-            return Response{ .status = 401, .body = "{\"error\":\"authorization required\"}" };
+            return nip86.Response.unauthorized("{\"error\":\"authorization required\"}");
         };
 
         if (!self.isAdmin(&admin_pubkey)) {
-            return Response{ .status = 403, .body = "{\"error\":\"forbidden: not an admin\"}" };
+            return nip86.Response.forbidden("{\"error\":\"forbidden: not an admin\"}");
         }
 
         const request = nip86.Request.parse(body) orelse {
-            return Response{ .status = 400, .body = "{\"error\":\"invalid request\"}" };
+            return nip86.Response.badRequest("{\"error\":\"invalid request\"}");
         };
 
         return self.dispatch(request.method, request.params);
     }
 
-    fn dispatch(self: *Nip86Handler, method: []const u8, params: []const u8) Response {
+    fn dispatch(self: *Nip86Handler, method: []const u8, params: []const u8) nip86.Response {
         const m = nip86.Method.fromString(method) orelse {
-            return Response{ .status = 400, .body = "{\"error\":\"unknown method\"}" };
+            return nip86.Response.badRequest("{\"error\":\"unknown method\"}");
         };
 
         return switch (m) {
-            .supportedmethods => self.supportedMethods(),
+            .supportedmethods => nip86.Response.ok(
+                \\{"result":["supportedmethods","banpubkey","listbannedpubkeys","allowpubkey","listallowedpubkeys","listeventsneedingmoderation","allowevent","banevent","listbannedevents","changerelayname","changerelaydescription","changerelayicon","allowkind","disallowkind","listallowedkinds","blockip","unblockip","listblockedips"]}
+            ),
             .banpubkey => self.banPubkey(params),
             .listbannedpubkeys => self.listBannedPubkeys(),
             .allowpubkey => self.allowPubkey(params),
@@ -99,7 +96,7 @@ pub const Nip86Handler = struct {
             .banevent => self.banEvent(params),
             .allowevent => self.allowEvent(params),
             .listbannedevents => self.listBannedEvents(),
-            .listeventsneedingmoderation => self.listEventsNeedingModeration(),
+            .listeventsneedingmoderation => nip86.Response.ok("{\"result\":[]}"),
             .changerelayname => self.changeRelayName(params),
             .changerelaydescription => self.changeRelayDescription(params),
             .changerelayicon => self.changeRelayIcon(params),
@@ -112,360 +109,215 @@ pub const Nip86Handler = struct {
         };
     }
 
-    fn supportedMethods(self: *Nip86Handler) Response {
-        _ = self;
-        return Response{
-            .status = 200,
-            .body =
-            \\{"result":["supportedmethods","banpubkey","listbannedpubkeys","allowpubkey","listallowedpubkeys","listeventsneedingmoderation","allowevent","banevent","listbannedevents","changerelayname","changerelaydescription","changerelayicon","allowkind","disallowkind","listallowedkinds","blockip","unblockip","listblockedips"]}
-            ,
-        };
-    }
-
-    fn banPubkey(self: *Nip86Handler, params: []const u8) Response {
+    fn banPubkey(self: *Nip86Handler, params: []const u8) nip86.Response {
         var parsed = nip86.ParsedParams.parseStrings(params, 2, self.allocator);
         defer parsed.deinit();
         var pubkey: [32]u8 = undefined;
         if (!parsed.parsePubkey(&pubkey)) {
-            return Response{ .status = 400, .body = "{\"error\":\"missing or invalid pubkey parameter\"}" };
+            return nip86.Response.badRequest("{\"error\":\"missing or invalid pubkey parameter\"}");
         }
-        const reason = parsed.values[1] orelse "";
-        self.mgmt_store.banPubkey(&pubkey, reason) catch {
-            return Response{ .status = 500, .body = "{\"error\":\"storage error\"}" };
+        self.mgmt_store.banPubkey(&pubkey, parsed.values[1] orelse "") catch {
+            return nip86.Response.internalError();
         };
-        return Response{ .status = 200, .body = "{\"result\":true}" };
+        return nip86.Response.ok("{\"result\":true}");
     }
 
-    fn listBannedPubkeys(self: *Nip86Handler) Response {
-        const entries = self.mgmt_store.listBannedPubkeys(self.allocator) catch {
-            return Response{ .status = 500, .body = "{\"error\":\"storage error\"}" };
-        };
+    fn listBannedPubkeys(self: *Nip86Handler) nip86.Response {
+        const entries = self.mgmt_store.listBannedPubkeys(self.allocator) catch return nip86.Response.internalError();
         defer ManagementStore.freePubkeyEntries(entries, self.allocator);
-
-        var buf: std.ArrayListUnmanaged(u8) = .{};
-        defer buf.deinit(self.allocator);
-
-        buf.appendSlice(self.allocator, "{\"result\":[") catch return errorResponse();
-        for (entries, 0..) |entry, i| {
-            if (i > 0) buf.append(self.allocator, ',') catch return errorResponse();
-            buf.appendSlice(self.allocator, "{\"pubkey\":\"") catch return errorResponse();
-            var hex_buf: [64]u8 = undefined;
-            hex.encode(&entry.pubkey, &hex_buf);
-            buf.appendSlice(self.allocator, &hex_buf) catch return errorResponse();
-            buf.appendSlice(self.allocator, "\",\"reason\":") catch return errorResponse();
-            nip86.writeJsonString(&buf, self.allocator, entry.reason) catch return errorResponse();
-            buf.append(self.allocator, '}') catch return errorResponse();
-        }
-        buf.appendSlice(self.allocator, "]}") catch return errorResponse();
-
-        const result = self.allocator.dupe(u8, buf.items) catch return errorResponse();
-        return Response{ .status = 200, .body = result, .owned = true };
+        return self.formatPubkeyList(entries);
     }
 
-    fn allowPubkey(self: *Nip86Handler, params: []const u8) Response {
+    fn allowPubkey(self: *Nip86Handler, params: []const u8) nip86.Response {
         var parsed = nip86.ParsedParams.parseStrings(params, 2, self.allocator);
         defer parsed.deinit();
         var pubkey: [32]u8 = undefined;
         if (!parsed.parsePubkey(&pubkey)) {
-            return Response{ .status = 400, .body = "{\"error\":\"missing or invalid pubkey parameter\"}" };
+            return nip86.Response.badRequest("{\"error\":\"missing or invalid pubkey parameter\"}");
         }
-        const reason = parsed.values[1] orelse "";
-        self.mgmt_store.allowPubkey(&pubkey, reason) catch {
-            return Response{ .status = 500, .body = "{\"error\":\"storage error\"}" };
+        self.mgmt_store.allowPubkey(&pubkey, parsed.values[1] orelse "") catch {
+            return nip86.Response.internalError();
         };
-        return Response{ .status = 200, .body = "{\"result\":true}" };
+        return nip86.Response.ok("{\"result\":true}");
     }
 
-    fn listAllowedPubkeys(self: *Nip86Handler) Response {
-        const entries = self.mgmt_store.listAllowedPubkeys(self.allocator) catch {
-            return Response{ .status = 500, .body = "{\"error\":\"storage error\"}" };
-        };
+    fn listAllowedPubkeys(self: *Nip86Handler) nip86.Response {
+        const entries = self.mgmt_store.listAllowedPubkeys(self.allocator) catch return nip86.Response.internalError();
         defer ManagementStore.freePubkeyEntries(entries, self.allocator);
-
-        var buf: std.ArrayListUnmanaged(u8) = .{};
-        defer buf.deinit(self.allocator);
-
-        buf.appendSlice(self.allocator, "{\"result\":[") catch return errorResponse();
-        for (entries, 0..) |entry, i| {
-            if (i > 0) buf.append(self.allocator, ',') catch return errorResponse();
-            buf.appendSlice(self.allocator, "{\"pubkey\":\"") catch return errorResponse();
-            var hex_buf: [64]u8 = undefined;
-            hex.encode(&entry.pubkey, &hex_buf);
-            buf.appendSlice(self.allocator, &hex_buf) catch return errorResponse();
-            buf.appendSlice(self.allocator, "\",\"reason\":") catch return errorResponse();
-            nip86.writeJsonString(&buf, self.allocator, entry.reason) catch return errorResponse();
-            buf.append(self.allocator, '}') catch return errorResponse();
-        }
-        buf.appendSlice(self.allocator, "]}") catch return errorResponse();
-
-        const result = self.allocator.dupe(u8, buf.items) catch return errorResponse();
-        return Response{ .status = 200, .body = result, .owned = true };
+        return self.formatPubkeyList(entries);
     }
 
-    fn banEvent(self: *Nip86Handler, params: []const u8) Response {
+    fn banEvent(self: *Nip86Handler, params: []const u8) nip86.Response {
         var parsed = nip86.ParsedParams.parseStrings(params, 2, self.allocator);
         defer parsed.deinit();
         var event_id: [32]u8 = undefined;
         if (!parsed.parseEventId(&event_id)) {
-            return Response{ .status = 400, .body = "{\"error\":\"missing or invalid event_id parameter\"}" };
+            return nip86.Response.badRequest("{\"error\":\"missing or invalid event_id parameter\"}");
         }
-        const reason = parsed.values[1] orelse "";
-        self.mgmt_store.banEvent(&event_id, reason) catch {
-            return Response{ .status = 500, .body = "{\"error\":\"storage error\"}" };
+        self.mgmt_store.banEvent(&event_id, parsed.values[1] orelse "") catch {
+            return nip86.Response.internalError();
         };
-        return Response{ .status = 200, .body = "{\"result\":true}" };
+        return nip86.Response.ok("{\"result\":true}");
     }
 
-    fn allowEvent(self: *Nip86Handler, params: []const u8) Response {
+    fn allowEvent(self: *Nip86Handler, params: []const u8) nip86.Response {
         var parsed = nip86.ParsedParams.parseStrings(params, 2, self.allocator);
         defer parsed.deinit();
         var event_id: [32]u8 = undefined;
         if (!parsed.parseEventId(&event_id)) {
-            return Response{ .status = 400, .body = "{\"error\":\"missing or invalid event_id parameter\"}" };
+            return nip86.Response.badRequest("{\"error\":\"missing or invalid event_id parameter\"}");
         }
-        self.mgmt_store.unbanEvent(&event_id) catch {
-            return Response{ .status = 500, .body = "{\"error\":\"storage error\"}" };
-        };
-        return Response{ .status = 200, .body = "{\"result\":true}" };
+        self.mgmt_store.unbanEvent(&event_id) catch return nip86.Response.internalError();
+        return nip86.Response.ok("{\"result\":true}");
     }
 
-    fn listEventsNeedingModeration(_: *Nip86Handler) Response {
-        return Response{ .status = 200, .body = "{\"result\":[]}" };
-    }
-
-    fn listBannedEvents(self: *Nip86Handler) Response {
-        const entries = self.mgmt_store.listBannedEvents(self.allocator) catch {
-            return Response{ .status = 500, .body = "{\"error\":\"storage error\"}" };
-        };
+    fn listBannedEvents(self: *Nip86Handler) nip86.Response {
+        const entries = self.mgmt_store.listBannedEvents(self.allocator) catch return nip86.Response.internalError();
         defer ManagementStore.freeEventEntries(entries, self.allocator);
 
         var buf: std.ArrayListUnmanaged(u8) = .{};
         defer buf.deinit(self.allocator);
 
-        buf.appendSlice(self.allocator, "{\"result\":[") catch return errorResponse();
+        buf.appendSlice(self.allocator, "{\"result\":[") catch return nip86.Response.internalError();
         for (entries, 0..) |entry, i| {
-            if (i > 0) buf.append(self.allocator, ',') catch return errorResponse();
-            buf.appendSlice(self.allocator, "{\"id\":\"") catch return errorResponse();
+            if (i > 0) buf.append(self.allocator, ',') catch return nip86.Response.internalError();
+            buf.appendSlice(self.allocator, "{\"id\":\"") catch return nip86.Response.internalError();
             var hex_buf: [64]u8 = undefined;
             hex.encode(&entry.id, &hex_buf);
-            buf.appendSlice(self.allocator, &hex_buf) catch return errorResponse();
-            buf.appendSlice(self.allocator, "\",\"reason\":") catch return errorResponse();
-            nip86.writeJsonString(&buf, self.allocator, entry.reason) catch return errorResponse();
-            buf.append(self.allocator, '}') catch return errorResponse();
+            buf.appendSlice(self.allocator, &hex_buf) catch return nip86.Response.internalError();
+            buf.appendSlice(self.allocator, "\",\"reason\":") catch return nip86.Response.internalError();
+            nip86.writeJsonString(&buf, self.allocator, entry.reason) catch return nip86.Response.internalError();
+            buf.append(self.allocator, '}') catch return nip86.Response.internalError();
         }
-        buf.appendSlice(self.allocator, "]}") catch return errorResponse();
+        buf.appendSlice(self.allocator, "]}") catch return nip86.Response.internalError();
 
-        const result = self.allocator.dupe(u8, buf.items) catch return errorResponse();
-        return Response{ .status = 200, .body = result, .owned = true };
+        const result = self.allocator.dupe(u8, buf.items) catch return nip86.Response.internalError();
+        return nip86.Response.ownedOk(result);
     }
 
-    fn changeRelayName(self: *Nip86Handler, params: []const u8) Response {
+    fn changeRelayName(self: *Nip86Handler, params: []const u8) nip86.Response {
         var parsed = nip86.ParsedParams.parseStrings(params, 1, self.allocator);
         defer parsed.deinit();
-        const name = parsed.values[0] orelse {
-            return Response{ .status = 400, .body = "{\"error\":\"missing name parameter\"}" };
-        };
-        self.mgmt_store.setRelaySetting("name", name) catch {
-            return Response{ .status = 500, .body = "{\"error\":\"storage error\"}" };
-        };
+        const name = parsed.values[0] orelse return nip86.Response.badRequest("{\"error\":\"missing name parameter\"}");
+        self.mgmt_store.setRelaySetting("name", name) catch return nip86.Response.internalError();
         if (self.relay_name) |old| self.allocator.free(old);
         self.relay_name = self.allocator.dupe(u8, name) catch null;
-        return Response{ .status = 200, .body = "{\"result\":true}" };
+        return nip86.Response.ok("{\"result\":true}");
     }
 
-    fn changeRelayDescription(self: *Nip86Handler, params: []const u8) Response {
+    fn changeRelayDescription(self: *Nip86Handler, params: []const u8) nip86.Response {
         var parsed = nip86.ParsedParams.parseStrings(params, 1, self.allocator);
         defer parsed.deinit();
-        const desc = parsed.values[0] orelse {
-            return Response{ .status = 400, .body = "{\"error\":\"missing description parameter\"}" };
-        };
-        self.mgmt_store.setRelaySetting("description", desc) catch {
-            return Response{ .status = 500, .body = "{\"error\":\"storage error\"}" };
-        };
+        const desc = parsed.values[0] orelse return nip86.Response.badRequest("{\"error\":\"missing description parameter\"}");
+        self.mgmt_store.setRelaySetting("description", desc) catch return nip86.Response.internalError();
         if (self.relay_description) |old| self.allocator.free(old);
         self.relay_description = self.allocator.dupe(u8, desc) catch null;
-        return Response{ .status = 200, .body = "{\"result\":true}" };
+        return nip86.Response.ok("{\"result\":true}");
     }
 
-    fn changeRelayIcon(self: *Nip86Handler, params: []const u8) Response {
+    fn changeRelayIcon(self: *Nip86Handler, params: []const u8) nip86.Response {
         var parsed = nip86.ParsedParams.parseStrings(params, 1, self.allocator);
         defer parsed.deinit();
-        const icon = parsed.values[0] orelse {
-            return Response{ .status = 400, .body = "{\"error\":\"missing icon url parameter\"}" };
-        };
-        self.mgmt_store.setRelaySetting("icon", icon) catch {
-            return Response{ .status = 500, .body = "{\"error\":\"storage error\"}" };
-        };
+        const icon = parsed.values[0] orelse return nip86.Response.badRequest("{\"error\":\"missing icon url parameter\"}");
+        self.mgmt_store.setRelaySetting("icon", icon) catch return nip86.Response.internalError();
         if (self.relay_icon) |old| self.allocator.free(old);
         self.relay_icon = self.allocator.dupe(u8, icon) catch null;
-        return Response{ .status = 200, .body = "{\"result\":true}" };
+        return nip86.Response.ok("{\"result\":true}");
     }
 
-    fn allowKind(self: *Nip86Handler, params: []const u8) Response {
+    fn allowKind(self: *Nip86Handler, params: []const u8) nip86.Response {
         const kind = nip86.ParsedParams.parseKind(params) orelse {
-            return Response{ .status = 400, .body = "{\"error\":\"invalid kind parameter\"}" };
+            return nip86.Response.badRequest("{\"error\":\"invalid kind parameter\"}");
         };
-        self.mgmt_store.allowKind(kind) catch {
-            return Response{ .status = 500, .body = "{\"error\":\"storage error\"}" };
-        };
-        return Response{ .status = 200, .body = "{\"result\":true}" };
+        self.mgmt_store.allowKind(kind) catch return nip86.Response.internalError();
+        return nip86.Response.ok("{\"result\":true}");
     }
 
-    fn disallowKind(self: *Nip86Handler, params: []const u8) Response {
+    fn disallowKind(self: *Nip86Handler, params: []const u8) nip86.Response {
         const kind = nip86.ParsedParams.parseKind(params) orelse {
-            return Response{ .status = 400, .body = "{\"error\":\"invalid kind parameter\"}" };
+            return nip86.Response.badRequest("{\"error\":\"invalid kind parameter\"}");
         };
-        self.mgmt_store.disallowKind(kind) catch {
-            return Response{ .status = 500, .body = "{\"error\":\"storage error\"}" };
-        };
-        return Response{ .status = 200, .body = "{\"result\":true}" };
+        self.mgmt_store.disallowKind(kind) catch return nip86.Response.internalError();
+        return nip86.Response.ok("{\"result\":true}");
     }
 
-    fn listAllowedKinds(self: *Nip86Handler) Response {
-        const kinds = self.mgmt_store.listAllowedKinds(self.allocator) catch {
-            return Response{ .status = 500, .body = "{\"error\":\"storage error\"}" };
-        };
+    fn listAllowedKinds(self: *Nip86Handler) nip86.Response {
+        const kinds = self.mgmt_store.listAllowedKinds(self.allocator) catch return nip86.Response.internalError();
         defer self.allocator.free(kinds);
 
         var buf: std.ArrayListUnmanaged(u8) = .{};
         defer buf.deinit(self.allocator);
 
-        buf.appendSlice(self.allocator, "{\"result\":[") catch return errorResponse();
+        buf.appendSlice(self.allocator, "{\"result\":[") catch return nip86.Response.internalError();
         for (kinds, 0..) |kind, i| {
-            if (i > 0) buf.append(self.allocator, ',') catch return errorResponse();
+            if (i > 0) buf.append(self.allocator, ',') catch return nip86.Response.internalError();
             var num_buf: [16]u8 = undefined;
-            const num_str = std.fmt.bufPrint(&num_buf, "{d}", .{kind}) catch return errorResponse();
-            buf.appendSlice(self.allocator, num_str) catch return errorResponse();
+            const num_str = std.fmt.bufPrint(&num_buf, "{d}", .{kind}) catch return nip86.Response.internalError();
+            buf.appendSlice(self.allocator, num_str) catch return nip86.Response.internalError();
         }
-        buf.appendSlice(self.allocator, "]}") catch return errorResponse();
+        buf.appendSlice(self.allocator, "]}") catch return nip86.Response.internalError();
 
-        const result = self.allocator.dupe(u8, buf.items) catch return errorResponse();
-        return Response{ .status = 200, .body = result, .owned = true };
+        const result = self.allocator.dupe(u8, buf.items) catch return nip86.Response.internalError();
+        return nip86.Response.ownedOk(result);
     }
 
-    fn blockIp(self: *Nip86Handler, params: []const u8) Response {
+    fn blockIp(self: *Nip86Handler, params: []const u8) nip86.Response {
         var parsed = nip86.ParsedParams.parseStrings(params, 2, self.allocator);
         defer parsed.deinit();
-        const ip = parsed.values[0] orelse {
-            return Response{ .status = 400, .body = "{\"error\":\"missing ip parameter\"}" };
-        };
-        const reason = parsed.values[1] orelse "";
-        self.mgmt_store.blockIp(ip, reason) catch {
-            return Response{ .status = 500, .body = "{\"error\":\"storage error\"}" };
-        };
-        return Response{ .status = 200, .body = "{\"result\":true}" };
+        const ip = parsed.values[0] orelse return nip86.Response.badRequest("{\"error\":\"missing ip parameter\"}");
+        self.mgmt_store.blockIp(ip, parsed.values[1] orelse "") catch return nip86.Response.internalError();
+        return nip86.Response.ok("{\"result\":true}");
     }
 
-    fn unblockIp(self: *Nip86Handler, params: []const u8) Response {
+    fn unblockIp(self: *Nip86Handler, params: []const u8) nip86.Response {
         var parsed = nip86.ParsedParams.parseStrings(params, 1, self.allocator);
         defer parsed.deinit();
-        const ip = parsed.values[0] orelse {
-            return Response{ .status = 400, .body = "{\"error\":\"missing ip parameter\"}" };
-        };
-        self.mgmt_store.unblockIp(ip) catch {
-            return Response{ .status = 500, .body = "{\"error\":\"storage error\"}" };
-        };
-        return Response{ .status = 200, .body = "{\"result\":true}" };
+        const ip = parsed.values[0] orelse return nip86.Response.badRequest("{\"error\":\"missing ip parameter\"}");
+        self.mgmt_store.unblockIp(ip) catch return nip86.Response.internalError();
+        return nip86.Response.ok("{\"result\":true}");
     }
 
-    fn listBlockedIps(self: *Nip86Handler) Response {
-        const entries = self.mgmt_store.listBlockedIps(self.allocator) catch {
-            return Response{ .status = 500, .body = "{\"error\":\"storage error\"}" };
-        };
+    fn listBlockedIps(self: *Nip86Handler) nip86.Response {
+        const entries = self.mgmt_store.listBlockedIps(self.allocator) catch return nip86.Response.internalError();
         defer ManagementStore.freeIpEntries(entries, self.allocator);
 
         var buf: std.ArrayListUnmanaged(u8) = .{};
         defer buf.deinit(self.allocator);
 
-        buf.appendSlice(self.allocator, "{\"result\":[") catch return errorResponse();
+        buf.appendSlice(self.allocator, "{\"result\":[") catch return nip86.Response.internalError();
         for (entries, 0..) |entry, i| {
-            if (i > 0) buf.append(self.allocator, ',') catch return errorResponse();
-            buf.appendSlice(self.allocator, "{\"ip\":") catch return errorResponse();
-            nip86.writeJsonString(&buf, self.allocator, entry.ip) catch return errorResponse();
-            buf.appendSlice(self.allocator, ",\"reason\":") catch return errorResponse();
-            nip86.writeJsonString(&buf, self.allocator, entry.reason) catch return errorResponse();
-            buf.append(self.allocator, '}') catch return errorResponse();
+            if (i > 0) buf.append(self.allocator, ',') catch return nip86.Response.internalError();
+            buf.appendSlice(self.allocator, "{\"ip\":") catch return nip86.Response.internalError();
+            nip86.writeJsonString(&buf, self.allocator, entry.ip) catch return nip86.Response.internalError();
+            buf.appendSlice(self.allocator, ",\"reason\":") catch return nip86.Response.internalError();
+            nip86.writeJsonString(&buf, self.allocator, entry.reason) catch return nip86.Response.internalError();
+            buf.append(self.allocator, '}') catch return nip86.Response.internalError();
         }
-        buf.appendSlice(self.allocator, "]}") catch return errorResponse();
+        buf.appendSlice(self.allocator, "]}") catch return nip86.Response.internalError();
 
-        const result = self.allocator.dupe(u8, buf.items) catch return errorResponse();
-        return Response{ .status = 200, .body = result, .owned = true };
+        const result = self.allocator.dupe(u8, buf.items) catch return nip86.Response.internalError();
+        return nip86.Response.ownedOk(result);
     }
 
-    const AuthResult = struct {
-        pubkey: ?[32]u8 = null,
-        err: ?[]const u8 = null,
-    };
+    fn formatPubkeyList(self: *Nip86Handler, entries: []const ManagementStore.PubkeyEntry) nip86.Response {
+        var buf: std.ArrayListUnmanaged(u8) = .{};
+        defer buf.deinit(self.allocator);
 
-    fn validateAuth(_: *Nip86Handler, auth_header: ?[]const u8, body: []const u8, request_url: []const u8) AuthResult {
-        const header = auth_header orelse return AuthResult{ .err = "{\"error\":\"missing authorization header\"}" };
-
-        if (!std.ascii.startsWithIgnoreCase(header, "nostr ")) {
-            return AuthResult{ .err = "{\"error\":\"invalid authorization scheme\"}" };
+        buf.appendSlice(self.allocator, "{\"result\":[") catch return nip86.Response.internalError();
+        for (entries, 0..) |entry, i| {
+            if (i > 0) buf.append(self.allocator, ',') catch return nip86.Response.internalError();
+            buf.appendSlice(self.allocator, "{\"pubkey\":\"") catch return nip86.Response.internalError();
+            var hex_buf: [64]u8 = undefined;
+            hex.encode(&entry.pubkey, &hex_buf);
+            buf.appendSlice(self.allocator, &hex_buf) catch return nip86.Response.internalError();
+            buf.appendSlice(self.allocator, "\",\"reason\":") catch return nip86.Response.internalError();
+            nip86.writeJsonString(&buf, self.allocator, entry.reason) catch return nip86.Response.internalError();
+            buf.append(self.allocator, '}') catch return nip86.Response.internalError();
         }
+        buf.appendSlice(self.allocator, "]}") catch return nip86.Response.internalError();
 
-        const b64_event = std.mem.trim(u8, header[6..], " ");
-        var decode_buf: [4096]u8 = undefined;
-        const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(b64_event) catch {
-            return AuthResult{ .err = "{\"error\":\"invalid base64 in authorization\"}" };
-        };
-        if (decoded_len > decode_buf.len) {
-            return AuthResult{ .err = "{\"error\":\"authorization event too large\"}" };
-        }
-        std.base64.standard.Decoder.decode(&decode_buf, b64_event) catch {
-            return AuthResult{ .err = "{\"error\":\"invalid base64 in authorization\"}" };
-        };
-        const decoded = decode_buf[0..decoded_len];
-
-        var event = nostr.Event.parse(decoded) catch {
-            return AuthResult{ .err = "{\"error\":\"invalid event in authorization\"}" };
-        };
-        defer event.deinit();
-
-        if (event.kind() != 27235) {
-            return AuthResult{ .err = "{\"error\":\"authorization event must be kind 27235\"}" };
-        }
-
-        const now = std.time.timestamp();
-        const created = event.createdAt();
-        const time_diff = if (now > created) now - created else created - now;
-        if (time_diff > 60) {
-            return AuthResult{ .err = "{\"error\":\"authorization event timestamp too old\"}" };
-        }
-
-        event.validate() catch {
-            return AuthResult{ .err = "{\"error\":\"invalid event signature\"}" };
-        };
-
-        const tags = nip86.Nip98Tags.extract(decoded);
-
-        if (tags.url == null) {
-            return AuthResult{ .err = "{\"error\":\"missing u tag in authorization\"}" };
-        }
-        if (!nostr.Auth.domainsMatch(request_url, tags.url.?)) {
-            return AuthResult{ .err = "{\"error\":\"url mismatch in authorization\"}" };
-        }
-
-        if (tags.method == null or !std.ascii.eqlIgnoreCase(tags.method.?, "POST")) {
-            return AuthResult{ .err = "{\"error\":\"method must be POST\"}" };
-        }
-
-        if (tags.payload) |expected_hash| {
-            var actual_hash: [64]u8 = undefined;
-            var sha256 = std.crypto.hash.sha2.Sha256.init(.{});
-            sha256.update(body);
-            const digest = sha256.finalResult();
-            hex.encode(&digest, &actual_hash);
-            if (!std.mem.eql(u8, expected_hash, &actual_hash)) {
-                return AuthResult{ .err = "{\"error\":\"payload hash mismatch\"}" };
-            }
-        } else {
-            return AuthResult{ .err = "{\"error\":\"missing payload tag in authorization\"}" };
-        }
-
-        var pubkey: [32]u8 = undefined;
-        @memcpy(&pubkey, event.pubkey());
-        return AuthResult{ .pubkey = pubkey };
+        const result = self.allocator.dupe(u8, buf.items) catch return nip86.Response.internalError();
+        return nip86.Response.ownedOk(result);
     }
 
     fn isAdmin(self: *Nip86Handler, pubkey: *const [32]u8) bool {
@@ -483,14 +335,4 @@ pub const Nip86Handler = struct {
         }
         return false;
     }
-
-    pub const Response = struct {
-        status: u16,
-        body: []const u8,
-        owned: bool = false,
-    };
 };
-
-fn errorResponse() Nip86Handler.Response {
-    return Nip86Handler.Response{ .status = 500, .body = "{\"error\":\"internal error\"}" };
-}
