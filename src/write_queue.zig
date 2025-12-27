@@ -41,15 +41,25 @@ pub const WriteQueue = struct {
     }
 
     pub fn start(self: *WriteQueue, write_fn: WriteFn, write_ctx: *anyopaque) void {
+        // Guard against double-start: if already running, return early
+        if (!self.stopped.load(.acquire)) {
+            return;
+        }
+
         self.write_fn = write_fn;
         self.write_ctx = write_ctx;
         self.closed.store(false, .release);
-        self.stopped.store(false, .release);
-        self.write_thread = std.Thread.spawn(.{}, writeLoop, .{self}) catch |err| blk: {
+        // Note: stopped remains true until spawn succeeds
+        self.write_thread = std.Thread.spawn(.{}, writeLoop, .{self}) catch |err| {
             std.log.err("WriteQueue: failed to spawn write thread: {}", .{err});
+            // Restore state so enqueue is blocked
+            self.closed.store(true, .release);
             self.stopped.store(true, .release);
-            break :blk null;
+            self.write_thread = null;
+            return;
         };
+        // Only mark as running after spawn succeeds
+        self.stopped.store(false, .release);
     }
 
     pub fn stop(self: *WriteQueue) void {
