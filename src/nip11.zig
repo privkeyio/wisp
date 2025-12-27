@@ -41,7 +41,7 @@ pub fn write(config: *const Config, nip86: *const Nip86Handler, w: anytype) !voi
         try writeJsonString(w, contact);
     }
 
-    try w.writeAll(",\"supported_nips\":[1,2,9,11,13,16,33,40,42,45,50,65,70,77,86]");
+    try w.writeAll(",\"supported_nips\":[1,2,9,11,13,16,22,33,40,42,45,50,65,70,77,86]");
     try w.writeAll(",\"software\":\"https://github.com/privkeyio/wisp\"");
     try w.writeAll(",\"version\":\"0.1.0\"");
 
