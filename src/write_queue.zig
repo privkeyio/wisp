@@ -144,7 +144,18 @@ pub const WriteQueue = struct {
                     return;
                 }
 
-                batch = self.messages.toOwnedSlice(self.allocator) catch return;
+                batch = self.messages.toOwnedSlice(self.allocator) catch {
+                    // Allocation failed - mark queue as closed to prevent new enqueues
+                    // and clean up existing messages before exiting
+                    std.log.err("WriteQueue: allocation failed in worker, shutting down", .{});
+                    self.closed.store(true, .release);
+                    for (self.messages.items) |*msg| {
+                        msg.deinit();
+                    }
+                    self.messages.clearAndFree(self.allocator);
+                    self.stopped.store(true, .release);
+                    return;
+                };
             }
 
             const write_fn = self.write_fn orelse {
