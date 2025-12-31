@@ -30,7 +30,7 @@ What actually happened. Include any error messages or logs.
 
 ## Environment
 
-- **Wisp version**: (run `./wisp --version` or check git commit)
+- **Wisp version**: (check startup log or git commit)
 - **OS**: (e.g., Ubuntu 22.04, macOS 14.0)
 - **Architecture**: (e.g., x86_64, arm64)
 - **Zig version** (if building from source):
