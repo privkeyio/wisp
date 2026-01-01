@@ -351,10 +351,11 @@ pub const TcpServer = struct {
     }
 
     fn handleHttp(self: *TcpServer, conn: net.Server.Connection, req_data: []const u8) !void {
+        const is_options = std.mem.startsWith(u8, req_data, "OPTIONS ");
         const is_nip86_rpc = std.mem.indexOf(u8, req_data, "application/nostr+json+rpc") != null;
         const accepts_json = std.mem.indexOf(u8, req_data, "application/nostr+json") != null;
 
-        if (is_nip86_rpc) {
+        if (is_nip86_rpc or is_options) {
             try self.handleNip86(conn, req_data);
         } else if (accepts_json) {
             var response_buf: [4096]u8 = undefined;
@@ -381,6 +382,12 @@ pub const TcpServer = struct {
     }
 
     fn handleNip86(self: *TcpServer, conn: net.Server.Connection, req_data: []const u8) !void {
+        if (std.mem.startsWith(u8, req_data, "OPTIONS ")) {
+            const response = "HTTP/1.1 204 No Content\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: Authorization, Content-Type\r\nAccess-Control-Allow-Methods: POST, OPTIONS\r\nAccess-Control-Max-Age: 86400\r\n\r\n";
+            try conn.stream.writeAll(response);
+            return;
+        }
+
         if (self.config.admin_pubkeys.len == 0) {
             const response = "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 39\r\n\r\n{\"error\":\"management API not enabled\"}";
             try conn.stream.writeAll(response);
@@ -404,13 +411,26 @@ pub const TcpServer = struct {
 
         const result = self.nip86_handler.handle(body, auth_header, request_url);
 
+        const reason = statusReason(result.status);
         var response_buf: [65536]u8 = undefined;
-        const response = std.fmt.bufPrint(&response_buf, "HTTP/1.1 {d} OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: *\r\nAccess-Control-Allow-Methods: POST, OPTIONS\r\nContent-Length: {d}\r\n\r\n{s}", .{ result.status, result.body.len, result.body }) catch return;
+        const response = std.fmt.bufPrint(&response_buf, "HTTP/1.1 {d} {s}\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: Authorization, Content-Type\r\nAccess-Control-Allow-Methods: POST, OPTIONS\r\nContent-Length: {d}\r\n\r\n{s}", .{ result.status, reason, result.body.len, result.body }) catch return;
         conn.stream.writeAll(response) catch {};
 
         if (result.owned) {
             self.allocator.free(result.body);
         }
+    }
+
+    fn statusReason(status: u16) []const u8 {
+        return switch (status) {
+            200 => "OK",
+            400 => "Bad Request",
+            401 => "Unauthorized",
+            403 => "Forbidden",
+            404 => "Not Found",
+            500 => "Internal Server Error",
+            else => "Unknown",
+        };
     }
 
     fn extractHeader(data: []const u8, header_name: []const u8) ?[]const u8 {

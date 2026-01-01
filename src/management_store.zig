@@ -309,20 +309,10 @@ pub const ManagementStore = struct {
 
         if ((txn.get(self.blocked_ips, ip) catch null) != null) return true;
 
-        var cursor = txn.cursor(self.blocked_ips) catch return false;
-        defer cursor.close();
-
-        var entry = cursor.get(.first) catch null;
-        while (entry != null) {
-            const e = entry.?;
-            // Only match exact IPs or proper CIDR prefixes with dot boundary
-            if (std.mem.eql(u8, ip, e.key) or
-                (std.mem.startsWith(u8, ip, e.key) and
-                e.key.len < ip.len and ip[e.key.len] == '.'))
-            {
-                return true;
-            }
-            entry = cursor.get(.next) catch null;
+        var pos: usize = 0;
+        while (std.mem.indexOfScalarPos(u8, ip, pos, '.')) |dot| {
+            if ((txn.get(self.blocked_ips, ip[0..dot]) catch null) != null) return true;
+            pos = dot + 1;
         }
 
         return false;
