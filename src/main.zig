@@ -16,6 +16,8 @@ const TcpServer = @import("tcp_server.zig").TcpServer;
 const Spider = @import("spider.zig").Spider;
 const nostr = @import("nostr.zig");
 const rate_limiter = @import("rate_limiter.zig");
+const ManagementStore = @import("management_store.zig").ManagementStore;
+const Nip86Handler = @import("nip86.zig").Nip86Handler;
 
 var g_server: ?*TcpServer = null;
 var g_shutdown: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
@@ -155,6 +157,12 @@ pub fn main() !void {
     var store = try Store.init(allocator, &lmdb);
     defer store.deinit();
 
+    var mgmt_store = try ManagementStore.init(allocator, &lmdb);
+
+    var nip86_handler = Nip86Handler.init(allocator, &config, &mgmt_store);
+    defer nip86_handler.deinit();
+    nip86_handler.loadRelaySettings();
+
     var subs = Subscriptions.init(allocator);
     defer subs.deinit();
 
@@ -163,9 +171,9 @@ pub fn main() !void {
     var event_limiter = rate_limiter.EventRateLimiter.init(allocator, config.events_per_minute);
     defer event_limiter.deinit();
 
-    var handler = Handler.init(allocator, &config, &store, &subs, &broadcaster, sendCallback, &event_limiter, &g_shutdown);
+    var handler = Handler.init(allocator, &config, &store, &subs, &broadcaster, sendCallback, &event_limiter, &g_shutdown, &mgmt_store);
 
-    var server = try TcpServer.init(allocator, &config, &handler, &subs, &g_shutdown);
+    var server = try TcpServer.init(allocator, &config, &handler, &subs, &g_shutdown, &nip86_handler);
     defer server.deinit();
 
     g_server = &server;
