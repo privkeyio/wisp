@@ -70,4 +70,4 @@ See [CHANGELOG.md](CHANGELOG.md) for a history of changes to this project.
 
 ## License
 
-AGPL-3.0
+MIT

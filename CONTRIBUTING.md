@@ -304,4 +304,4 @@ Be respectful and constructive in all interactions. We're all here to build usef
 
 ## License
 
-By contributing to wisp, you agree that your contributions will be licensed under the AGPL-3.0 license.
+By contributing to wisp, you agree that your contributions will be licensed under the MIT license.
