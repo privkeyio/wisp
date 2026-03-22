@@ -11,30 +11,25 @@ A fast, lightweight [nostr](https://github.com/nostr-protocol/nostr) relay writt
 - **Simple**: One command to run your personal relay with your feed
 - **Spider Mode**: Automatically syncs events from people you follow
 
-## Benchmarks
-
-| Relay | Events/sec | p50 Latency | p99 Latency |
-|-------|-----------|-------------|-------------|
-| Wisp | 1,993 | 0.55ms | 0.82ms |
-| strfry | 872 | 4.28ms | 9.92ms |
-
-*4 concurrent workers, 1k events. [Full results](https://github.com/privkeyio/nostr-bench/blob/main/reports/BENCHMARK_RESULTS.md)*
-
 ## Quickstart
 
 Download the [latest release](https://github.com/privkeyio/wisp/releases) or build from source:
 
 ```sh
-# Build (requires Zig 0.15+)
+# 1. Install dependencies (requires Zig 0.15+)
 sudo apt install -y liblmdb-dev libsecp256k1-dev libssl-dev
+
+# 2. Build
 git clone https://github.com/privkeyio/wisp && cd wisp
 zig build -Doptimize=ReleaseFast
 
-# Run your personal relay (replace with your npub)
+# 3. Run (replace with your npub)
 ./zig-out/bin/wisp --spider-admin npub1yourkey...
 ```
 
-Spider reads your follow list and pulls your feed. Point your client at `ws://localhost:7777`.
+That's it. Wisp will fetch your follow list, sync notes from popular relays, and serve them at `ws://localhost:7777`. Add this relay URL to your Nostr client.
+
+For more options, see `wisp.toml.example`.
 
 ## Features
 
@@ -59,6 +54,15 @@ WISP_PORT=8080 ./zig-out/bin/wisp
 ```
 
 See `wisp.toml.example` for all options.
+
+## Benchmarks
+
+| Relay | Events/sec | p50 Latency | p99 Latency |
+|-------|-----------|-------------|-------------|
+| Wisp | 1,993 | 0.55ms | 0.82ms |
+| strfry | 872 | 4.28ms | 9.92ms |
+
+*4 concurrent workers, 1k events. [Full results](https://github.com/privkeyio/nostr-bench/blob/main/reports/BENCHMARK_RESULTS.md)*
 
 ## Contributing
 
