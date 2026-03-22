@@ -129,6 +129,11 @@ pub const TcpServer = struct {
                 continue;
             };
 
+            if (self.subs.connectionCount() >= self.config.max_connections) {
+                conn.stream.close();
+                continue;
+            }
+
             const thread = std.Thread.spawn(.{}, handleConnection, .{ self, conn }) catch |err| {
                 std.log.warn("Failed to spawn connection thread: {}", .{err});
                 conn.stream.close();
