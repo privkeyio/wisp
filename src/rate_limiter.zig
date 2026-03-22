@@ -216,8 +216,8 @@ pub fn extractClientIp(
 
         if (forwarded_for) |xff| {
             if (xff.len > 0) {
-                if (std.mem.indexOf(u8, xff, ",")) |comma| {
-                    return normalizeIp(std.mem.trim(u8, xff[0..comma], " "));
+                if (std.mem.lastIndexOf(u8, xff, ",")) |comma| {
+                    return normalizeIp(std.mem.trim(u8, xff[comma + 1 ..], " "));
                 }
                 return normalizeIp(xff);
             }

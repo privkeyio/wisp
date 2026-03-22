@@ -439,7 +439,7 @@ pub const TcpServer = struct {
         }
 
         const initial_body = req_data[body_offset..];
-        var body: []const u8 = undefined;
+        var body: []const u8 = "";
         var body_buf: ?[]u8 = null;
         defer if (body_buf) |b| self.allocator.free(b);
 

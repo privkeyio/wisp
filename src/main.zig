@@ -217,12 +217,17 @@ fn storeCleanupThread(store: *Store, config: *const Config, shutdown: *std.atomi
     const check_interval_ns: u64 = std.time.ns_per_s;
     const hour_checks: u64 = 3600;
     const limiter_cleanup_checks: u64 = 300;
+    const sync_checks: u64 = 60;
     var checks: u64 = 0;
 
     while (!shutdown.load(.acquire)) {
         std.Thread.sleep(check_interval_ns);
         if (shutdown.load(.acquire)) break;
         checks += 1;
+
+        if (checks % sync_checks == 0) {
+            store.lmdb.sync();
+        }
 
         if (checks % limiter_cleanup_checks == 0) {
             conn_limiter.cleanup();
