@@ -52,8 +52,8 @@ pub const Lmdb = struct {
         const path_z = try allocator.dupeZ(u8, path);
         defer allocator.free(path_z);
 
-        const flags: c_uint = c.MDB_NOSUBDIR | c.MDB_NOSYNC | c.MDB_NOMETASYNC | c.MDB_WRITEMAP | c.MDB_MAPASYNC | c.MDB_NORDAHEAD;
-        const rc = c.mdb_env_open(env, path_z.ptr, flags, 0o644);
+        const flags: c_uint = c.MDB_NOSUBDIR | c.MDB_NOSYNC | c.MDB_NOMETASYNC | c.MDB_WRITEMAP | c.MDB_NORDAHEAD;
+        const rc = c.mdb_env_open(env, path_z.ptr, flags, 0o600);
         if (rc != 0) {
             std.log.err("LMDB open failed: {}", .{rc});
             return error.EnvOpen;
