@@ -13,6 +13,14 @@ A fast, lightweight [nostr](https://github.com/nostr-protocol/nostr) relay writt
 
 ## Quickstart
 
+### Docker
+
+```sh
+docker run -d -p 7777:7777 -v wisp-data:/data ghcr.io/privkeyio/wisp --spider-admin npub1yourkey...
+```
+
+### Build from source
+
 Download the [latest release](https://github.com/privkeyio/wisp/releases) or build from source:
 
 ```sh
