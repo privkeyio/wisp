@@ -59,6 +59,20 @@ pub const Lmdb = struct {
             return error.EnvOpen;
         }
 
+        const data_file = std.fs.cwd().openFile(path, .{}) catch null;
+        if (data_file) |f| {
+            f.chmod(0o600) catch |err| std.log.warn("chmod data file failed: {}", .{err});
+            f.close();
+        }
+
+        const lock_path = try std.fmt.allocPrint(allocator, "{s}-lock", .{path});
+        defer allocator.free(lock_path);
+        const lock_file = std.fs.cwd().openFile(lock_path, .{}) catch null;
+        if (lock_file) |f| {
+            f.chmod(0o600) catch |err| std.log.warn("chmod lock file failed: {}", .{err});
+            f.close();
+        }
+
         return .{
             .env = env.?,
             .allocator = allocator,
