@@ -249,7 +249,7 @@ fn normalizeIp(ip: []const u8) []const u8 {
 test "extractClientIp" {
     try std.testing.expectEqualStrings("192.168.1.1", extractClientIp(null, null, "192.168.1.1:8080", false));
     try std.testing.expectEqualStrings("10.0.0.1", extractClientIp("1.2.3.4", null, "10.0.0.1:8080", false));
-    try std.testing.expectEqualStrings("1.2.3.4", extractClientIp("1.2.3.4, 10.0.0.1", null, "127.0.0.1:8080", true));
+    try std.testing.expectEqualStrings("10.0.0.1", extractClientIp("1.2.3.4, 10.0.0.1", null, "127.0.0.1:8080", true));
     try std.testing.expectEqualStrings("5.6.7.8", extractClientIp("1.2.3.4", "5.6.7.8", "127.0.0.1:8080", true));
 }
 
