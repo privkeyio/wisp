@@ -76,15 +76,15 @@ pub const ConnectionLimiter = struct {
         defer self.mutex.unlock();
 
         const now = std.time.timestamp();
-        var to_remove = std.ArrayList([]const u8).init(self.allocator);
-        defer to_remove.deinit();
+        var to_remove: std.ArrayListUnmanaged([]const u8) = .{};
+        defer to_remove.deinit(self.allocator);
 
         var iter = self.ip_buckets.iterator();
         while (iter.next()) |entry| {
             if (entry.value_ptr.connection_count == 0 and
                 now - entry.value_ptr.last_activity > self.cleanup_interval_seconds)
             {
-                to_remove.append(entry.key_ptr.*) catch continue;
+                to_remove.append(self.allocator, entry.key_ptr.*) catch continue;
             }
         }
 
@@ -341,8 +341,8 @@ pub const EventRateLimiter = struct {
 
         const now = std.time.timestamp();
         const window_start = now - WINDOW_SIZE;
-        var to_remove = std.ArrayList([]const u8).init(self.allocator);
-        defer to_remove.deinit();
+        var to_remove: std.ArrayListUnmanaged([]const u8) = .{};
+        defer to_remove.deinit(self.allocator);
 
         var iter = self.ip_buckets.iterator();
         while (iter.next()) |entry| {
@@ -356,7 +356,7 @@ pub const EventRateLimiter = struct {
                 }
             }
             if (!has_recent) {
-                to_remove.append(entry.key_ptr.*) catch continue;
+                to_remove.append(self.allocator, entry.key_ptr.*) catch continue;
             }
         }
 

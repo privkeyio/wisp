@@ -205,7 +205,7 @@ pub fn main() !void {
     std.posix.sigaction(std.posix.SIG.INT, &sa, null);
     std.posix.sigaction(std.posix.SIG.TERM, &sa, null);
 
-    const cleanup_thread = std.Thread.spawn(.{}, storeCleanupThread, .{ &store, &config, &g_shutdown }) catch null;
+    const cleanup_thread = std.Thread.spawn(.{}, storeCleanupThread, .{ &store, &config, &g_shutdown, &server.conn_limiter, &event_limiter }) catch null;
     defer if (cleanup_thread) |t| t.join();
 
     try server.run();
@@ -213,15 +213,22 @@ pub fn main() !void {
     std.log.info("Shutdown complete", .{});
 }
 
-fn storeCleanupThread(store: *Store, config: *const Config, shutdown: *std.atomic.Value(bool)) void {
+fn storeCleanupThread(store: *Store, config: *const Config, shutdown: *std.atomic.Value(bool), conn_limiter: *rate_limiter.ConnectionLimiter, event_limiter: *rate_limiter.EventRateLimiter) void {
     const check_interval_ns: u64 = std.time.ns_per_s;
     const hour_checks: u64 = 3600;
+    const limiter_cleanup_checks: u64 = 300;
     var checks: u64 = 0;
 
     while (!shutdown.load(.acquire)) {
         std.Thread.sleep(check_interval_ns);
         if (shutdown.load(.acquire)) break;
         checks += 1;
+
+        if (checks % limiter_cleanup_checks == 0) {
+            conn_limiter.cleanup();
+            event_limiter.cleanup();
+        }
+
         if (checks < hour_checks) continue;
         checks = 0;
 
