@@ -55,6 +55,53 @@ WISP_PORT=8080 ./zig-out/bin/wisp
 
 See `wisp.toml.example` for all options.
 
+## Deploy (wss://)
+
+To make your relay publicly accessible with TLS, put Caddy in front of wisp:
+
+```sh
+# Install Caddy
+sudo apt install -y caddy
+```
+
+Create `/etc/caddy/Caddyfile`:
+
+```
+relay.yourdomain.com {
+    reverse_proxy localhost:7777
+}
+```
+
+Create `/etc/systemd/system/wisp.service`:
+
+```ini
+[Unit]
+Description=Wisp Nostr Relay
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/wisp --spider-admin npub1yourkey...
+WorkingDirectory=/var/lib/wisp
+Restart=always
+User=wisp
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```sh
+# Set up and start
+sudo useradd -r -s /bin/false wisp
+sudo mkdir -p /var/lib/wisp
+sudo chown wisp:wisp /var/lib/wisp
+sudo cp zig-out/bin/wisp /usr/local/bin/
+sudo systemctl enable --now wisp caddy
+```
+
+Add `trust_proxy = true` to your `wisp.toml` if using rate limiting behind Caddy.
+
+Your relay is now live at `wss://relay.yourdomain.com`.
+
 ## Benchmarks
 
 | Relay | Events/sec | p50 Latency | p99 Latency |
