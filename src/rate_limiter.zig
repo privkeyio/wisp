@@ -76,15 +76,15 @@ pub const ConnectionLimiter = struct {
         defer self.mutex.unlock();
 
         const now = std.time.timestamp();
-        var to_remove = std.ArrayList([]const u8).init(self.allocator);
-        defer to_remove.deinit();
+        var to_remove: std.ArrayListUnmanaged([]const u8) = .{};
+        defer to_remove.deinit(self.allocator);
 
         var iter = self.ip_buckets.iterator();
         while (iter.next()) |entry| {
             if (entry.value_ptr.connection_count == 0 and
                 now - entry.value_ptr.last_activity > self.cleanup_interval_seconds)
             {
-                to_remove.append(entry.key_ptr.*) catch continue;
+                to_remove.append(self.allocator, entry.key_ptr.*) catch continue;
             }
         }
 
@@ -216,8 +216,8 @@ pub fn extractClientIp(
 
         if (forwarded_for) |xff| {
             if (xff.len > 0) {
-                if (std.mem.indexOf(u8, xff, ",")) |comma| {
-                    return normalizeIp(std.mem.trim(u8, xff[0..comma], " "));
+                if (std.mem.lastIndexOf(u8, xff, ",")) |comma| {
+                    return normalizeIp(std.mem.trim(u8, xff[comma + 1 ..], " "));
                 }
                 return normalizeIp(xff);
             }
@@ -249,7 +249,7 @@ fn normalizeIp(ip: []const u8) []const u8 {
 test "extractClientIp" {
     try std.testing.expectEqualStrings("192.168.1.1", extractClientIp(null, null, "192.168.1.1:8080", false));
     try std.testing.expectEqualStrings("10.0.0.1", extractClientIp("1.2.3.4", null, "10.0.0.1:8080", false));
-    try std.testing.expectEqualStrings("1.2.3.4", extractClientIp("1.2.3.4, 10.0.0.1", null, "127.0.0.1:8080", true));
+    try std.testing.expectEqualStrings("10.0.0.1", extractClientIp("1.2.3.4, 10.0.0.1", null, "127.0.0.1:8080", true));
     try std.testing.expectEqualStrings("5.6.7.8", extractClientIp("1.2.3.4", "5.6.7.8", "127.0.0.1:8080", true));
 }
 
@@ -341,8 +341,8 @@ pub const EventRateLimiter = struct {
 
         const now = std.time.timestamp();
         const window_start = now - WINDOW_SIZE;
-        var to_remove = std.ArrayList([]const u8).init(self.allocator);
-        defer to_remove.deinit();
+        var to_remove: std.ArrayListUnmanaged([]const u8) = .{};
+        defer to_remove.deinit(self.allocator);
 
         var iter = self.ip_buckets.iterator();
         while (iter.next()) |entry| {
@@ -356,7 +356,7 @@ pub const EventRateLimiter = struct {
                 }
             }
             if (!has_recent) {
-                to_remove.append(entry.key_ptr.*) catch continue;
+                to_remove.append(self.allocator, entry.key_ptr.*) catch continue;
             }
         }
 

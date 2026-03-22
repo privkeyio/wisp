@@ -43,7 +43,7 @@ pub fn write(config: *const Config, nip86: *const Nip86Handler, w: anytype) !voi
 
     try w.writeAll(",\"supported_nips\":[1,2,9,11,13,16,22,33,40,42,45,50,65,70,77,86]");
     try w.writeAll(",\"software\":\"https://github.com/privkeyio/wisp\"");
-    try w.writeAll(",\"version\":\"0.1.0\"");
+    try w.writeAll(",\"version\":\"0.2.0\"");
 
     try w.writeAll(",\"limitation\":{");
     try w.print("\"max_message_length\":{d}", .{config.max_message_size});

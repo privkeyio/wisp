@@ -129,6 +129,11 @@ pub const TcpServer = struct {
                 continue;
             };
 
+            if (self.subs.connectionCount() >= self.config.max_connections) {
+                conn.stream.close();
+                continue;
+            }
+
             const thread = std.Thread.spawn(.{}, handleConnection, .{ self, conn }) catch |err| {
                 std.log.warn("Failed to spawn connection thread: {}", .{err});
                 conn.stream.close();
@@ -185,9 +190,21 @@ pub const TcpServer = struct {
         if (self.shutdown.load(.acquire)) return;
 
         var addr_buf: [64]u8 = undefined;
-        const client_ip = extractIp(conn.address, &addr_buf);
+        const socket_ip = extractIp(conn.address, &addr_buf);
 
         if (self.shutdown.load(.acquire)) return;
+
+        var buf: [8192]u8 = undefined;
+        const n = conn.stream.read(&buf) catch return;
+        if (n == 0) return;
+
+        const req_data = buf[0..n];
+
+        const client_ip = if (self.config.trust_proxy) blk: {
+            const xff = extractHeader(req_data, "X-Forwarded-For: ");
+            const xrip = extractHeader(req_data, "X-Real-IP: ");
+            break :blk rate_limiter.extractClientIp(xff, xrip, socket_ip, true);
+        } else socket_ip;
 
         if (!self.ip_filter.isAllowed(client_ip)) {
             return;
@@ -200,12 +217,6 @@ pub const TcpServer = struct {
         if (!self.conn_limiter.canConnect(client_ip)) {
             return;
         }
-
-        var buf: [8192]u8 = undefined;
-        const n = conn.stream.read(&buf) catch return;
-        if (n == 0) return;
-
-        const req_data = buf[0..n];
 
         if (isWebsocketUpgrade(req_data)) {
             self.handleWebsocket(conn, client_ip, req_data) catch |err| {
@@ -388,18 +399,69 @@ pub const TcpServer = struct {
             return;
         }
 
+        if (!std.mem.startsWith(u8, req_data, "POST ")) {
+            const response = "HTTP/1.1 405 Method Not Allowed\r\nAllow: POST, OPTIONS\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 0\r\n\r\n";
+            try conn.stream.writeAll(response);
+            return;
+        }
+
         if (self.config.admin_pubkeys.len == 0) {
             const response = "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 39\r\n\r\n{\"error\":\"management API not enabled\"}";
             try conn.stream.writeAll(response);
             return;
         }
 
-        const body_start = std.mem.indexOf(u8, req_data, "\r\n\r\n") orelse {
+        const header_end = std.mem.indexOf(u8, req_data, "\r\n\r\n") orelse {
             const response = "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 32\r\n\r\n{\"error\":\"missing request body\"}";
             try conn.stream.writeAll(response);
             return;
         };
-        const body = req_data[body_start + 4 ..];
+        const body_offset = header_end + 4;
+
+        const max_body_size: usize = 65536;
+        const content_length = blk: {
+            const cl_str = extractHeader(req_data[0..header_end], "Content-Length: ") orelse {
+                const response = "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 34\r\n\r\n{\"error\":\"missing Content-Length\"}";
+                try conn.stream.writeAll(response);
+                return;
+            };
+            break :blk std.fmt.parseInt(usize, cl_str, 10) catch {
+                const response = "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 34\r\n\r\n{\"error\":\"invalid Content-Length\"}";
+                try conn.stream.writeAll(response);
+                return;
+            };
+        };
+
+        if (content_length > max_body_size) {
+            const response = "HTTP/1.1 413 Content Too Large\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 34\r\n\r\n{\"error\":\"request body too large\"}";
+            try conn.stream.writeAll(response);
+            return;
+        }
+
+        const initial_body = req_data[body_offset..];
+        var body: []const u8 = "";
+        var body_buf: ?[]u8 = null;
+        defer if (body_buf) |b| self.allocator.free(b);
+
+        if (initial_body.len >= content_length) {
+            body = initial_body[0..content_length];
+        } else {
+            body_buf = self.allocator.alloc(u8, content_length) catch {
+                const response = "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 25\r\n\r\n{\"error\":\"out of memory\"}";
+                try conn.stream.writeAll(response);
+                return;
+            };
+            @memcpy(body_buf.?[0..initial_body.len], initial_body);
+            var total_read = initial_body.len;
+            while (total_read < content_length) {
+                const bytes = conn.stream.read(body_buf.?[total_read..content_length]) catch {
+                    return;
+                };
+                if (bytes == 0) return;
+                total_read += bytes;
+            }
+            body = body_buf.?[0..content_length];
+        }
 
         const auth_header = extractHeader(req_data, "Authorization: ");
 
@@ -428,6 +490,8 @@ pub const TcpServer = struct {
             401 => "Unauthorized",
             403 => "Forbidden",
             404 => "Not Found",
+            405 => "Method Not Allowed",
+            413 => "Content Too Large",
             500 => "Internal Server Error",
             else => "Unknown",
         };

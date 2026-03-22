@@ -52,11 +52,13 @@ idle_seconds = 300
 # ip_blacklist = ""
 
 [spider]
+# Spider syncs events from people you follow on other relays.
+# Set admin to your hex pubkey to fetch your contact list and sync your feed.
 enabled = true
 relays = "wss://relay.damus.io,wss://nos.lol,wss://relay.nostr.band"
 sync_interval = 300
-admin = ""  # hex pubkey - fetches their kind 3 contact list (required for spider)
-# pubkeys = ""  # comma-separated hex pubkeys to follow
+admin = ""  # your hex pubkey (use `zig-out/bin/wisp help` for npub support via CLI)
+# pubkeys = ""  # additional hex pubkeys to follow
 
 [negentropy]
 enabled = true
