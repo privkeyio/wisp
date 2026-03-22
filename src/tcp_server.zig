@@ -190,9 +190,21 @@ pub const TcpServer = struct {
         if (self.shutdown.load(.acquire)) return;
 
         var addr_buf: [64]u8 = undefined;
-        const client_ip = extractIp(conn.address, &addr_buf);
+        const socket_ip = extractIp(conn.address, &addr_buf);
 
         if (self.shutdown.load(.acquire)) return;
+
+        var buf: [8192]u8 = undefined;
+        const n = conn.stream.read(&buf) catch return;
+        if (n == 0) return;
+
+        const req_data = buf[0..n];
+
+        const client_ip = if (self.config.trust_proxy) blk: {
+            const xff = extractHeader(req_data, "X-Forwarded-For: ");
+            const xrip = extractHeader(req_data, "X-Real-IP: ");
+            break :blk rate_limiter.extractClientIp(xff, xrip, socket_ip, true);
+        } else socket_ip;
 
         if (!self.ip_filter.isAllowed(client_ip)) {
             return;
@@ -205,12 +217,6 @@ pub const TcpServer = struct {
         if (!self.conn_limiter.canConnect(client_ip)) {
             return;
         }
-
-        var buf: [8192]u8 = undefined;
-        const n = conn.stream.read(&buf) catch return;
-        if (n == 0) return;
-
-        const req_data = buf[0..n];
 
         if (isWebsocketUpgrade(req_data)) {
             self.handleWebsocket(conn, client_ip, req_data) catch |err| {
