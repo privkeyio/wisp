@@ -65,10 +65,14 @@ See `wisp.toml.example` for all options.
 
 ## Deploy (wss://)
 
-To make your relay publicly accessible with TLS, put Caddy in front of wisp:
+To make your relay publicly accessible with TLS, run wisp with Caddy:
 
 ```sh
-# Install Caddy
+# Run wisp
+docker run -d --restart always -p 7777:7777 -v wisp-data:/data \
+  ghcr.io/privkeyio/wisp --spider-admin npub1yourkey...
+
+# Install Caddy for automatic TLS
 sudo apt install -y caddy
 ```
 
@@ -80,33 +84,9 @@ relay.yourdomain.com {
 }
 ```
 
-Create `/etc/systemd/system/wisp.service`:
-
-```ini
-[Unit]
-Description=Wisp Nostr Relay
-After=network.target
-
-[Service]
-ExecStart=/usr/local/bin/wisp --spider-admin npub1yourkey...
-WorkingDirectory=/var/lib/wisp
-Restart=always
-User=wisp
-
-[Install]
-WantedBy=multi-user.target
-```
-
 ```sh
-# Set up and start
-sudo useradd -r -s /bin/false wisp
-sudo mkdir -p /var/lib/wisp
-sudo chown wisp:wisp /var/lib/wisp
-sudo cp zig-out/bin/wisp /usr/local/bin/
-sudo systemctl enable --now wisp caddy
+sudo systemctl restart caddy
 ```
-
-Add `trust_proxy = true` to your `wisp.toml` if using rate limiting behind Caddy.
 
 Your relay is now live at `wss://relay.yourdomain.com`.
 
