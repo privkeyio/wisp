@@ -41,7 +41,7 @@ For more options, see `wisp.toml.example`.
 
 ## Features
 
-* NIPs: 1, 2, 9, 11, 13, 16, 22, 33, 40, 42, 45, 50, 65, 70, 77, 86
+* NIPs: 1, 2, 9, 11, 13, 16, 17, 22, 33, 40, 42, 45, 50, 59, 65, 70, 77, 86
 * LMDB storage (no external database)
 * Spider mode for syncing events from external relays
 * Import/export to JSONL
