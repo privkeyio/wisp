@@ -113,6 +113,26 @@ jobs:
           stop "$a"; stop "$b"; wait 2>/dev/null
           exit $rc
 
+      - name: Run NIP-86 management test
+        run: |
+          stop() {
+            kill "$1" 2>/dev/null || return 0
+            for i in $(seq 1 20); do kill -0 "$1" 2>/dev/null || return 0; sleep 0.25; done
+            kill -9 "$1" 2>/dev/null || true
+          }
+          # admin = SEC1's pubkey (the well-known key 0000...0001)
+          admin=79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
+          nohup env WISP_HOST=127.0.0.1 WISP_PORT=7781 \
+            WISP_ADMIN_PUBKEYS="$admin" WISP_RELAY_URL=http://127.0.0.1:7781 \
+            WISP_STORAGE_PATH="$RUNNER_TEMP/wisp-mgmt" \
+            ./zig-out/bin/wisp relay > relay-mgmt.log 2>&1 &
+          pid=$!
+          for i in $(seq 1 40); do nc -z 127.0.0.1 7781 && break; sleep 0.25; done
+          bash tests/integration_management.sh http://127.0.0.1:7781
+          rc=$?
+          stop "$pid"; wait "$pid" 2>/dev/null
+          exit $rc
+
       - name: Relay log
         if: always()
         run: cat relay.log || true
