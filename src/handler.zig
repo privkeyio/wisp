@@ -25,7 +25,18 @@ fn isKindOnlyQuery(f: *const nostr.Filter) bool {
     if (f.authors() != null) return false;
     if (f.ids() != null) return false;
     if (f.hasTagFilters()) return false;
+    if (f.search() != null) return false;
     return true;
+}
+
+fn streamQueryResults(conn: *Connection, sub_id: []const u8, iter: anytype) void {
+    while (iter.next() catch null) |json| {
+        if (conn.directWriteFailed()) break;
+        var buf: [65536]u8 = undefined;
+        const event_msg = nostr.RelayMsg.eventRaw(sub_id, json, &buf) catch continue;
+        conn.sendDirect(event_msg);
+        conn.events_sent += 1;
+    }
 }
 
 fn countLeadingZeroBits(id: *const [32]u8) u8 {
@@ -460,12 +471,7 @@ pub const Handler = struct {
                 };
                 defer iter.deinit();
 
-                while (iter.next() catch null) |json| {
-                    var buf: [65536]u8 = undefined;
-                    const event_msg = nostr.RelayMsg.eventRaw(sub_id, json, &buf) catch continue;
-                    _ = conn.send(event_msg);
-                    conn.events_sent += 1;
-                }
+                streamQueryResults(conn, sub_id, &iter);
             } else {
                 if (self.shutdown.load(.acquire)) return;
                 var mk_iter = self.store.queryMultiKind(kinds, limit) catch {
@@ -474,12 +480,7 @@ pub const Handler = struct {
                 };
                 defer mk_iter.deinit();
 
-                while (mk_iter.next() catch null) |json| {
-                    var buf: [65536]u8 = undefined;
-                    const event_msg = nostr.RelayMsg.eventRaw(sub_id, json, &buf) catch continue;
-                    _ = conn.send(event_msg);
-                    conn.events_sent += 1;
-                }
+                streamQueryResults(conn, sub_id, &mk_iter);
             }
         } else {
             if (self.shutdown.load(.acquire)) return;
@@ -489,12 +490,7 @@ pub const Handler = struct {
             };
             defer iter.deinit();
 
-            while (iter.next() catch null) |json| {
-                var buf: [65536]u8 = undefined;
-                const event_msg = nostr.RelayMsg.eventRaw(sub_id, json, &buf) catch continue;
-                _ = conn.send(event_msg);
-                conn.events_sent += 1;
-            }
+            streamQueryResults(conn, sub_id, &iter);
         }
 
         self.sendEose(conn, sub_id);

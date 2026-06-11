@@ -12,7 +12,9 @@ jobs:
     if: github.event.pull_request.draft != true
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          persist-credentials: false
 
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y liblmdb-dev libsecp256k1-dev libssl-dev
@@ -27,3 +29,196 @@ jobs:
 
       - name: Test LMDB bindings
         run: zig build test-lmdb
+
+  integration:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft != true
+
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y liblmdb-dev libsecp256k1-dev libssl-dev
+
+      - name: Setup Zig
+        run: |
+          curl -L https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz | tar -xJ
+          echo "$PWD/zig-x86_64-linux-0.15.2" >> $GITHUB_PATH
+
+      - name: Install nak (nostr test client)
+        run: |
+          go install github.com/fiatjaf/nak@v0.19.12
+          echo "$HOME/go/bin" >> $GITHUB_PATH
+
+      - name: Build relay
+        run: zig build
+
+      - name: Start relay
+        run: |
+          nohup env WISP_HOST=127.0.0.1 WISP_STORAGE_PATH="$RUNNER_TEMP/wisp" \
+            ./zig-out/bin/wisp relay > relay.log 2>&1 &
+          echo $! > relay.pid
+          for i in $(seq 1 40); do
+            nc -z 127.0.0.1 7777 && exit 0
+            sleep 0.5
+          done
+          echo "relay did not start listening on 7777" && cat relay.log && exit 1
+
+      - name: Run protocol integration tests
+        run: bash tests/integration.sh ws://127.0.0.1:7777
+
+      - name: Run restricted-config tests (NIP-42 / 70 / 13)
+        run: |
+          # graceful kill, then SIGKILL fallback, so a slow exit never hangs CI
+          stop() {
+            kill "$1" 2>/dev/null || return 0
+            for i in $(seq 1 20); do kill -0 "$1" 2>/dev/null || return 0; sleep 0.25; done
+            kill -9 "$1" 2>/dev/null || true
+          }
+          run_mode() {
+            local mode=$1; shift
+            nohup env "$@" WISP_HOST=127.0.0.1 WISP_PORT=7778 \
+              WISP_STORAGE_PATH="$RUNNER_TEMP/wisp-$mode" \
+              ./zig-out/bin/wisp relay > "relay-$mode.log" 2>&1 &
+            local pid=$! ready=
+            for i in $(seq 1 40); do nc -z 127.0.0.1 7778 && { ready=1; break; }; sleep 0.25; done
+            if [ -z "$ready" ]; then
+              echo "relay ($mode) never listened on 7778"; cat "relay-$mode.log" 2>/dev/null || true
+              stop "$pid"; wait "$pid" 2>/dev/null
+              return 1
+            fi
+            bash tests/integration_restrict.sh ws://127.0.0.1:7778 "$mode"
+            local rc=$?
+            stop "$pid"; wait "$pid" 2>/dev/null; sleep 0.3
+            return $rc
+          }
+          run_mode auth WISP_AUTH_REQUIRED=true WISP_RELAY_URL=ws://127.0.0.1:7778 \
+            && run_mode protected WISP_RELAY_URL=ws://127.0.0.1:7778 \
+            && run_mode pow WISP_MIN_POW_DIFFICULTY=8
+
+      - name: Run NIP-77 negentropy sync test
+        run: |
+          stop() {
+            kill "$1" 2>/dev/null || return 0
+            for i in $(seq 1 20); do kill -0 "$1" 2>/dev/null || return 0; sleep 0.25; done
+            kill -9 "$1" 2>/dev/null || true
+          }
+          start() { # port datadir -> echoes pid, returns 1 if never ready
+            nohup env WISP_HOST=127.0.0.1 WISP_PORT="$1" WISP_STORAGE_PATH="$2" \
+              ./zig-out/bin/wisp relay > "relay-$1.log" 2>&1 &
+            local pid=$!
+            for i in $(seq 1 40); do nc -z 127.0.0.1 "$1" && { echo "$pid"; return 0; }; sleep 0.25; done
+            echo "$pid"; return 1
+          }
+          a=$(start 7779 "$RUNNER_TEMP/wisp-neg-a") || { echo "relay 7779 not ready"; stop "$a"; exit 1; }
+          b=$(start 7780 "$RUNNER_TEMP/wisp-neg-b") || { echo "relay 7780 not ready"; stop "$a"; stop "$b"; exit 1; }
+          bash tests/integration_negentropy.sh ws://127.0.0.1:7779 ws://127.0.0.1:7780
+          rc=$?
+          stop "$a"; stop "$b"; wait 2>/dev/null
+          exit $rc
+
+      - name: Run NIP-86 management test
+        run: |
+          stop() {
+            kill "$1" 2>/dev/null || return 0
+            for i in $(seq 1 20); do kill -0 "$1" 2>/dev/null || return 0; sleep 0.25; done
+            kill -9 "$1" 2>/dev/null || true
+          }
+          # admin = SEC1's pubkey (the well-known key 0000...0001)
+          admin=79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
+          nohup env WISP_HOST=127.0.0.1 WISP_PORT=7781 \
+            WISP_ADMIN_PUBKEYS="$admin" WISP_RELAY_URL=http://127.0.0.1:7781 \
+            WISP_STORAGE_PATH="$RUNNER_TEMP/wisp-mgmt" \
+            ./zig-out/bin/wisp relay > relay-mgmt.log 2>&1 &
+          pid=$!
+          for i in $(seq 1 40); do nc -z 127.0.0.1 7781 && break; sleep 0.25; done
+          nc -z 127.0.0.1 7781 || { echo "relay never listened on 7781"; cat relay-mgmt.log 2>/dev/null; stop "$pid"; wait "$pid" 2>/dev/null; exit 1; }
+          bash tests/integration_management.sh http://127.0.0.1:7781
+          rc=$?
+          stop "$pid"; wait "$pid" 2>/dev/null
+          exit $rc
+
+      - name: Run concurrency smoke test
+        run: |
+          stop() {
+            kill "$1" 2>/dev/null || return 0
+            for i in $(seq 1 20); do kill -0 "$1" 2>/dev/null || return 0; sleep 0.25; done
+            kill -9 "$1" 2>/dev/null || true
+          }
+          nohup env WISP_HOST=127.0.0.1 WISP_PORT=7782 WISP_EVENTS_PER_MINUTE=100000 \
+            WISP_STORAGE_PATH="$RUNNER_TEMP/wisp-cc" \
+            ./zig-out/bin/wisp relay > relay-cc.log 2>&1 &
+          pid=$!
+          for i in $(seq 1 40); do nc -z 127.0.0.1 7782 && break; sleep 0.25; done
+          nc -z 127.0.0.1 7782 || { echo "relay never listened on 7782"; cat relay-cc.log 2>/dev/null; stop "$pid"; wait "$pid" 2>/dev/null; exit 1; }
+          bash tests/integration_concurrency.sh ws://127.0.0.1:7782
+          rc=$?
+          stop "$pid"; wait "$pid" 2>/dev/null
+          exit $rc
+
+      - name: Run spider sync test (NIP-77 client)
+        run: |
+          stop() {
+            kill "$1" 2>/dev/null || return 0
+            for i in $(seq 1 20); do kill -0 "$1" 2>/dev/null || return 0; sleep 0.25; done
+            kill -9 "$1" 2>/dev/null || true
+          }
+          admin=79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
+          nohup env WISP_HOST=127.0.0.1 WISP_PORT=7783 WISP_EVENTS_PER_MINUTE=100000 \
+            WISP_STORAGE_PATH="$RUNNER_TEMP/wisp-src" \
+            ./zig-out/bin/wisp relay > relay-src.log 2>&1 &
+          src=$!
+          for i in $(seq 1 40); do nc -z 127.0.0.1 7783 && break; sleep 0.25; done
+          nc -z 127.0.0.1 7783 || { echo "source relay never listened on 7783"; cat relay-src.log 2>/dev/null; stop "$src"; wait "$src" 2>/dev/null; exit 1; }
+          nohup env WISP_HOST=127.0.0.1 WISP_PORT=7784 \
+            WISP_SPIDER_ENABLED=true WISP_SPIDER_ADMIN="$admin" \
+            WISP_SPIDER_RELAYS=ws://127.0.0.1:7783 WISP_SPIDER_SYNC_INTERVAL=5 \
+            WISP_STORAGE_PATH="$RUNNER_TEMP/wisp-spider" \
+            ./zig-out/bin/wisp relay > relay-spider.log 2>&1 &
+          spd=$!
+          for i in $(seq 1 40); do nc -z 127.0.0.1 7784 && break; sleep 0.25; done
+          nc -z 127.0.0.1 7784 || { echo "spider relay never listened on 7784"; cat relay-spider.log 2>/dev/null; stop "$src"; stop "$spd"; wait 2>/dev/null; exit 1; }
+          bash tests/integration_spider.sh ws://127.0.0.1:7783 ws://127.0.0.1:7784
+          rc=$?
+          stop "$src"; stop "$spd"; wait 2>/dev/null
+          exit $rc
+
+      - name: Run crash-consistency test
+        run: |
+          sec=0000000000000000000000000000000000000000000000000000000000000001
+          data="$RUNNER_TEMP/wisp-crash"
+          # launch in this shell (not a $() subshell) so $PID is a child we can wait on
+          launch() {
+            nohup env WISP_HOST=127.0.0.1 WISP_PORT=7785 WISP_EVENTS_PER_MINUTE=100000 \
+              WISP_STORAGE_PATH="$data" ./zig-out/bin/wisp relay > relay-crash.log 2>&1 &
+            PID=$!
+            for i in $(seq 1 40); do nc -z 127.0.0.1 7785 && return 0; sleep 0.25; done
+            return 1
+          }
+          # grep -c exits 1 on zero matches; keep it from tripping `set -e`
+          count() { timeout 8 nak req -k 1 -l 50 ws://127.0.0.1:7785 2>/dev/null | grep -c '"kind"' || true; }
+          launch || { echo "crash relay not ready"; cat relay-crash.log 2>/dev/null; kill "$PID" 2>/dev/null; exit 1; }
+          for i in $(seq 1 10); do nak event --sec $sec -c "crash$i" ws://127.0.0.1:7785 >/dev/null 2>&1; done
+          sleep 1
+          before=$(count)
+          # unclean kill, before the periodic 60s sync
+          kill -9 "$PID"; wait "$PID" 2>/dev/null || true; sleep 1
+          launch || { echo "crash relay not ready after restart"; cat relay-crash.log 2>/dev/null; kill "$PID" 2>/dev/null; exit 1; }
+          after=$(count)
+          kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null || true
+          echo "before SIGKILL=$before, after restart=$after"
+          test "$before" -ge 10 && test "$after" = "$before"
+
+      - name: Relay log
+        if: always()
+        run: cat relay.log || true
+
+      - name: Stop relay
+        if: always()
+        run: |
+          pid=$(cat relay.pid 2>/dev/null) || exit 0
+          kill "$pid" 2>/dev/null || true
+          for i in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || exit 0; sleep 0.25; done
+          kill -9 "$pid" 2>/dev/null || true

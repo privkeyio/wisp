@@ -27,6 +27,7 @@ pub const Connection = struct {
     last_activity: i64,
     direct_write_fn: ?WriteFn = null,
     direct_write_ctx: ?*anyopaque = null,
+    direct_write_failed: ?*std.atomic.Value(bool) = null,
     socket_handle: ?posix.socket_t = null,
 
     events_received: u64 = 0,
@@ -60,6 +61,7 @@ pub const Connection = struct {
         self.client_ip_len = 0;
         self.direct_write_fn = null;
         self.direct_write_ctx = null;
+        self.direct_write_failed = null;
         self.socket_handle = null;
         std.crypto.random.bytes(&self.auth_challenge);
         self.authenticated_pubkeys = std.AutoHashMap([32]u8, void).init(self.arena.allocator());
@@ -115,9 +117,19 @@ pub const Connection = struct {
         self.direct_write_ctx = ctx;
     }
 
+    pub fn setDirectWriteFailedFlag(self: *Connection, flag: *std.atomic.Value(bool)) void {
+        self.direct_write_failed = flag;
+    }
+
+    pub fn directWriteFailed(self: *const Connection) bool {
+        if (self.direct_write_failed) |f| return f.load(.acquire);
+        return false;
+    }
+
     pub fn clearDirectWriter(self: *Connection) void {
         self.direct_write_fn = null;
         self.direct_write_ctx = null;
+        self.direct_write_failed = null;
     }
 
     pub fn setSocketHandle(self: *Connection, handle: posix.socket_t) void {

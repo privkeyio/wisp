@@ -617,7 +617,7 @@ pub const Spider = struct {
                     for (result.have_ids.items) |id| have_ids.append(self.allocator, id) catch {};
                     for (result.need_ids.items) |id| need_ids.append(self.allocator, id) catch {};
 
-                    if (result.output.len == 0) {
+                    if (result.done) {
                         result.deinit();
                         log.info("{s}: Negentropy sync complete after {d} rounds", .{ relay_url, rounds });
                         break;

@@ -517,7 +517,7 @@ pub const QueryIterator = struct {
                     iter.index_type = .pubkey;
                     @memcpy(iter.prefix[0..32], &authors[0]);
                     iter.prefix_len = 32;
-                    iter.skip_filter = (f.kinds() == null and f.ids() == null and !f.hasTagFilters());
+                    iter.skip_filter = (f.kinds() == null and f.ids() == null and !f.hasTagFilters() and f.search() == null);
                     return iter;
                 }
             }
@@ -529,7 +529,7 @@ pub const QueryIterator = struct {
                         const kind_be = @byteSwap(@as(u32, @bitCast(kinds[0])));
                         @memcpy(iter.prefix[0..4], std.mem.asBytes(&kind_be));
                         iter.prefix_len = 4;
-                        iter.skip_filter = true;
+                        iter.skip_filter = (f.search() == null);
                         return iter;
                     }
                 }
@@ -546,7 +546,7 @@ pub const QueryIterator = struct {
                                 iter.prefix[0] = tag_filter.letter;
                                 @memcpy(iter.prefix[1..33], &bytes);
                                 iter.prefix_len = 33;
-                                iter.skip_filter = (f.kinds() == null and f.authors() == null and f.ids() == null);
+                                iter.skip_filter = (f.kinds() == null and f.authors() == null and f.ids() == null and f.search() == null);
                             },
                             .string => {},
                         }
