@@ -231,6 +231,13 @@ pub const TcpServer = struct {
         const TCP_NODELAY = 1;
         posix.setsockopt(conn.stream.handle, posix.IPPROTO.TCP, TCP_NODELAY, &std.mem.toBytes(@as(i32, 1))) catch {};
 
+        // Bound how long a write to a slow/stalled client can block. REQ results
+        // are streamed synchronously while an LMDB read txn is open, so without
+        // this a stuck client would pin a reader indefinitely. On timeout the
+        // write errors, the connection is marked failed, and the stream aborts.
+        const send_timeout = posix.timeval{ .sec = 30, .usec = 0 };
+        posix.setsockopt(conn.stream.handle, posix.SOL.SOCKET, posix.SO.SNDTIMEO, &std.mem.toBytes(send_timeout)) catch {};
+
         const req, const consumed = try ws.handshake.Req.parse(initial_data);
         _ = consumed;
 
