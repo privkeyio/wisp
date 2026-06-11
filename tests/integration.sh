@@ -82,6 +82,14 @@ pub --sec $SEC1 -c "caesar salad bowl"
 sleep 0.5
 chk "NIP-50 search matches content" 1 "$(req -k 1 --search anchovy -a "$PK1")"
 chk "NIP-50 search excludes non-matches" 0 "$(req -k 1 --search zzznotfound -a "$PK1")"
+# search via the kind index (no author): the kind fast-path must not skip content match
+chk "NIP-50 search via kind index" 1 "$(req -k 1 --search anchovy)"
+# search routed through the tag index (#p binary value): content match still applies,
+# filtering to one of two events that share the tag
+pub --sec $SEC1 -k 1 -p "$PK2" -c "tuna sandwich"
+pub --sec $SEC1 -k 1 -p "$PK2" -c "veggie wrap"
+sleep 0.5
+chk "NIP-50 search via tag index" 1 "$(req -k 1 -p "$PK2" --search tuna)"
 
 # --- NIP-45 COUNT (nak writes "<relay>: <n>" to stderr) ---
 chk "NIP-45 COUNT returns a count" 1 \
