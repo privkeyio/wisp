@@ -1,6 +1,6 @@
 .{
     .name = .wisp,
-    .version = "0.2.0",
+    .version = "0.2.2",
     .fingerprint = 0xc4bdec9fe6401a8d,
     .dependencies = .{
         // websocket client for spider outbound connections.

@@ -147,7 +147,7 @@ pub fn main() !void {
     try nostr.init();
     defer nostr.cleanup();
 
-    std.log.info("Wisp v0.2.0 starting", .{});
+    std.log.info("Wisp v0.2.2 starting", .{});
     std.log.info("Listening on {s}:{d}", .{ config.host, config.port });
     std.log.info("Storage: {s}", .{config.storage_path});
 
