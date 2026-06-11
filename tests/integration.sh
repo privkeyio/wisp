@@ -53,9 +53,9 @@ sleep 0.8
 chk "NIP-09 event gone after delete" 0 "$(req -i "$DID")"
 
 # --- NIP-16 replaceable (kind 0), latest wins ---
-pub --sec $SEC2 -k 0 -c '{"name":"v1"}'
-sleep 1.2
-pub --sec $SEC2 -k 0 -c '{"name":"v2"}'
+rbase=$(($(date +%s) - 20))
+pub --sec $SEC2 -k 0 --ts $rbase -c '{"name":"v1"}'
+pub --sec $SEC2 -k 0 --ts $((rbase + 1)) -c '{"name":"v2"}'
 sleep 0.5
 chk "NIP-16 replaceable kept single" 1 "$(req -k 0 -a "$PK2")"
 chk "NIP-16 replaceable keeps latest" "v2" \
@@ -67,11 +67,10 @@ sleep 0.5
 chk "NIP-16 ephemeral not stored" 0 "$(req -k 20000)"
 
 # --- NIP-33 addressable (kind 30023 + d tag) ---
-pub --sec $SEC2 -k 30023 -d slugA -c "A-v1"
-sleep 1.2
-pub --sec $SEC2 -k 30023 -d slugA -c "A-v2"
-sleep 0.5
-pub --sec $SEC2 -k 30023 -d slugB -c "B"
+abase=$(($(date +%s) - 20))
+pub --sec $SEC2 -k 30023 -d slugA --ts $abase -c "A-v1"
+pub --sec $SEC2 -k 30023 -d slugA --ts $((abase + 1)) -c "A-v2"
+pub --sec $SEC2 -k 30023 -d slugB --ts $((abase + 1)) -c "B"
 sleep 0.5
 chk "NIP-33 same d-tag replaced" 1 "$(req -k 30023 -d slugA)"
 chk "NIP-33 different d-tags kept" 2 "$(req -k 30023 -a "$PK2")"
@@ -103,13 +102,14 @@ chk "NIP-11 info has software" 1 "$(present software)"
 chk "NIP-11 info has supported_nips" 1 "$(present supported_nips)"
 
 # --- NIP-01 limit: returns the newest N events, newest first ---
+# Explicit, distinct created_at values so ordering is deterministic (no
+# second-granularity ties that would otherwise break by event id).
 SEC3=0000000000000000000000000000000000000000000000000000000000000003
 PK3=$(nak key public $SEC3)
-pub --sec $SEC3 -c "lim1"
-sleep 1.1
-pub --sec $SEC3 -c "lim2"
-sleep 1.1
-pub --sec $SEC3 -c "lim3"
+base=$(($(date +%s) - 10))
+pub --sec $SEC3 --ts $base -c "lim1"
+pub --sec $SEC3 --ts $((base + 1)) -c "lim2"
+pub --sec $SEC3 --ts $((base + 2)) -c "lim3"
 sleep 0.3
 chk "NIP-01 limit caps to N" 2 "$(req -k 1 -a "$PK3" -l 2)"
 chk "NIP-01 limit returns newest first" "lim3" \
