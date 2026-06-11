@@ -150,6 +150,31 @@ jobs:
           stop "$pid"; wait "$pid" 2>/dev/null
           exit $rc
 
+      - name: Run spider sync test (NIP-77 client)
+        run: |
+          stop() {
+            kill "$1" 2>/dev/null || return 0
+            for i in $(seq 1 20); do kill -0 "$1" 2>/dev/null || return 0; sleep 0.25; done
+            kill -9 "$1" 2>/dev/null || true
+          }
+          admin=79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
+          nohup env WISP_HOST=127.0.0.1 WISP_PORT=7783 WISP_EVENTS_PER_MINUTE=100000 \
+            WISP_STORAGE_PATH="$RUNNER_TEMP/wisp-src" \
+            ./zig-out/bin/wisp relay > relay-src.log 2>&1 &
+          src=$!
+          for i in $(seq 1 40); do nc -z 127.0.0.1 7783 && break; sleep 0.25; done
+          nohup env WISP_HOST=127.0.0.1 WISP_PORT=7784 \
+            WISP_SPIDER_ENABLED=true WISP_SPIDER_ADMIN="$admin" \
+            WISP_SPIDER_RELAYS=ws://127.0.0.1:7783 WISP_SPIDER_SYNC_INTERVAL=5 \
+            WISP_STORAGE_PATH="$RUNNER_TEMP/wisp-spider" \
+            ./zig-out/bin/wisp relay > relay-spider.log 2>&1 &
+          spd=$!
+          for i in $(seq 1 40); do nc -z 127.0.0.1 7784 && break; sleep 0.25; done
+          bash tests/integration_spider.sh ws://127.0.0.1:7783 ws://127.0.0.1:7784
+          rc=$?
+          stop "$src"; stop "$spd"; wait 2>/dev/null
+          exit $rc
+
       - name: Relay log
         if: always()
         run: cat relay.log || true
