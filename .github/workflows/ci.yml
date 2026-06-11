@@ -133,6 +133,23 @@ jobs:
           stop "$pid"; wait "$pid" 2>/dev/null
           exit $rc
 
+      - name: Run concurrency smoke test
+        run: |
+          stop() {
+            kill "$1" 2>/dev/null || return 0
+            for i in $(seq 1 20); do kill -0 "$1" 2>/dev/null || return 0; sleep 0.25; done
+            kill -9 "$1" 2>/dev/null || true
+          }
+          nohup env WISP_HOST=127.0.0.1 WISP_PORT=7782 WISP_EVENTS_PER_MINUTE=100000 \
+            WISP_STORAGE_PATH="$RUNNER_TEMP/wisp-cc" \
+            ./zig-out/bin/wisp relay > relay-cc.log 2>&1 &
+          pid=$!
+          for i in $(seq 1 40); do nc -z 127.0.0.1 7782 && break; sleep 0.25; done
+          bash tests/integration_concurrency.sh ws://127.0.0.1:7782
+          rc=$?
+          stop "$pid"; wait "$pid" 2>/dev/null
+          exit $rc
+
       - name: Relay log
         if: always()
         run: cat relay.log || true
