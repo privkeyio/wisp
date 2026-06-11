@@ -69,6 +69,24 @@ jobs:
       - name: Run protocol integration tests
         run: bash tests/integration.sh ws://127.0.0.1:7777
 
+      - name: Run restricted-config tests (NIP-42 / 70 / 13)
+        run: |
+          run_mode() {
+            local mode=$1; shift
+            nohup env "$@" WISP_HOST=127.0.0.1 WISP_PORT=7778 \
+              WISP_STORAGE_PATH="$RUNNER_TEMP/wisp-$mode" \
+              ./zig-out/bin/wisp relay > "relay-$mode.log" 2>&1 &
+            local pid=$!
+            for i in $(seq 1 40); do nc -z 127.0.0.1 7778 && break; sleep 0.25; done
+            bash tests/integration_restrict.sh ws://127.0.0.1:7778 "$mode"
+            local rc=$?
+            kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; sleep 0.3
+            return $rc
+          }
+          run_mode auth WISP_AUTH_REQUIRED=true WISP_RELAY_URL=ws://127.0.0.1:7778 \
+            && run_mode protected WISP_RELAY_URL=ws://127.0.0.1:7778 \
+            && run_mode pow WISP_MIN_POW_DIFFICULTY=8
+
       - name: Relay log
         if: always()
         run: cat relay.log || true

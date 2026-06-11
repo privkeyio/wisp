@@ -95,6 +95,53 @@ chk "NIP-50 search via tag index" 1 "$(req -k 1 -p "$PK2" --search tuna)"
 chk "NIP-45 COUNT returns a count" 1 \
   "$(timeout 10 nak count -k 1 -t t=wisptag "$R" 2>&1 | awk '/: [0-9]+$/{print $NF}')"
 
+# --- NIP-11 relay information document ---
+INFO=$(timeout 10 nak relay "$R" 2>/dev/null)
+present() { echo "$INFO" | grep -qE "\"$1\"[[:space:]]*:" && echo 1 || echo 0; }
+chk "NIP-11 info has name" 1 "$(present name)"
+chk "NIP-11 info has software" 1 "$(present software)"
+chk "NIP-11 info has supported_nips" 1 "$(present supported_nips)"
+
+# --- NIP-01 limit: returns the newest N events, newest first ---
+SEC3=0000000000000000000000000000000000000000000000000000000000000003
+PK3=$(nak key public $SEC3)
+pub --sec $SEC3 -c "lim1"
+sleep 1.1
+pub --sec $SEC3 -c "lim2"
+sleep 1.1
+pub --sec $SEC3 -c "lim3"
+sleep 0.3
+chk "NIP-01 limit caps to N" 2 "$(req -k 1 -a "$PK3" -l 2)"
+chk "NIP-01 limit returns newest first" "lim3" \
+  "$(timeout 10 nak req -k 1 -a "$PK3" -l 2 "$R" 2>/dev/null | grep -o 'lim[0-9]' | head -1)"
+
+# --- NIP-40 expiration: expired rejected at publish, future-expiry kept ---
+now=$(date +%s)
+pub --sec $SEC1 -c "exp40past" -t expiration=$((now - 100))
+sleep 0.3
+chk "NIP-40 expired event not stored" 0 "$(req -k 1 --search exp40past -a "$PK1")"
+pub --sec $SEC1 -c "exp40future" -t expiration=$((now + 3600))
+sleep 0.3
+chk "NIP-40 future-expiry event stored" 1 "$(req -k 1 --search exp40future -a "$PK1")"
+
+# --- NIP-40 serve-time expiry: a stored event is no longer served once expired ---
+pub --sec $SEC1 -c "exp40soon" -t expiration=$((now + 2))
+sleep 0.3
+chk "NIP-40 not-yet-expired is served" 1 "$(req -k 1 --search exp40soon -a "$PK1")"
+sleep 3
+chk "NIP-40 expired-after-storage is hidden" 0 "$(req -k 1 --search exp40soon -a "$PK1")"
+
+# --- created_at upper limit (NIP-11 limitation): far-future rejected ---
+pub --sec $SEC1 --ts $((now + 100000)) -c "tslimitfuture"
+sleep 0.3
+chk "created_at far-future event rejected" 0 "$(req -k 1 --search tslimitfuture -a "$PK1")"
+
+# --- NIP-70 protected events: rejected by default (no auth available) ---
+prot=$(nak event --sec $SEC1 -t '-' -c protected70 "$R" 2>&1 | grep -q success && echo ok || echo reject)
+chk "NIP-70 protected event rejected without auth" reject "$prot"
+sleep 0.3
+chk "NIP-70 protected event not stored" 0 "$(req -k 1 --search protected70 -a "$PK1")"
+
 echo "-----"
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
