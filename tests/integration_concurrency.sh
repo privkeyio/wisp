@@ -34,8 +34,13 @@ chk "relay responsive after $N concurrent connections" 1 \
   "$(timeout 10 nak relay "$R" 2>/dev/null | grep -c '"name"')"
 
 # ...and still function: publish then read back.
-id=$(nak event --sec $SEC1 -c "post-stress" "$R" 2>/dev/null \
+id=$(timeout 10 nak event --sec $SEC1 -c "post-stress" "$R" 2>/dev/null \
   | grep -oE '"id":"[a-f0-9]{64}"' | head -1 | cut -d'"' -f4)
+if [ -z "$id" ]; then
+  echo "FAIL - relay did not accept an event after load"
+  echo "1 passed, 1 failed"
+  exit 1
+fi
 sleep 0.5
 chk "relay still serves REQ after load" 1 \
   "$(timeout 10 nak req -i "$id" "$R" 2>/dev/null | grep -c '"kind"')"

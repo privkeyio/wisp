@@ -82,8 +82,13 @@ jobs:
             nohup env "$@" WISP_HOST=127.0.0.1 WISP_PORT=7778 \
               WISP_STORAGE_PATH="$RUNNER_TEMP/wisp-$mode" \
               ./zig-out/bin/wisp relay > "relay-$mode.log" 2>&1 &
-            local pid=$!
-            for i in $(seq 1 40); do nc -z 127.0.0.1 7778 && break; sleep 0.25; done
+            local pid=$! ready=
+            for i in $(seq 1 40); do nc -z 127.0.0.1 7778 && { ready=1; break; }; sleep 0.25; done
+            if [ -z "$ready" ]; then
+              echo "relay ($mode) never listened on 7778"; cat "relay-$mode.log" 2>/dev/null || true
+              stop "$pid"; wait "$pid" 2>/dev/null
+              return 1
+            fi
             bash tests/integration_restrict.sh ws://127.0.0.1:7778 "$mode"
             local rc=$?
             stop "$pid"; wait "$pid" 2>/dev/null; sleep 0.3
@@ -100,14 +105,15 @@ jobs:
             for i in $(seq 1 20); do kill -0 "$1" 2>/dev/null || return 0; sleep 0.25; done
             kill -9 "$1" 2>/dev/null || true
           }
-          start() { # port datadir
+          start() { # port datadir -> echoes pid, returns 1 if never ready
             nohup env WISP_HOST=127.0.0.1 WISP_PORT="$1" WISP_STORAGE_PATH="$2" \
               ./zig-out/bin/wisp relay > "relay-$1.log" 2>&1 &
-            echo $!
-            for i in $(seq 1 40); do nc -z 127.0.0.1 "$1" && break; sleep 0.25; done
+            local pid=$!
+            for i in $(seq 1 40); do nc -z 127.0.0.1 "$1" && { echo "$pid"; return 0; }; sleep 0.25; done
+            echo "$pid"; return 1
           }
-          a=$(start 7779 "$RUNNER_TEMP/wisp-neg-a")
-          b=$(start 7780 "$RUNNER_TEMP/wisp-neg-b")
+          a=$(start 7779 "$RUNNER_TEMP/wisp-neg-a") || { echo "relay 7779 not ready"; stop "$a"; exit 1; }
+          b=$(start 7780 "$RUNNER_TEMP/wisp-neg-b") || { echo "relay 7780 not ready"; stop "$a"; stop "$b"; exit 1; }
           bash tests/integration_negentropy.sh ws://127.0.0.1:7779 ws://127.0.0.1:7780
           rc=$?
           stop "$a"; stop "$b"; wait 2>/dev/null
@@ -128,6 +134,7 @@ jobs:
             ./zig-out/bin/wisp relay > relay-mgmt.log 2>&1 &
           pid=$!
           for i in $(seq 1 40); do nc -z 127.0.0.1 7781 && break; sleep 0.25; done
+          nc -z 127.0.0.1 7781 || { echo "relay never listened on 7781"; cat relay-mgmt.log 2>/dev/null; stop "$pid"; wait "$pid" 2>/dev/null; exit 1; }
           bash tests/integration_management.sh http://127.0.0.1:7781
           rc=$?
           stop "$pid"; wait "$pid" 2>/dev/null
@@ -145,6 +152,7 @@ jobs:
             ./zig-out/bin/wisp relay > relay-cc.log 2>&1 &
           pid=$!
           for i in $(seq 1 40); do nc -z 127.0.0.1 7782 && break; sleep 0.25; done
+          nc -z 127.0.0.1 7782 || { echo "relay never listened on 7782"; cat relay-cc.log 2>/dev/null; stop "$pid"; wait "$pid" 2>/dev/null; exit 1; }
           bash tests/integration_concurrency.sh ws://127.0.0.1:7782
           rc=$?
           stop "$pid"; wait "$pid" 2>/dev/null
@@ -163,6 +171,7 @@ jobs:
             ./zig-out/bin/wisp relay > relay-src.log 2>&1 &
           src=$!
           for i in $(seq 1 40); do nc -z 127.0.0.1 7783 && break; sleep 0.25; done
+          nc -z 127.0.0.1 7783 || { echo "source relay never listened on 7783"; cat relay-src.log 2>/dev/null; stop "$src"; wait "$src" 2>/dev/null; exit 1; }
           nohup env WISP_HOST=127.0.0.1 WISP_PORT=7784 \
             WISP_SPIDER_ENABLED=true WISP_SPIDER_ADMIN="$admin" \
             WISP_SPIDER_RELAYS=ws://127.0.0.1:7783 WISP_SPIDER_SYNC_INTERVAL=5 \
@@ -170,6 +179,7 @@ jobs:
             ./zig-out/bin/wisp relay > relay-spider.log 2>&1 &
           spd=$!
           for i in $(seq 1 40); do nc -z 127.0.0.1 7784 && break; sleep 0.25; done
+          nc -z 127.0.0.1 7784 || { echo "spider relay never listened on 7784"; cat relay-spider.log 2>/dev/null; stop "$src"; stop "$spd"; wait 2>/dev/null; exit 1; }
           bash tests/integration_spider.sh ws://127.0.0.1:7783 ws://127.0.0.1:7784
           rc=$?
           stop "$src"; stop "$spd"; wait 2>/dev/null
@@ -179,20 +189,21 @@ jobs:
         run: |
           sec=0000000000000000000000000000000000000000000000000000000000000001
           data="$RUNNER_TEMP/wisp-crash"
-          start() {
+          start() { # echoes pid, returns 1 if never ready
             nohup env WISP_HOST=127.0.0.1 WISP_PORT=7785 WISP_EVENTS_PER_MINUTE=100000 \
               WISP_STORAGE_PATH="$data" ./zig-out/bin/wisp relay > "relay-crash.log" 2>&1 &
-            echo $!
-            for i in $(seq 1 40); do nc -z 127.0.0.1 7785 && break; sleep 0.25; done
+            local p=$!
+            for i in $(seq 1 40); do nc -z 127.0.0.1 7785 && { echo "$p"; return 0; }; sleep 0.25; done
+            echo "$p"; return 1
           }
           count() { timeout 8 nak req -k 1 -l 50 ws://127.0.0.1:7785 2>/dev/null | grep -c '"kind"'; }
-          pid=$(start)
+          pid=$(start) || { echo "crash relay not ready"; kill "$pid" 2>/dev/null; exit 1; }
           for i in $(seq 1 10); do nak event --sec $sec -c "crash$i" ws://127.0.0.1:7785 >/dev/null 2>&1; done
           sleep 1
           before=$(count)
           # unclean kill, before the periodic 60s sync
           kill -9 "$pid"; wait "$pid" 2>/dev/null; sleep 1
-          pid=$(start)
+          pid=$(start) || { echo "crash relay not ready after restart"; kill "$pid" 2>/dev/null; exit 1; }
           after=$(count)
           kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
           echo "before SIGKILL=$before, after restart=$after"

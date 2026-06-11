@@ -24,16 +24,16 @@ chk() { # desc expected actual
   fi
 }
 has() { case "$1" in *"$2"*) echo 1 ;; *) echo 0 ;; esac; }
-published() { nak event --sec "$1" -c "$2" "$WS" 2>&1 | grep -c success; }
+published() { timeout 10 nak event --sec "$1" -c "$2" "$WS" 2>&1 | grep -c success; }
 
 # A NIP-86 call authorized with a NIP-98 (kind 27235) event signed by <sec>,
 # including the required payload (sha256 of the body) tag.
 call() { # sec body
   local sec=$1 body=$2 payload ev b64
   payload=$(printf '%s' "$body" | sha256sum | cut -d' ' -f1)
-  ev=$(nak event --sec "$sec" -k 27235 -t u="$HTTP" -t method=POST -t payload="$payload" -c "" 2>/dev/null)
+  ev=$(timeout 10 nak event --sec "$sec" -k 27235 -t u="$HTTP" -t method=POST -t payload="$payload" -c "" 2>/dev/null)
   b64=$(printf '%s' "$ev" | base64 -w0)
-  curl -s -X POST -H "Content-Type: application/nostr+json+rpc" \
+  curl -s --connect-timeout 5 --max-time 10 -X POST -H "Content-Type: application/nostr+json+rpc" \
     -H "Authorization: Nostr $b64" -d "$body" "$HTTP"
 }
 

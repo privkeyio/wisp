@@ -27,7 +27,7 @@ chk() { # desc expected actual
 
 # publish and report ok|reject based on whether the relay accepted the event
 pubres() { # nak-args...
-  if nak event "$@" "$R" 2>&1 | grep -q 'success'; then echo ok; else echo reject; fi
+  if timeout 10 nak event "$@" "$R" 2>&1 | grep -q 'success'; then echo ok; else echo reject; fi
 }
 
 case "$MODE" in
