@@ -118,6 +118,12 @@ pub const TcpServer = struct {
             .reuse_address = true,
         });
 
+        // Wake accept() periodically (it would otherwise block indefinitely
+        // waiting for a connection) so the loop observes the shutdown flag set
+        // by SIGINT/SIGTERM and exits promptly for a graceful shutdown.
+        const accept_timeout = posix.timeval{ .sec = 1, .usec = 0 };
+        posix.setsockopt(self.listener.?.stream.handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, &std.mem.toBytes(accept_timeout)) catch {};
+
         std.log.info("Server running on {s}:{d}", .{ self.config.host, self.config.port });
 
         const idle_thread = std.Thread.spawn(.{}, idleTimeoutThread, .{ self, self.shutdown }) catch null;
