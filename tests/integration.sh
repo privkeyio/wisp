@@ -101,6 +101,17 @@ chk "NIP-11 info has name" 1 "$(present name)"
 chk "NIP-11 info has software" 1 "$(present software)"
 chk "NIP-11 info has supported_nips" 1 "$(present supported_nips)"
 
+# --- Browser interop: NIP-11 content-type + CORS headers ---
+HTTP="${R/ws:/http:}"
+HTTP="${HTTP/wss:/https:}"
+hdrs=$(curl -s -i -H "Accept: application/nostr+json" "$HTTP/" 2>/dev/null)
+chk "NIP-11 served as application/nostr+json" 1 \
+  "$(echo "$hdrs" | grep -ci 'content-type:[[:space:]]*application/nostr+json')"
+chk "NIP-11 sends CORS allow-origin" 1 \
+  "$(echo "$hdrs" | grep -ci 'access-control-allow-origin:[[:space:]]*\*')"
+chk "CORS preflight (OPTIONS) answered" 1 \
+  "$(curl -s -i -X OPTIONS "$HTTP/" 2>/dev/null | grep -qi 'access-control-allow-methods' && echo 1 || echo 0)"
+
 # --- NIP-01 limit: returns the newest N events, newest first ---
 # Explicit, distinct created_at values so ordering is deterministic (no
 # second-granularity ties that would otherwise break by event id).

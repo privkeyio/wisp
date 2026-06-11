@@ -175,6 +175,29 @@ jobs:
           stop "$src"; stop "$spd"; wait 2>/dev/null
           exit $rc
 
+      - name: Run crash-consistency test
+        run: |
+          sec=0000000000000000000000000000000000000000000000000000000000000001
+          data="$RUNNER_TEMP/wisp-crash"
+          start() {
+            nohup env WISP_HOST=127.0.0.1 WISP_PORT=7785 WISP_EVENTS_PER_MINUTE=100000 \
+              WISP_STORAGE_PATH="$data" ./zig-out/bin/wisp relay > "relay-crash.log" 2>&1 &
+            echo $!
+            for i in $(seq 1 40); do nc -z 127.0.0.1 7785 && break; sleep 0.25; done
+          }
+          count() { timeout 8 nak req -k 1 -l 50 ws://127.0.0.1:7785 2>/dev/null | grep -c '"kind"'; }
+          pid=$(start)
+          for i in $(seq 1 10); do nak event --sec $sec -c "crash$i" ws://127.0.0.1:7785 >/dev/null 2>&1; done
+          sleep 1
+          before=$(count)
+          # unclean kill, before the periodic 60s sync
+          kill -9 "$pid"; wait "$pid" 2>/dev/null; sleep 1
+          pid=$(start)
+          after=$(count)
+          kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+          echo "before SIGKILL=$before, after restart=$after"
+          test "$before" -ge 10 && test "$after" = "$before"
+
       - name: Relay log
         if: always()
         run: cat relay.log || true
