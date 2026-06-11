@@ -93,6 +93,26 @@ jobs:
             && run_mode protected WISP_RELAY_URL=ws://127.0.0.1:7778 \
             && run_mode pow WISP_MIN_POW_DIFFICULTY=8
 
+      - name: Run NIP-77 negentropy sync test
+        run: |
+          stop() {
+            kill "$1" 2>/dev/null || return 0
+            for i in $(seq 1 20); do kill -0 "$1" 2>/dev/null || return 0; sleep 0.25; done
+            kill -9 "$1" 2>/dev/null || true
+          }
+          start() { # port datadir
+            nohup env WISP_HOST=127.0.0.1 WISP_PORT="$1" WISP_STORAGE_PATH="$2" \
+              ./zig-out/bin/wisp relay > "relay-$1.log" 2>&1 &
+            echo $!
+            for i in $(seq 1 40); do nc -z 127.0.0.1 "$1" && break; sleep 0.25; done
+          }
+          a=$(start 7779 "$RUNNER_TEMP/wisp-neg-a")
+          b=$(start 7780 "$RUNNER_TEMP/wisp-neg-b")
+          bash tests/integration_negentropy.sh ws://127.0.0.1:7779 ws://127.0.0.1:7780
+          rc=$?
+          stop "$a"; stop "$b"; wait 2>/dev/null
+          exit $rc
+
       - name: Relay log
         if: always()
         run: cat relay.log || true
