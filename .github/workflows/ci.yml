@@ -53,7 +53,7 @@ jobs:
           echo "$HOME/go/bin" >> $GITHUB_PATH
 
       - name: Build relay
-        run: zig build -Doptimize=ReleaseFast
+        run: zig build
 
       - name: Start relay
         run: |
@@ -71,6 +71,12 @@ jobs:
 
       - name: Run restricted-config tests (NIP-42 / 70 / 13)
         run: |
+          # graceful kill, then SIGKILL fallback, so a slow exit never hangs CI
+          stop() {
+            kill "$1" 2>/dev/null || return 0
+            for i in $(seq 1 20); do kill -0 "$1" 2>/dev/null || return 0; sleep 0.25; done
+            kill -9 "$1" 2>/dev/null || true
+          }
           run_mode() {
             local mode=$1; shift
             nohup env "$@" WISP_HOST=127.0.0.1 WISP_PORT=7778 \
@@ -80,7 +86,7 @@ jobs:
             for i in $(seq 1 40); do nc -z 127.0.0.1 7778 && break; sleep 0.25; done
             bash tests/integration_restrict.sh ws://127.0.0.1:7778 "$mode"
             local rc=$?
-            kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; sleep 0.3
+            stop "$pid"; wait "$pid" 2>/dev/null; sleep 0.3
             return $rc
           }
           run_mode auth WISP_AUTH_REQUIRED=true WISP_RELAY_URL=ws://127.0.0.1:7778 \
@@ -93,4 +99,8 @@ jobs:
 
       - name: Stop relay
         if: always()
-        run: kill "$(cat relay.pid)" 2>/dev/null || true
+        run: |
+          pid=$(cat relay.pid 2>/dev/null) || exit 0
+          kill "$pid" 2>/dev/null || true
+          for i in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || exit 0; sleep 0.25; done
+          kill -9 "$pid" 2>/dev/null || true
