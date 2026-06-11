@@ -16,15 +16,15 @@ const Nip86Handler = @import("nip86.zig").Nip86Handler;
 const WsWriter = struct {
     stream: net.Stream,
     mutex: std.Thread.Mutex = .{},
-    failed: bool = false,
+    failed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     fn write(ctx: *anyopaque, data: []const u8) void {
         const self: *WsWriter = @ptrCast(@alignCast(ctx));
         self.mutex.lock();
         defer self.mutex.unlock();
-        if (self.failed) return;
+        if (self.failed.load(.acquire)) return;
         self.writeWsFrame(data) catch {
-            self.failed = true;
+            self.failed.store(true, .release);
         };
     }
 
@@ -59,7 +59,23 @@ const WsWriter = struct {
             .{ .base = &header, .len = header_len },
             .{ .base = data.ptr, .len = data.len },
         };
-        _ = try self.stream.writev(&iovecs);
+        // SO_SNDTIMEO can make writev return a partial count without an error.
+        // Loop until every byte is written so a slow client can never leave a
+        // truncated frame behind (which would corrupt all later frames).
+        var i: usize = 0;
+        while (i < iovecs.len) {
+            const n = try self.stream.writev(iovecs[i..]);
+            if (n == 0) return error.ConnectionResetByPeer;
+            var rem = n;
+            while (i < iovecs.len and rem >= iovecs[i].len) {
+                rem -= iovecs[i].len;
+                i += 1;
+            }
+            if (i < iovecs.len and rem > 0) {
+                iovecs[i].base += rem;
+                iovecs[i].len -= rem;
+            }
+        }
     }
 };
 
@@ -240,8 +256,9 @@ pub const TcpServer = struct {
         // Bound how long a write to a slow/stalled client can block. REQ results
         // are streamed synchronously while an LMDB read txn is open, so without
         // this a stuck client would pin a reader indefinitely. On timeout the
-        // write errors, the connection is marked failed, and the stream aborts.
-        const send_timeout = posix.timeval{ .sec = 30, .usec = 0 };
+        // write errors and the direct writer is marked failed; the REQ streaming
+        // loop observes that and breaks early, releasing the read txn promptly.
+        const send_timeout = posix.timeval{ .sec = 10, .usec = 0 };
         posix.setsockopt(conn.stream.handle, posix.SOL.SOCKET, posix.SO.SNDTIMEO, &std.mem.toBytes(send_timeout)) catch {};
 
         const req, const consumed = try ws.handshake.Req.parse(initial_data);
@@ -264,6 +281,7 @@ pub const TcpServer = struct {
         connection.setClientIp(client_ip);
         connection.setSocketHandle(conn.stream.handle);
         connection.setDirectWriter(WsWriter.write, @ptrCast(&ws_writer));
+        connection.setDirectWriteFailedFlag(&ws_writer.failed);
         connection.startWriteQueue(WsWriter.write, @ptrCast(&ws_writer));
 
         self.subs.tryAddConnection(connection, self.config.max_connections) catch |err| {
