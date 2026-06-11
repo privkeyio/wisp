@@ -3,9 +3,12 @@
     .version = "0.2.0",
     .fingerprint = 0xc4bdec9fe6401a8d,
     .dependencies = .{
-        // websocket client for spider outbound connections
+        // websocket client for spider outbound connections.
+        // Pinned to a fixed commit (not refs/heads/master) so builds stay
+        // reproducible; master has since moved to Zig 0.16 APIs that do not
+        // compile under the Zig version this project targets.
         .websocket = .{
-            .url = "https://github.com/karlseguin/websocket.zig/archive/refs/heads/master.tar.gz",
+            .url = "https://github.com/karlseguin/websocket.zig/archive/97fefafa59cc78ce177cff540b8685cd7f699276.tar.gz",
             .hash = "websocket-0.1.0-ZPISdRlzAwBB_Bz2UMMqxYqF6YEVTIBoFsbzwPUJTHIc",
         },
         .nostr = .{
