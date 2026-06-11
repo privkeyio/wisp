@@ -12,7 +12,9 @@ jobs:
     if: github.event.pull_request.draft != true
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          persist-credentials: false
 
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y liblmdb-dev libsecp256k1-dev libssl-dev
@@ -33,7 +35,9 @@ jobs:
     if: github.event.pull_request.draft != true
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          persist-credentials: false
 
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y liblmdb-dev libsecp256k1-dev libssl-dev
@@ -45,7 +49,7 @@ jobs:
 
       - name: Install nak (nostr test client)
         run: |
-          go install github.com/fiatjaf/nak@latest
+          go install github.com/fiatjaf/nak@v0.19.12
           echo "$HOME/go/bin" >> $GITHUB_PATH
 
       - name: Build relay
