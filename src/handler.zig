@@ -25,6 +25,7 @@ fn isKindOnlyQuery(f: *const nostr.Filter) bool {
     if (f.authors() != null) return false;
     if (f.ids() != null) return false;
     if (f.hasTagFilters()) return false;
+    if (f.search() != null) return false;
     return true;
 }
 
@@ -463,7 +464,7 @@ pub const Handler = struct {
                 while (iter.next() catch null) |json| {
                     var buf: [65536]u8 = undefined;
                     const event_msg = nostr.RelayMsg.eventRaw(sub_id, json, &buf) catch continue;
-                    _ = conn.send(event_msg);
+                    conn.sendDirect(event_msg);
                     conn.events_sent += 1;
                 }
             } else {
@@ -477,7 +478,7 @@ pub const Handler = struct {
                 while (mk_iter.next() catch null) |json| {
                     var buf: [65536]u8 = undefined;
                     const event_msg = nostr.RelayMsg.eventRaw(sub_id, json, &buf) catch continue;
-                    _ = conn.send(event_msg);
+                    conn.sendDirect(event_msg);
                     conn.events_sent += 1;
                 }
             }
@@ -492,7 +493,7 @@ pub const Handler = struct {
             while (iter.next() catch null) |json| {
                 var buf: [65536]u8 = undefined;
                 const event_msg = nostr.RelayMsg.eventRaw(sub_id, json, &buf) catch continue;
-                _ = conn.send(event_msg);
+                conn.sendDirect(event_msg);
                 conn.events_sent += 1;
             }
         }
