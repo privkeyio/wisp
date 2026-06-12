@@ -414,12 +414,18 @@ pub const Spider = struct {
         conn.last_connect = now;
         conn.clearRateLimit();
 
+        const subscribed_count = blk: {
+            self.follow_mutex.lockUncancelable(nostr.io.io());
+            defer self.follow_mutex.unlock(nostr.io.io());
+            break :blk self.follow_pubkeys.items.len;
+        };
+
         self.sendSubscriptions(&client, relay_url) catch |err| {
             log.err("{s}: Failed to send subscriptions: {}", .{ relay_url, err });
             return false;
         };
 
-        self.readLoop(&client, relay_url);
+        self.readLoop(&client, relay_url, subscribed_count);
 
         conn.last_disconnect = milliTimestamp();
         conn.state = .disconnected;
@@ -785,12 +791,25 @@ pub const Spider = struct {
         log.info("{s}: Sent {d} subscription batches", .{ relay_url, batch_idx });
     }
 
-    fn readLoop(self: *Spider, client: *websocket.Client, relay_url: []const u8) void {
+    fn readLoop(self: *Spider, client: *websocket.Client, relay_url: []const u8, subscribed_count: usize) void {
         var events_received: u64 = 0;
 
         client.readTimeout(1000) catch {};
 
         while (self.shouldRun()) {
+            // Re-subscribe when the follow list changes (e.g. the admin contact
+            // list was bootstrapped after connecting): exit so the relay loop
+            // reconnects, re-subscribes with the new pubkeys, and catches up.
+            const current_count = blk: {
+                self.follow_mutex.lockUncancelable(nostr.io.io());
+                defer self.follow_mutex.unlock(nostr.io.io());
+                break :blk self.follow_pubkeys.items.len;
+            };
+            if (current_count > subscribed_count) {
+                log.info("{s}: Follow list grew ({d} -> {d}), reconnecting", .{ relay_url, subscribed_count, current_count });
+                break;
+            }
+
             const message = client.read() catch |err| {
                 if (err == error.Closed or err == error.ConnectionResetByPeer) {
                     log.info("{s}: Connection closed", .{relay_url});
