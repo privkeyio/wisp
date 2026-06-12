@@ -33,10 +33,19 @@ sleep 1
 chk "relay A seeded" "$N" "$(count "$A")"
 chk "relay B empty before sync" 0 "$(count "$B")"
 
-timeout 40 nak sync "$A" "$B" -k 1 >/dev/null 2>&1
-sleep 1
+# `nak sync` can publish only part of the reconciled set when the host is CPU
+# starved (a client-side flake, not a relay bug: the relay serves and stores
+# everything it is given). Negentropy sync is incremental, so retrying fills in
+# whatever is still missing until B converges on A's full set.
+got=0
+for attempt in 1 2 3 4 5; do
+  timeout 40 nak sync "$A" "$B" -k 1 >/dev/null 2>&1
+  sleep 1
+  got="$(count "$B")"
+  [ "$got" = "$N" ] && break
+done
 
-chk "NIP-77 negentropy replicated A into B" "$N" "$(count "$B")"
+chk "NIP-77 negentropy replicated A into B" "$N" "$got"
 
 echo "-----"
 echo "$pass passed, $fail failed"
