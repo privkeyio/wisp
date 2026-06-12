@@ -60,44 +60,21 @@ pub const Subscriptions = struct {
         _ = self.connections.remove(conn_id);
     }
 
-    pub fn getConnection(self: *Subscriptions, conn_id: u64) ?*Connection {
-        const io = nostr.io.io();
-        self.rwlock.lockSharedUncancelable(io);
-        defer self.rwlock.unlockShared(io);
-        return self.connections.get(conn_id);
-    }
-
-    pub fn withConnection(self: *Subscriptions, conn_id: u64, comptime func: fn (*Connection) void) void {
-        const io = nostr.io.io();
-        self.rwlock.lockSharedUncancelable(io);
-        defer self.rwlock.unlockShared(io);
-        if (self.connections.get(conn_id)) |conn| {
-            func(conn);
-        }
-    }
-
-    pub fn sendToConnection(self: *Subscriptions, conn_id: u64, data: []const u8) bool {
-        const io = nostr.io.io();
-        self.rwlock.lockSharedUncancelable(io);
-        defer self.rwlock.unlockShared(io);
-        if (self.connections.get(conn_id)) |conn| {
-            return conn.send(data);
-        }
-        return false;
-    }
-
     pub fn closeIdleConnection(self: *Subscriptions, conn_id: u64, notice: []const u8) bool {
         const io = nostr.io.io();
         self.rwlock.lockSharedUncancelable(io);
-        defer self.rwlock.unlockShared(io);
-        if (self.connections.get(conn_id)) |conn| {
-            conn.sendDirect(notice);
-            conn.stopWriteQueue();
-            conn.clearDirectWriter();
-            conn.shutdown();
-            return true;
-        }
-        return false;
+        const conn = self.connections.get(conn_id);
+        if (conn) |c| _ = c.write_guard.fetchAdd(1, .acquire);
+        self.rwlock.unlockShared(io);
+
+        const c = conn orelse return false;
+        // Write the notice outside the lock: a non-reading idle client would
+        // otherwise stall every lock waiter for up to the send timeout. The
+        // write_guard keeps the connection alive until the write completes.
+        defer _ = c.write_guard.fetchSub(1, .release);
+        c.write(notice) catch {};
+        c.closeWs();
+        return true;
     }
 
     pub fn connectionCount(self: *Subscriptions) usize {
@@ -123,19 +100,14 @@ pub const Subscriptions = struct {
         for (filters) |f| {
             if (f.kinds()) |kinds| {
                 for (kinds) |kind| {
-                    var list = self.kind_index.getPtr(kind);
-                    if (list == null) {
-                        try self.kind_index.put(kind, .empty);
-                        list = self.kind_index.getPtr(kind);
-                    }
+                    const gop = try self.kind_index.getOrPut(kind);
+                    if (!gop.found_existing) gop.value_ptr.* = .empty;
 
-                    const found = for (list.?.items) |id| {
+                    const found = for (gop.value_ptr.items) |id| {
                         if (id == conn.id) break true;
                     } else false;
 
-                    if (!found) {
-                        try list.?.append(self.allocator, conn.id);
-                    }
+                    if (!found) try gop.value_ptr.append(self.allocator, conn.id);
                 }
             }
         }
@@ -148,49 +120,20 @@ pub const Subscriptions = struct {
         conn.removeSubscription(sub_id);
     }
 
-    pub fn getCandidates(self: *Subscriptions, event: *const nostr.Event) ![]*Connection {
-        const io = nostr.io.io();
-        self.rwlock.lockSharedUncancelable(io);
-        defer self.rwlock.unlockShared(io);
-
-        var result: std.ArrayListUnmanaged(*Connection) = .empty;
-        errdefer result.deinit(self.allocator);
-        var seen = std.AutoHashMap(u64, void).init(self.allocator);
-        defer seen.deinit();
-
-        if (self.kind_index.get(event.kind())) |conn_ids| {
-            for (conn_ids.items) |conn_id| {
-                if (!seen.contains(conn_id)) {
-                    if (self.connections.get(conn_id)) |conn| {
-                        try result.append(self.allocator, conn);
-                        try seen.put(conn_id, {});
-                    }
-                }
+    fn connHasWildcard(conn: *Connection) bool {
+        var sub_iter = conn.subscriptions.valueIterator();
+        while (sub_iter.next()) |sub| {
+            for (sub.filters) |f| {
+                if (f.kinds() == null) return true;
             }
         }
-
-        var conn_iter = self.connections.valueIterator();
-        while (conn_iter.next()) |conn| {
-            if (seen.contains(conn.*.id)) continue;
-
-            var sub_iter = conn.*.subscriptions.valueIterator();
-            while (sub_iter.next()) |sub| {
-                var has_wildcard = false;
-                for (sub.filters) |f| {
-                    if (f.kinds() == null) {
-                        has_wildcard = true;
-                        break;
-                    }
-                }
-                if (has_wildcard) {
-                    try result.append(self.allocator, conn.*);
-                    break;
-                }
-            }
-        }
-
-        return result.toOwnedSlice(self.allocator);
+        return false;
     }
+
+    const PendingWrite = struct {
+        conn: *Connection,
+        sub_id: []const u8,
+    };
 
     pub fn forEachMatching(
         self: *Subscriptions,
@@ -198,17 +141,64 @@ pub const Subscriptions = struct {
         msg_buf: *[65536]u8,
     ) void {
         const io = nostr.io.io();
-        self.rwlock.lockSharedUncancelable(io);
-        defer self.rwlock.unlockShared(io);
 
-        var conn_iter = self.connections.valueIterator();
-        while (conn_iter.next()) |conn| {
-            if (conn.*.matchesEvent(event)) |sub_id| {
-                const msg = nostr.RelayMsg.event(sub_id, event, msg_buf) catch continue;
-                _ = conn.*.send(msg);
-                conn.*.events_sent += 1;
+        // Snapshot matching targets under the lock, then write after releasing
+        // it. Blocking socket writes must never run while holding subs.rwlock: a
+        // single non-reading client would stall every lock waiter for up to the
+        // send timeout. Each snapshotted connection has its write_guard bumped
+        // while still in the registry; removeConnection plus close() drain the
+        // guard before freeing, so writing post-unlock is use-after-free safe.
+        var pending: std.ArrayListUnmanaged(PendingWrite) = .empty;
+        defer pending.deinit(self.allocator);
+
+        {
+            self.rwlock.lockSharedUncancelable(io);
+            defer self.rwlock.unlockShared(io);
+
+            var seen = std.AutoHashMap(u64, void).init(self.allocator);
+            defer seen.deinit();
+
+            // Kind-indexed candidates: only connections subscribed to this kind.
+            if (self.kind_index.get(event.kind())) |conn_ids| {
+                for (conn_ids.items) |conn_id| {
+                    if (seen.contains(conn_id)) continue;
+                    seen.put(conn_id, {}) catch continue;
+                    const conn = self.connections.get(conn_id) orelse continue;
+                    snapshotMatch(self, &pending, conn, event);
+                }
+            }
+
+            // Wildcard candidates: connections with a kindless filter are not in
+            // the kind index but can still match any event.
+            var conn_iter = self.connections.valueIterator();
+            while (conn_iter.next()) |conn_ptr| {
+                const conn = conn_ptr.*;
+                if (seen.contains(conn.id)) continue;
+                if (!connHasWildcard(conn)) continue;
+                seen.put(conn.id, {}) catch continue;
+                snapshotMatch(self, &pending, conn, event);
             }
         }
+
+        for (pending.items) |item| {
+            defer _ = item.conn.write_guard.fetchSub(1, .release);
+            const msg = nostr.RelayMsg.event(item.sub_id, event, msg_buf) catch continue;
+            item.conn.write(msg) catch {};
+            _ = item.conn.events_sent.fetchAdd(1, .monotonic);
+        }
+    }
+
+    fn snapshotMatch(
+        self: *Subscriptions,
+        pending: *std.ArrayListUnmanaged(PendingWrite),
+        conn: *Connection,
+        event: *const nostr.Event,
+    ) void {
+        const sub_id = conn.matchesEvent(event) orelse return;
+        _ = conn.write_guard.fetchAdd(1, .acquire);
+        pending.append(self.allocator, .{ .conn = conn, .sub_id = sub_id }) catch {
+            _ = conn.write_guard.fetchSub(1, .release);
+        };
     }
 
     pub fn getIdleConnections(self: *Subscriptions, idle_seconds: u32) []u64 {
@@ -222,7 +212,7 @@ pub const Subscriptions = struct {
         var result: std.ArrayListUnmanaged(u64) = .empty;
         var conn_iter = self.connections.valueIterator();
         while (conn_iter.next()) |conn| {
-            if (conn.*.last_activity < threshold) {
+            if (conn.*.last_activity.load(.monotonic) < threshold) {
                 result.append(self.allocator, conn.*.id) catch continue;
             }
         }

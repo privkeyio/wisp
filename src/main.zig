@@ -12,24 +12,20 @@ const Store = @import("store.zig").Store;
 const Subscriptions = @import("subscriptions.zig").Subscriptions;
 const Handler = @import("handler.zig").Handler;
 const Broadcaster = @import("broadcaster.zig").Broadcaster;
-const TcpServer = @import("tcp_server.zig").TcpServer;
+const Server = @import("server.zig").Server;
 const Spider = @import("spider.zig").Spider;
 const nostr = @import("nostr.zig");
 const rate_limiter = @import("rate_limiter.zig");
 const ManagementStore = @import("management_store.zig").ManagementStore;
 const Nip86Handler = @import("nip86.zig").Nip86Handler;
 
-var g_server: ?*TcpServer = null;
 var g_shutdown: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
+// Only set the atomic flag here: server.stop() does mutex/thread coordination
+// that is not async-signal-safe. The cleanup thread observes the flag and drives
+// the actual shutdown from normal thread context.
 fn signalHandler(_: std.posix.SIG) callconv(std.builtin.CallingConvention.c) void {
     g_shutdown.store(true, .release);
-}
-
-fn sendCallback(conn_id: u64, data: []const u8) void {
-    if (g_server) |s| {
-        s.send(conn_id, data);
-    }
 }
 
 fn stdFile(handle: std.posix.fd_t) std.Io.File {
@@ -74,11 +70,11 @@ fn printHelp() void {
     stdFile(std.posix.STDOUT_FILENO).writeStreamingAll(nostr.io.io(), help) catch {};
 }
 
-pub fn main(init: std.process.Init.Minimal) !void {
+pub fn main(init: std.process.Init) !void {
     // Use c_allocator for production - better memory behavior than GPA
     const allocator = std.heap.c_allocator;
 
-    var arg_it = std.process.Args.Iterator.init(init.args);
+    var arg_it = std.process.Args.Iterator.init(init.minimal.args);
     defer arg_it.deinit();
     var arg_list: std.ArrayListUnmanaged([]const u8) = .empty;
     defer arg_list.deinit(allocator);
@@ -173,18 +169,16 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var subs = Subscriptions.init(allocator);
     defer subs.deinit();
 
-    var broadcaster = Broadcaster.init(allocator, &subs, sendCallback);
+    var broadcaster = Broadcaster.init(allocator, &subs);
 
     var event_limiter = rate_limiter.EventRateLimiter.init(allocator, config.events_per_minute);
     defer event_limiter.deinit();
 
-    var handler = Handler.init(allocator, &config, &store, &subs, &broadcaster, sendCallback, &event_limiter, &g_shutdown, &mgmt_store);
+    var handler = Handler.init(allocator, &config, &store, &subs, &broadcaster, &event_limiter, &g_shutdown, &mgmt_store);
 
-    var server = try TcpServer.init(allocator, &config, &handler, &subs, &g_shutdown, &nip86_handler);
+    var server: Server = undefined;
+    try server.init(allocator, init.io, &config, &handler, &subs, &g_shutdown, &nip86_handler);
     defer server.deinit();
-
-    g_server = &server;
-    defer g_server = null;
 
     var spider: ?Spider = null;
     if (config.spider_enabled) {
@@ -221,25 +215,39 @@ pub fn main(init: std.process.Init.Minimal) !void {
     };
     std.posix.sigaction(std.posix.SIG.PIPE, &ignore_sa, null);
 
-    const cleanup_thread = std.Thread.spawn(.{}, storeCleanupThread, .{ &store, &config, &g_shutdown, &server.conn_limiter, &event_limiter }) catch null;
-    defer if (cleanup_thread) |t| t.join();
+    // Mandatory: the cleanup thread also drives graceful shutdown (it calls
+    // server.stop() after observing the flag the signal handler sets). Without it
+    // running, a SIGINT/SIGTERM would set the flag but nothing would unblock listen().
+    const cleanup_thread = try std.Thread.spawn(.{}, storeCleanupThread, .{ &server, &store, &config, &subs, &g_shutdown, &server.conn_limiter, &event_limiter });
+    defer cleanup_thread.join();
 
-    try server.run();
+    try server.listen();
 
     std.log.info("Shutdown complete", .{});
 }
 
-fn storeCleanupThread(store: *Store, config: *const Config, shutdown: *std.atomic.Value(bool), conn_limiter: *rate_limiter.ConnectionLimiter, event_limiter: *rate_limiter.EventRateLimiter) void {
+fn storeCleanupThread(server: *Server, store: *Store, config: *const Config, subs: *Subscriptions, shutdown: *std.atomic.Value(bool), conn_limiter: *rate_limiter.ConnectionLimiter, event_limiter: *rate_limiter.EventRateLimiter) void {
     const check_interval_ns: u64 = std.time.ns_per_s;
     const hour_checks: u64 = 3600;
     const limiter_cleanup_checks: u64 = 300;
     const sync_checks: u64 = 60;
+    const idle_checks: u64 = 30;
     var checks: u64 = 0;
 
     while (!shutdown.load(.acquire)) {
         std.Io.sleep(nostr.io.io(), .{ .nanoseconds = check_interval_ns }, .awake) catch {};
         if (shutdown.load(.acquire)) break;
         checks += 1;
+
+        if (config.idle_seconds != 0 and checks % idle_checks == 0) {
+            const idle_ids = subs.getIdleConnections(config.idle_seconds);
+            defer subs.allocator.free(idle_ids);
+            for (idle_ids) |conn_id| {
+                var notice_buf: [128]u8 = undefined;
+                const notice = nostr.RelayMsg.notice("connection closed: idle timeout", &notice_buf) catch continue;
+                _ = subs.closeIdleConnection(conn_id, notice);
+            }
+        }
 
         if (checks % sync_checks == 0) {
             store.lmdb.sync();
@@ -260,6 +268,10 @@ fn storeCleanupThread(store: *Store, config: *const Config, shutdown: *std.atomi
             };
         }
     }
+
+    // Drive the shutdown from this normal thread context (the signal handler only
+    // sets the flag) so listen() returns and main can join and clean up.
+    server.stop();
 }
 
 fn runImport(allocator: std.mem.Allocator, db_path: []const u8) !void {
@@ -397,5 +409,4 @@ fn runExport(allocator: std.mem.Allocator, db_path: []const u8) !void {
 
 test {
     _ = @import("rate_limiter.zig");
-    _ = @import("write_queue.zig");
 }

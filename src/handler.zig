@@ -10,15 +10,6 @@ const nostr = @import("nostr.zig");
 const rate_limiter = @import("rate_limiter.zig");
 const ManagementStore = @import("management_store.zig").ManagementStore;
 
-fn isMultiKindOnly(f: *const nostr.Filter) bool {
-    const kinds = f.kinds() orelse return false;
-    if (kinds.len < 2) return false;
-    if (f.authors() != null) return false;
-    if (f.ids() != null) return false;
-    if (f.hasTagFilters()) return false;
-    return true;
-}
-
 fn isKindOnlyQuery(f: *const nostr.Filter) bool {
     const kinds = f.kinds() orelse return false;
     if (kinds.len == 0) return false;
@@ -31,11 +22,12 @@ fn isKindOnlyQuery(f: *const nostr.Filter) bool {
 
 fn streamQueryResults(conn: *Connection, sub_id: []const u8, iter: anytype) void {
     while (iter.next() catch null) |json| {
-        if (conn.directWriteFailed()) break;
         var buf: [65536]u8 = undefined;
         const event_msg = nostr.RelayMsg.eventRaw(sub_id, json, &buf) catch continue;
-        conn.sendDirect(event_msg);
-        conn.events_sent += 1;
+        // A write error (peer gone / send timeout on a slow client) stops the
+        // stream so the LMDB read txn is released promptly.
+        conn.write(event_msg) catch break;
+        _ = conn.events_sent.fetchAdd(1, .monotonic);
     }
 }
 
@@ -158,7 +150,6 @@ pub const Handler = struct {
     store: *Store,
     subs: *Subscriptions,
     broadcaster: *Broadcaster,
-    send_fn: *const fn (conn_id: u64, data: []const u8) void,
     event_limiter: *rate_limiter.EventRateLimiter,
     shutdown: *std.atomic.Value(bool),
     mgmt_store: *ManagementStore,
@@ -169,7 +160,6 @@ pub const Handler = struct {
         store: *Store,
         subs: *Subscriptions,
         broadcaster: *Broadcaster,
-        send_fn: *const fn (conn_id: u64, data: []const u8) void,
         event_limiter: *rate_limiter.EventRateLimiter,
         shutdown: *std.atomic.Value(bool),
         mgmt_store: *ManagementStore,
@@ -180,7 +170,6 @@ pub const Handler = struct {
             .store = store,
             .subs = subs,
             .broadcaster = broadcaster,
-            .send_fn = send_fn,
             .event_limiter = event_limiter,
             .shutdown = shutdown,
             .mgmt_store = mgmt_store,
@@ -708,7 +697,7 @@ pub const Handler = struct {
             if (self.shutdown.load(.acquire)) return;
             var err_buf: [512]u8 = undefined;
             const err_msg = nostr.RelayMsg.negErr(sub_id, "error: reconciliation failed", &err_buf) catch return;
-            conn.sendDirect(err_msg);
+            conn.write(err_msg) catch {};
             return;
         };
         defer result.deinit();
@@ -716,49 +705,49 @@ pub const Handler = struct {
         if (self.shutdown.load(.acquire)) return;
         var msg_buf: [131072]u8 = undefined;
         const neg_msg = nostr.RelayMsg.negMsg(sub_id, result.output, &msg_buf) catch return;
-        conn.sendDirect(neg_msg);
+        conn.write(neg_msg) catch {};
     }
 
     fn sendNegErr(self: *Handler, conn: *Connection, sub_id: []const u8, reason: []const u8) void {
         if (self.shutdown.load(.acquire)) return;
         var buf: [512]u8 = undefined;
         const msg = nostr.RelayMsg.negErr(sub_id, reason, &buf) catch return;
-        conn.sendDirect(msg);
+        conn.write(msg) catch {};
     }
 
     fn sendOk(self: *Handler, conn: *Connection, event_id: *const [32]u8, success: bool, message: []const u8) void {
         if (self.shutdown.load(.acquire)) return;
         var buf: [512]u8 = undefined;
         const msg = nostr.RelayMsg.ok(event_id, success, message, &buf) catch return;
-        conn.sendDirect(msg);
+        conn.write(msg) catch {};
     }
 
     fn sendEose(self: *Handler, conn: *Connection, sub_id: []const u8) void {
         if (self.shutdown.load(.acquire)) return;
         var buf: [256]u8 = undefined;
         const msg = nostr.RelayMsg.eose(sub_id, &buf) catch return;
-        conn.sendDirect(msg);
+        conn.write(msg) catch {};
     }
 
     fn sendClosed(self: *Handler, conn: *Connection, sub_id: []const u8, message: []const u8) void {
         if (self.shutdown.load(.acquire)) return;
         var buf: [512]u8 = undefined;
         const msg = nostr.RelayMsg.closed(sub_id, message, &buf) catch return;
-        conn.sendDirect(msg);
+        conn.write(msg) catch {};
     }
 
     fn sendCount(self: *Handler, conn: *Connection, sub_id: []const u8, count_val: u64) void {
         if (self.shutdown.load(.acquire)) return;
         var buf: [256]u8 = undefined;
         const msg = nostr.RelayMsg.count(sub_id, count_val, &buf) catch return;
-        conn.sendDirect(msg);
+        conn.write(msg) catch {};
     }
 
     fn sendNotice(self: *Handler, conn: *Connection, message: []const u8) void {
         if (self.shutdown.load(.acquire)) return;
         var buf: [512]u8 = undefined;
         const msg = nostr.RelayMsg.notice(message, &buf) catch return;
-        conn.sendDirect(msg);
+        conn.write(msg) catch {};
     }
 
     fn sendAuthChallenge(self: *Handler, conn: *Connection) void {
@@ -766,7 +755,9 @@ pub const Handler = struct {
         if (conn.challenge_sent) return;
         var buf: [256]u8 = undefined;
         const auth_msg = nostr.RelayMsg.auth(&conn.auth_challenge, &buf) catch return;
-        conn.sendDirect(auth_msg);
+        // Only mark the challenge as sent if the write succeeded; a failed write
+        // (timeout/disconnect) must not permanently suppress future AUTH attempts.
+        conn.write(auth_msg) catch return;
         conn.challenge_sent = true;
     }
 };
