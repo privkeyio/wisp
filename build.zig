@@ -71,6 +71,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "nostr", .module = nostr.module("nostr") },
                 .{ .name = "websocket", .module = websocket.module("websocket") },
+                .{ .name = "httpz", .module = httpz.module("httpz") },
             },
         }),
     });

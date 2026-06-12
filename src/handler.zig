@@ -10,15 +10,6 @@ const nostr = @import("nostr.zig");
 const rate_limiter = @import("rate_limiter.zig");
 const ManagementStore = @import("management_store.zig").ManagementStore;
 
-fn isMultiKindOnly(f: *const nostr.Filter) bool {
-    const kinds = f.kinds() orelse return false;
-    if (kinds.len < 2) return false;
-    if (f.authors() != null) return false;
-    if (f.ids() != null) return false;
-    if (f.hasTagFilters()) return false;
-    return true;
-}
-
 fn isKindOnlyQuery(f: *const nostr.Filter) bool {
     const kinds = f.kinds() orelse return false;
     if (kinds.len == 0) return false;
@@ -764,7 +755,9 @@ pub const Handler = struct {
         if (conn.challenge_sent) return;
         var buf: [256]u8 = undefined;
         const auth_msg = nostr.RelayMsg.auth(&conn.auth_challenge, &buf) catch return;
-        conn.write(auth_msg) catch {};
+        // Only mark the challenge as sent if the write succeeded; a failed write
+        // (timeout/disconnect) must not permanently suppress future AUTH attempts.
+        conn.write(auth_msg) catch return;
         conn.challenge_sent = true;
     }
 };

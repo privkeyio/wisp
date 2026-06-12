@@ -37,11 +37,7 @@ pub const App = struct {
         var ip_buf: [64]u8 = undefined;
         const client_ip = app.clientIp(req, res, &ip_buf);
 
-        if (!app.ip_filter.isAllowed(client_ip)) {
-            res.status = 403;
-            return;
-        }
-        if (app.nip86_handler.mgmt_store.isIpBlocked(client_ip)) {
+        if (app.ipDenied(client_ip)) {
             res.status = 403;
             return;
         }
@@ -77,6 +73,14 @@ pub const App = struct {
         res.header("Access-Control-Allow-Origin", "*");
         res.header("Access-Control-Allow-Headers", "Authorization, Content-Type");
         res.header("Access-Control-Allow-Methods", "POST, OPTIONS");
+
+        // Same network policy as getRoot: this management endpoint shares the port.
+        var ip_buf: [64]u8 = undefined;
+        const client_ip = app.clientIp(req, res, &ip_buf);
+        if (app.ipDenied(client_ip)) {
+            res.status = 403;
+            return;
+        }
 
         if (app.config.admin_pubkeys.len == 0) {
             res.status = 404;
@@ -116,6 +120,10 @@ pub const App = struct {
         res.header("Access-Control-Allow-Headers", "Authorization, Content-Type");
         res.header("Access-Control-Allow-Methods", "POST, OPTIONS");
         res.header("Access-Control-Max-Age", "86400");
+    }
+
+    fn ipDenied(app: App, client_ip: []const u8) bool {
+        return !app.ip_filter.isAllowed(client_ip) or app.nip86_handler.mgmt_store.isIpBlocked(client_ip);
     }
 
     fn clientIp(app: App, req: *httpz.Request, res: *httpz.Response, buf: *[64]u8) []const u8 {
@@ -199,8 +207,8 @@ pub const WsConn = struct {
         if (config.auth_required or config.auth_to_write) {
             var auth_buf: [256]u8 = undefined;
             const auth_msg = nostr.RelayMsg.auth(&self.connection.auth_challenge, &auth_buf) catch return;
+            self.connection.write(auth_msg) catch return;
             self.connection.challenge_sent = true;
-            self.connection.write(auth_msg) catch {};
         }
     }
 
@@ -268,8 +276,12 @@ pub const Server = struct {
             .next_id = &self.next_id,
         };
 
-        const ip = std.Io.net.IpAddress.parse(config.host, config.port) catch
-            std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = config.port } };
+        // Fail fast rather than silently binding loopback: defaulting to 127.0.0.1
+        // on a bad host would leave the relay unreachable with no indication why.
+        const ip = std.Io.net.IpAddress.parse(config.host, config.port) catch |err| {
+            log.err("Invalid bind address {s}:{d}: {} (host must be an IP literal)", .{ config.host, config.port, err });
+            return err;
+        };
         const address = httpz.Config.Address{ .ip = ip };
 
         self.httpz_server = try httpz.Server(App).init(io, allocator, .{

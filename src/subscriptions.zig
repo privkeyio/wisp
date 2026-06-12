@@ -60,22 +60,6 @@ pub const Subscriptions = struct {
         _ = self.connections.remove(conn_id);
     }
 
-    pub fn getConnection(self: *Subscriptions, conn_id: u64) ?*Connection {
-        const io = nostr.io.io();
-        self.rwlock.lockSharedUncancelable(io);
-        defer self.rwlock.unlockShared(io);
-        return self.connections.get(conn_id);
-    }
-
-    pub fn withConnection(self: *Subscriptions, conn_id: u64, comptime func: fn (*Connection) void) void {
-        const io = nostr.io.io();
-        self.rwlock.lockSharedUncancelable(io);
-        defer self.rwlock.unlockShared(io);
-        if (self.connections.get(conn_id)) |conn| {
-            func(conn);
-        }
-    }
-
     pub fn closeIdleConnection(self: *Subscriptions, conn_id: u64, notice: []const u8) bool {
         const io = nostr.io.io();
         self.rwlock.lockSharedUncancelable(io);
