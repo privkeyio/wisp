@@ -5,7 +5,7 @@ which provisions and renews certificates automatically.
 
 ```sh
 # Run wisp
-docker run -d --restart always -p 7777:7777 -v wisp-data:/data \
+docker run -d --restart always -p 127.0.0.1:7777:7777 -v wisp-data:/data \
   ghcr.io/privkeyio/wisp --spider-admin npub1yourkey...
 
 # Install Caddy for automatic TLS

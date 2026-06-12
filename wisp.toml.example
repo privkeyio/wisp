@@ -29,11 +29,13 @@ max_event_tags = 2000
 max_content_length = 102400
 query_limit_default = 500
 query_limit_max = 5000
-events_per_minute = 60
 # max_event_age = 94608000
 # max_future_seconds = 900
 # deleted_retention_days = 90
 # min_pow_difficulty = 0
+
+[rate_limits]
+events_per_minute = 60
 
 [timeouts]
 idle_seconds = 300
