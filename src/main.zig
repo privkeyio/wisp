@@ -150,7 +150,7 @@ pub fn main(init: std.process.Init) !void {
     try nostr.init();
     defer nostr.cleanup();
 
-    std.log.info("Wisp v0.3.0 starting", .{});
+    std.log.info("Wisp v0.4.0 starting", .{});
     std.log.info("Listening on {s}:{d}", .{ config.host, config.port });
     std.log.info("Storage: {s}", .{config.storage_path});
 
