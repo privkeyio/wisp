@@ -1,0 +1,19 @@
+[book]
+title = "Wisp Documentation"
+authors = ["PrivKey LLC"]
+description = "A fast, lightweight Nostr relay written in Zig"
+src = "docs"
+language = "en"
+
+[output.html]
+git-repository-url = "https://github.com/privkeyio/wisp"
+edit-url-template = "https://github.com/privkeyio/wisp/edit/main/docs/{path}"
+# Theme (default-theme, site-url) is enforced by the docs.privkey.io aggregator
+# at build time; see github.com/privkeyio/docs.
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.search]
+enable = true

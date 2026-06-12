@@ -9,3 +9,4 @@ data-lock
 wisp.toml
 wisp-db-test/
 benchmark/results.json
+book/
