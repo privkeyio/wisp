@@ -12,23 +12,21 @@ const Store = @import("store.zig").Store;
 const Subscriptions = @import("subscriptions.zig").Subscriptions;
 const Handler = @import("handler.zig").Handler;
 const Broadcaster = @import("broadcaster.zig").Broadcaster;
-const TcpServer = @import("tcp_server.zig").TcpServer;
+const Server = @import("server.zig").Server;
 const Spider = @import("spider.zig").Spider;
 const nostr = @import("nostr.zig");
 const rate_limiter = @import("rate_limiter.zig");
 const ManagementStore = @import("management_store.zig").ManagementStore;
 const Nip86Handler = @import("nip86.zig").Nip86Handler;
 
-var g_server: ?*TcpServer = null;
+var g_server: ?*Server = null;
 var g_shutdown: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
 fn signalHandler(_: std.posix.SIG) callconv(std.builtin.CallingConvention.c) void {
     g_shutdown.store(true, .release);
-}
-
-fn sendCallback(conn_id: u64, data: []const u8) void {
     if (g_server) |s| {
-        s.send(conn_id, data);
+        g_server = null;
+        s.stop();
     }
 }
 
@@ -74,11 +72,11 @@ fn printHelp() void {
     stdFile(std.posix.STDOUT_FILENO).writeStreamingAll(nostr.io.io(), help) catch {};
 }
 
-pub fn main(init: std.process.Init.Minimal) !void {
+pub fn main(init: std.process.Init) !void {
     // Use c_allocator for production - better memory behavior than GPA
     const allocator = std.heap.c_allocator;
 
-    var arg_it = std.process.Args.Iterator.init(init.args);
+    var arg_it = std.process.Args.Iterator.init(init.minimal.args);
     defer arg_it.deinit();
     var arg_list: std.ArrayListUnmanaged([]const u8) = .empty;
     defer arg_list.deinit(allocator);
@@ -173,14 +171,15 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var subs = Subscriptions.init(allocator);
     defer subs.deinit();
 
-    var broadcaster = Broadcaster.init(allocator, &subs, sendCallback);
+    var broadcaster = Broadcaster.init(allocator, &subs);
 
     var event_limiter = rate_limiter.EventRateLimiter.init(allocator, config.events_per_minute);
     defer event_limiter.deinit();
 
-    var handler = Handler.init(allocator, &config, &store, &subs, &broadcaster, sendCallback, &event_limiter, &g_shutdown, &mgmt_store);
+    var handler = Handler.init(allocator, &config, &store, &subs, &broadcaster, &event_limiter, &g_shutdown, &mgmt_store);
 
-    var server = try TcpServer.init(allocator, &config, &handler, &subs, &g_shutdown, &nip86_handler);
+    var server: Server = undefined;
+    try server.init(allocator, init.io, &config, &handler, &subs, &g_shutdown, &nip86_handler);
     defer server.deinit();
 
     g_server = &server;
@@ -224,7 +223,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const cleanup_thread = std.Thread.spawn(.{}, storeCleanupThread, .{ &store, &config, &g_shutdown, &server.conn_limiter, &event_limiter }) catch null;
     defer if (cleanup_thread) |t| t.join();
 
-    try server.run();
+    try server.listen();
 
     std.log.info("Shutdown complete", .{});
 }
@@ -397,5 +396,4 @@ fn runExport(allocator: std.mem.Allocator, db_path: []const u8) !void {
 
 test {
     _ = @import("rate_limiter.zig");
-    _ = @import("write_queue.zig");
 }

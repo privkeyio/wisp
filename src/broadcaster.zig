@@ -5,11 +5,7 @@ const nostr = @import("nostr.zig");
 pub const Broadcaster = struct {
     subs: *Subscriptions,
 
-    pub fn init(
-        _: std.mem.Allocator,
-        subs: *Subscriptions,
-        _: *const fn (conn_id: u64, data: []const u8) void,
-    ) Broadcaster {
+    pub fn init(_: std.mem.Allocator, subs: *Subscriptions) Broadcaster {
         return .{
             .subs = subs,
         };

@@ -1,9 +1,6 @@
 const std = @import("std");
-const posix = std.posix;
 const nostr = @import("nostr.zig");
-const write_queue = @import("write_queue.zig");
-const WriteQueue = write_queue.WriteQueue;
-const WriteFn = write_queue.WriteFn;
+const websocket = @import("httpz").websocket;
 
 pub const NegSession = struct {
     storage: nostr.negentropy.VectorStorage,
@@ -25,10 +22,9 @@ pub const Connection = struct {
     neg_sessions: std.StringHashMap(NegSession),
     created_at: i64,
     last_activity: i64,
-    direct_write_fn: ?WriteFn = null,
-    direct_write_ctx: ?*anyopaque = null,
-    direct_write_failed: ?*std.atomic.Value(bool) = null,
-    socket_handle: ?posix.socket_t = null,
+    // Thread-safe writer provided by websocket.zig; serializes per-connection
+    // writes internally, so both REQ streaming and broadcast use it directly.
+    ws_conn: ?*websocket.Conn = null,
 
     events_received: u64 = 0,
     events_sent: u64 = 0,
@@ -42,7 +38,6 @@ pub const Connection = struct {
     authenticated_pubkeys: std.AutoHashMap([32]u8, void) = undefined,
     challenge_sent: bool = false,
 
-    write_queue: WriteQueue,
     backing_allocator: std.mem.Allocator,
     deinitialized: bool = false,
 
@@ -59,23 +54,15 @@ pub const Connection = struct {
         self.events_sent = 0;
         self.client_ip = undefined;
         self.client_ip_len = 0;
-        self.direct_write_fn = null;
-        self.direct_write_ctx = null;
-        self.direct_write_failed = null;
-        self.socket_handle = null;
+        self.ws_conn = null;
         nostr.io.randomBytes(&self.auth_challenge);
         self.authenticated_pubkeys = std.AutoHashMap([32]u8, void).init(self.arena.allocator());
         self.challenge_sent = false;
-        self.write_queue = WriteQueue.init(backing_allocator);
         self.deinitialized = false;
     }
 
-    pub fn startWriteQueue(self: *Connection, write_fn: WriteFn, write_ctx: *anyopaque) void {
-        self.write_queue.start(write_fn, write_ctx);
-    }
-
-    pub fn stopWriteQueue(self: *Connection) void {
-        self.write_queue.stop();
+    pub fn setWsConn(self: *Connection, conn: *websocket.Conn) void {
+        self.ws_conn = conn;
     }
 
     pub fn setClientIp(self: *Connection, ip: []const u8) void {
@@ -100,47 +87,20 @@ pub const Connection = struct {
         try self.authenticated_pubkeys.put(pubkey.*, {});
     }
 
-    pub fn send(self: *Connection, data: []const u8) bool {
-        return self.write_queue.enqueue(data);
+    /// Thread-safe write of a complete relay message (text frame). Used by both
+    /// synchronous REQ streaming and concurrent broadcast; websocket.zig
+    /// serializes per-connection writes. Returns an error if the peer is gone or
+    /// the write times out, which callers use to stop streaming.
+    pub fn write(self: *Connection, data: []const u8) !void {
+        const conn = self.ws_conn orelse return error.NotConnected;
+        return conn.write(data);
     }
 
-    pub fn sendDirect(self: *Connection, data: []const u8) void {
-        if (self.direct_write_fn) |write_fn| {
-            if (self.direct_write_ctx) |ctx| {
-                write_fn(ctx, data);
-            }
-        }
-    }
-
-    pub fn setDirectWriter(self: *Connection, write_fn: WriteFn, ctx: *anyopaque) void {
-        self.direct_write_fn = write_fn;
-        self.direct_write_ctx = ctx;
-    }
-
-    pub fn setDirectWriteFailedFlag(self: *Connection, flag: *std.atomic.Value(bool)) void {
-        self.direct_write_failed = flag;
-    }
-
-    pub fn directWriteFailed(self: *const Connection) bool {
-        if (self.direct_write_failed) |f| return f.load(.acquire);
-        return false;
-    }
-
-    pub fn clearDirectWriter(self: *Connection) void {
-        self.direct_write_fn = null;
-        self.direct_write_ctx = null;
-        self.direct_write_failed = null;
-    }
-
-    pub fn setSocketHandle(self: *Connection, handle: posix.socket_t) void {
-        self.socket_handle = handle;
-    }
-
-    pub fn shutdown(self: *Connection) void {
-        if (self.socket_handle) |handle| {
-            const stream = std.Io.net.Stream{ .socket = .{ .handle = handle, .address = undefined } };
-            stream.shutdown(nostr.io.io(), .both) catch {};
-            self.socket_handle = null;
+    /// Request the connection be closed (e.g. idle timeout). Safe to call from
+    /// another thread.
+    pub fn closeWs(self: *Connection) void {
+        if (self.ws_conn) |conn| {
+            conn.close(.{}) catch {};
         }
     }
 

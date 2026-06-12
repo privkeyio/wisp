@@ -13,6 +13,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    // http.zig: HTTP + WebSocket epoll worker-pool server
+    const httpz = b.dependency("httpz", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     const exe = b.addExecutable(.{
         .name = "wisp",
@@ -23,6 +28,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "nostr", .module = nostr.module("nostr") },
                 .{ .name = "websocket", .module = websocket.module("websocket") },
+                .{ .name = "httpz", .module = httpz.module("httpz") },
             },
         }),
     });

@@ -76,25 +76,13 @@ pub const Subscriptions = struct {
         }
     }
 
-    pub fn sendToConnection(self: *Subscriptions, conn_id: u64, data: []const u8) bool {
-        const io = nostr.io.io();
-        self.rwlock.lockSharedUncancelable(io);
-        defer self.rwlock.unlockShared(io);
-        if (self.connections.get(conn_id)) |conn| {
-            return conn.send(data);
-        }
-        return false;
-    }
-
     pub fn closeIdleConnection(self: *Subscriptions, conn_id: u64, notice: []const u8) bool {
         const io = nostr.io.io();
         self.rwlock.lockSharedUncancelable(io);
         defer self.rwlock.unlockShared(io);
         if (self.connections.get(conn_id)) |conn| {
-            conn.sendDirect(notice);
-            conn.stopWriteQueue();
-            conn.clearDirectWriter();
-            conn.shutdown();
+            conn.write(notice) catch {};
+            conn.closeWs();
             return true;
         }
         return false;
@@ -205,7 +193,7 @@ pub const Subscriptions = struct {
         while (conn_iter.next()) |conn| {
             if (conn.*.matchesEvent(event)) |sub_id| {
                 const msg = nostr.RelayMsg.event(sub_id, event, msg_buf) catch continue;
-                _ = conn.*.send(msg);
+                conn.*.write(msg) catch {};
                 conn.*.events_sent += 1;
             }
         }

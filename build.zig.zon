@@ -14,6 +14,12 @@
             .url = "https://github.com/privkeyio/libnostr-z/archive/refs/tags/v0.3.0.tar.gz",
             .hash = "nostr-0.3.0-JY6OcJJ0DwDrcooJo6viPaiDg6ohNPie0wV10XykgQPE",
         },
+        // http.zig: HTTP routing (NIP-11/NIP-86) + WebSocket upgrade onto
+        // websocket.zig's epoll worker pool. Pins the same websocket.zig commit.
+        .httpz = .{
+            .url = "https://github.com/karlseguin/http.zig/archive/5f60277d3b3beffef86321869b13c57f7acc3c5b.tar.gz",
+            .hash = "httpz-0.0.0-PNVzrJrbCACyokt2AARAG7Ul7h7xlZxL7BYAdpsAs1_-",
+        },
     },
     .paths = .{
         "build.zig",
