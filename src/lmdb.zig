@@ -1,4 +1,5 @@
 const std = @import("std");
+const nostr = @import("nostr.zig");
 
 const c = @cImport({
     @cInclude("lmdb.h");
@@ -45,8 +46,11 @@ pub const Lmdb = struct {
 
         _ = c.mdb_env_set_maxreaders(env, 512);
 
+        const io = nostr.io.io();
+        const cwd = std.Io.Dir.cwd();
+
         if (std.fs.path.dirname(path)) |parent| {
-            std.fs.cwd().makePath(parent) catch {};
+            cwd.createDirPath(io, parent) catch {};
         }
 
         const path_z = try allocator.dupeZ(u8, path);
@@ -59,18 +63,18 @@ pub const Lmdb = struct {
             return error.EnvOpen;
         }
 
-        const data_file = std.fs.cwd().openFile(path, .{}) catch null;
+        const data_file = cwd.openFile(io, path, .{}) catch null;
         if (data_file) |f| {
-            f.chmod(0o600) catch |err| std.log.warn("chmod data file failed: {}", .{err});
-            f.close();
+            f.setPermissions(io, @enumFromInt(0o600)) catch |err| std.log.warn("chmod data file failed: {}", .{err});
+            f.close(io);
         }
 
         const lock_path = try std.fmt.allocPrint(allocator, "{s}-lock", .{path});
         defer allocator.free(lock_path);
-        const lock_file = std.fs.cwd().openFile(lock_path, .{}) catch null;
+        const lock_file = cwd.openFile(io, lock_path, .{}) catch null;
         if (lock_file) |f| {
-            f.chmod(0o600) catch |err| std.log.warn("chmod lock file failed: {}", .{err});
-            f.close();
+            f.setPermissions(io, @enumFromInt(0o600)) catch |err| std.log.warn("chmod lock file failed: {}", .{err});
+            f.close(io);
         }
 
         return .{

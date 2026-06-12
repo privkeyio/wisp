@@ -10,3 +10,4 @@ wisp.toml
 wisp-db-test/
 benchmark/results.json
 book/
+zig-pkg/

@@ -5,14 +5,14 @@ const nostr = @import("nostr.zig");
 pub const Subscriptions = struct {
     allocator: std.mem.Allocator,
     connections: std.AutoHashMap(u64, *Connection),
-    rwlock: std.Thread.RwLock,
+    rwlock: std.Io.RwLock,
     kind_index: std.AutoHashMap(i32, std.ArrayListUnmanaged(u64)),
 
     pub fn init(allocator: std.mem.Allocator) Subscriptions {
         return .{
             .allocator = allocator,
             .connections = std.AutoHashMap(u64, *Connection).init(allocator),
-            .rwlock = .{},
+            .rwlock = .init,
             .kind_index = std.AutoHashMap(i32, std.ArrayListUnmanaged(u64)).init(allocator),
         };
     }
@@ -28,21 +28,24 @@ pub const Subscriptions = struct {
     }
 
     pub fn addConnection(self: *Subscriptions, conn: *Connection) !void {
-        self.rwlock.lock();
-        defer self.rwlock.unlock();
+        const io = nostr.io.io();
+        self.rwlock.lockUncancelable(io);
+        defer self.rwlock.unlock(io);
         try self.connections.put(conn.id, conn);
     }
 
     pub fn tryAddConnection(self: *Subscriptions, conn: *Connection, max_connections: usize) !void {
-        self.rwlock.lock();
-        defer self.rwlock.unlock();
+        const io = nostr.io.io();
+        self.rwlock.lockUncancelable(io);
+        defer self.rwlock.unlock(io);
         if (self.connections.count() >= max_connections) return error.TooManyConnections;
         try self.connections.put(conn.id, conn);
     }
 
     pub fn removeConnection(self: *Subscriptions, conn_id: u64) void {
-        self.rwlock.lock();
-        defer self.rwlock.unlock();
+        const io = nostr.io.io();
+        self.rwlock.lockUncancelable(io);
+        defer self.rwlock.unlock(io);
 
         var kind_iter = self.kind_index.valueIterator();
         while (kind_iter.next()) |list| {
@@ -58,22 +61,25 @@ pub const Subscriptions = struct {
     }
 
     pub fn getConnection(self: *Subscriptions, conn_id: u64) ?*Connection {
-        self.rwlock.lockShared();
-        defer self.rwlock.unlockShared();
+        const io = nostr.io.io();
+        self.rwlock.lockSharedUncancelable(io);
+        defer self.rwlock.unlockShared(io);
         return self.connections.get(conn_id);
     }
 
     pub fn withConnection(self: *Subscriptions, conn_id: u64, comptime func: fn (*Connection) void) void {
-        self.rwlock.lockShared();
-        defer self.rwlock.unlockShared();
+        const io = nostr.io.io();
+        self.rwlock.lockSharedUncancelable(io);
+        defer self.rwlock.unlockShared(io);
         if (self.connections.get(conn_id)) |conn| {
             func(conn);
         }
     }
 
     pub fn sendToConnection(self: *Subscriptions, conn_id: u64, data: []const u8) bool {
-        self.rwlock.lockShared();
-        defer self.rwlock.unlockShared();
+        const io = nostr.io.io();
+        self.rwlock.lockSharedUncancelable(io);
+        defer self.rwlock.unlockShared(io);
         if (self.connections.get(conn_id)) |conn| {
             return conn.send(data);
         }
@@ -81,8 +87,9 @@ pub const Subscriptions = struct {
     }
 
     pub fn closeIdleConnection(self: *Subscriptions, conn_id: u64, notice: []const u8) bool {
-        self.rwlock.lockShared();
-        defer self.rwlock.unlockShared();
+        const io = nostr.io.io();
+        self.rwlock.lockSharedUncancelable(io);
+        defer self.rwlock.unlockShared(io);
         if (self.connections.get(conn_id)) |conn| {
             conn.sendDirect(notice);
             conn.stopWriteQueue();
@@ -94,8 +101,9 @@ pub const Subscriptions = struct {
     }
 
     pub fn connectionCount(self: *Subscriptions) usize {
-        self.rwlock.lockShared();
-        defer self.rwlock.unlockShared();
+        const io = nostr.io.io();
+        self.rwlock.lockSharedUncancelable(io);
+        defer self.rwlock.unlockShared(io);
         return self.connections.count();
     }
 
@@ -106,8 +114,9 @@ pub const Subscriptions = struct {
         filters: []const nostr.Filter,
         max_subs: u32,
     ) !void {
-        self.rwlock.lock();
-        defer self.rwlock.unlock();
+        const io = nostr.io.io();
+        self.rwlock.lockUncancelable(io);
+        defer self.rwlock.unlock(io);
 
         try conn.addSubscription(sub_id, filters, max_subs);
 
@@ -116,7 +125,7 @@ pub const Subscriptions = struct {
                 for (kinds) |kind| {
                     var list = self.kind_index.getPtr(kind);
                     if (list == null) {
-                        try self.kind_index.put(kind, .{});
+                        try self.kind_index.put(kind, .empty);
                         list = self.kind_index.getPtr(kind);
                     }
 
@@ -133,16 +142,19 @@ pub const Subscriptions = struct {
     }
 
     pub fn unsubscribe(self: *Subscriptions, conn: *Connection, sub_id: []const u8) void {
-        self.rwlock.lock();
-        defer self.rwlock.unlock();
+        const io = nostr.io.io();
+        self.rwlock.lockUncancelable(io);
+        defer self.rwlock.unlock(io);
         conn.removeSubscription(sub_id);
     }
 
     pub fn getCandidates(self: *Subscriptions, event: *const nostr.Event) ![]*Connection {
-        self.rwlock.lockShared();
-        defer self.rwlock.unlockShared();
+        const io = nostr.io.io();
+        self.rwlock.lockSharedUncancelable(io);
+        defer self.rwlock.unlockShared(io);
 
-        var result = std.ArrayListUnmanaged(*Connection){};
+        var result: std.ArrayListUnmanaged(*Connection) = .empty;
+        errdefer result.deinit(self.allocator);
         var seen = std.AutoHashMap(u64, void).init(self.allocator);
         defer seen.deinit();
 
@@ -185,8 +197,9 @@ pub const Subscriptions = struct {
         event: *const nostr.Event,
         msg_buf: *[65536]u8,
     ) void {
-        self.rwlock.lockShared();
-        defer self.rwlock.unlockShared();
+        const io = nostr.io.io();
+        self.rwlock.lockSharedUncancelable(io);
+        defer self.rwlock.unlockShared(io);
 
         var conn_iter = self.connections.valueIterator();
         while (conn_iter.next()) |conn| {
@@ -199,19 +212,23 @@ pub const Subscriptions = struct {
     }
 
     pub fn getIdleConnections(self: *Subscriptions, idle_seconds: u32) []u64 {
-        self.rwlock.lockShared();
-        defer self.rwlock.unlockShared();
+        const io = nostr.io.io();
+        self.rwlock.lockSharedUncancelable(io);
+        defer self.rwlock.unlockShared(io);
 
-        const now = std.time.timestamp();
+        const now = nostr.io.timestamp();
         const threshold = now - @as(i64, @intCast(idle_seconds));
 
-        var result = std.ArrayListUnmanaged(u64){};
+        var result: std.ArrayListUnmanaged(u64) = .empty;
         var conn_iter = self.connections.valueIterator();
         while (conn_iter.next()) |conn| {
             if (conn.*.last_activity < threshold) {
                 result.append(self.allocator, conn.*.id) catch continue;
             }
         }
-        return result.toOwnedSlice(self.allocator) catch &[_]u64{};
+        return result.toOwnedSlice(self.allocator) catch blk: {
+            result.deinit(self.allocator);
+            break :blk &[_]u64{};
+        };
     }
 };

@@ -25,7 +25,9 @@ pub fn main() !void {
     }
 
     // Create test directory
-    std.fs.cwd().makePath("./test_data") catch {};
+    var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    defer threaded.deinit();
+    std.Io.Dir.cwd().createDirPath(threaded.io(), "./test_data") catch {};
 
     // Open environment
     rc = c.mdb_env_open(env, "./test_data/test.mdb", c.MDB_NOSUBDIR, 0o644);

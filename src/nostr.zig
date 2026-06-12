@@ -26,6 +26,7 @@ pub const crypto = nostr_lib.crypto;
 pub const bech32 = nostr_lib.bech32;
 pub const init = nostr_lib.init;
 pub const cleanup = nostr_lib.cleanup;
+pub const io = nostr_lib.io;
 
 pub const Auth = nostr_lib.Auth;
 pub const Replaceable = nostr_lib.Replaceable;

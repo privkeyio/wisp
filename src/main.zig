@@ -22,7 +22,7 @@ const Nip86Handler = @import("nip86.zig").Nip86Handler;
 var g_server: ?*TcpServer = null;
 var g_shutdown: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
-fn signalHandler(_: c_int) callconv(std.builtin.CallingConvention.c) void {
+fn signalHandler(_: std.posix.SIG) callconv(std.builtin.CallingConvention.c) void {
     g_shutdown.store(true, .release);
 }
 
@@ -30,6 +30,10 @@ fn sendCallback(conn_id: u64, data: []const u8) void {
     if (g_server) |s| {
         s.send(conn_id, data);
     }
+}
+
+fn stdFile(handle: std.posix.fd_t) std.Io.File {
+    return .{ .handle = handle, .flags = .{ .nonblocking = false } };
 }
 
 const Command = enum {
@@ -67,16 +71,19 @@ fn printHelp() void {
         \\  wisp export > backup.jsonl            Export all events
         \\
     ;
-    const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
-    stdout.writeAll(help) catch {};
+    stdFile(std.posix.STDOUT_FILENO).writeStreamingAll(nostr.io.io(), help) catch {};
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     // Use c_allocator for production - better memory behavior than GPA
     const allocator = std.heap.c_allocator;
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    var arg_it = std.process.Args.Iterator.init(init.args);
+    defer arg_it.deinit();
+    var arg_list: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer arg_list.deinit(allocator);
+    while (arg_it.next()) |a| try arg_list.append(allocator, a);
+    const args = arg_list.items;
 
     var cmd = Command.relay;
     var config_path: ?[]const u8 = null;
@@ -147,7 +154,7 @@ pub fn main() !void {
     try nostr.init();
     defer nostr.cleanup();
 
-    std.log.info("Wisp v0.2.2 starting", .{});
+    std.log.info("Wisp v0.3.0 starting", .{});
     std.log.info("Listening on {s}:{d}", .{ config.host, config.port });
     std.log.info("Storage: {s}", .{config.storage_path});
 
@@ -205,6 +212,15 @@ pub fn main() !void {
     std.posix.sigaction(std.posix.SIG.INT, &sa, null);
     std.posix.sigaction(std.posix.SIG.TERM, &sa, null);
 
+    // Ignore SIGPIPE: a client disconnecting mid-write must surface as an EPIPE
+    // error (handled by the write paths), not terminate the process.
+    const ignore_sa = std.posix.Sigaction{
+        .handler = .{ .handler = std.posix.SIG.IGN },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.PIPE, &ignore_sa, null);
+
     const cleanup_thread = std.Thread.spawn(.{}, storeCleanupThread, .{ &store, &config, &g_shutdown, &server.conn_limiter, &event_limiter }) catch null;
     defer if (cleanup_thread) |t| t.join();
 
@@ -221,7 +237,7 @@ fn storeCleanupThread(store: *Store, config: *const Config, shutdown: *std.atomi
     var checks: u64 = 0;
 
     while (!shutdown.load(.acquire)) {
-        std.Thread.sleep(check_interval_ns);
+        std.Io.sleep(nostr.io.io(), .{ .nanoseconds = check_interval_ns }, .awake) catch {};
         if (shutdown.load(.acquire)) break;
         checks += 1;
 
@@ -256,20 +272,22 @@ fn runImport(allocator: std.mem.Allocator, db_path: []const u8) !void {
     var store = try Store.init(allocator, &lmdb);
     defer store.deinit();
 
-    const stdin_file = std.fs.File{ .handle = std.posix.STDIN_FILENO };
-    const stderr_file = std.fs.File{ .handle = std.posix.STDERR_FILENO };
+    const stderr_file = stdFile(std.posix.STDERR_FILENO);
 
     var imported: u64 = 0;
     var failed: u64 = 0;
     var duplicates: u64 = 0;
 
-    var line_list: std.ArrayListUnmanaged(u8) = .{};
+    var line_list: std.ArrayListUnmanaged(u8) = .empty;
     defer line_list.deinit(allocator);
 
     var read_buf: [65536]u8 = undefined;
 
     while (true) {
-        const bytes_read = stdin_file.read(&read_buf) catch break;
+        const bytes_read = std.posix.read(std.posix.STDIN_FILENO, &read_buf) catch |err| {
+            printStatus(stderr_file, "Import aborted: read error: {}\n", .{err});
+            return err;
+        };
         if (bytes_read == 0) break;
 
         for (read_buf[0..bytes_read]) |byte| {
@@ -339,10 +357,10 @@ fn processImportLine(allocator: std.mem.Allocator, store: *Store, line: []const 
     }
 }
 
-fn printStatus(file: std.fs.File, comptime fmt: []const u8, args: anytype) void {
+fn printStatus(file: std.Io.File, comptime fmt: []const u8, args: anytype) void {
     var buf: [256]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    file.writeAll(msg) catch {};
+    file.writeStreamingAll(nostr.io.io(), msg) catch {};
 }
 
 fn runExport(allocator: std.mem.Allocator, db_path: []const u8) !void {
@@ -352,8 +370,9 @@ fn runExport(allocator: std.mem.Allocator, db_path: []const u8) !void {
     var store = try Store.init(allocator, &lmdb);
     defer store.deinit();
 
-    const stdout_file = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
-    const stderr_file = std.fs.File{ .handle = std.posix.STDERR_FILENO };
+    const io = nostr.io.io();
+    const stdout_file = stdFile(std.posix.STDOUT_FILENO);
+    const stderr_file = stdFile(std.posix.STDERR_FILENO);
 
     const empty_filters = [_]nostr.Filter{};
     var iter = try store.query(&empty_filters, std.math.maxInt(u32));
@@ -362,10 +381,21 @@ fn runExport(allocator: std.mem.Allocator, db_path: []const u8) !void {
     var exported: u64 = 0;
 
     while (try iter.next()) |json| {
-        stdout_file.writeAll(json) catch return;
-        stdout_file.writeAll("\n") catch return;
+        stdout_file.writeStreamingAll(io, json) catch |err| {
+            printStatus(stderr_file, "Export aborted: write error: {}\n", .{err});
+            return err;
+        };
+        stdout_file.writeStreamingAll(io, "\n") catch |err| {
+            printStatus(stderr_file, "Export aborted: write error: {}\n", .{err});
+            return err;
+        };
         exported += 1;
     }
 
     printStatus(stderr_file, "Exported {d} events\n", .{exported});
+}
+
+test {
+    _ = @import("rate_limiter.zig");
+    _ = @import("write_queue.zig");
 }

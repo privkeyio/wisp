@@ -1,4 +1,5 @@
 const std = @import("std");
+const nostr = @import("nostr.zig");
 
 pub const WriteFn = *const fn (ctx: *anyopaque, data: []const u8) void;
 
@@ -13,8 +14,8 @@ const QueuedMessage = struct {
 
 pub const WriteQueue = struct {
     messages: std.ArrayListUnmanaged(QueuedMessage),
-    mutex: std.Thread.Mutex,
-    not_empty: std.Thread.Condition,
+    mutex: std.Io.Mutex,
+    not_empty: std.Io.Condition,
     closed: std.atomic.Value(bool),
     stopped: std.atomic.Value(bool),
     write_thread: ?std.Thread,
@@ -26,9 +27,9 @@ pub const WriteQueue = struct {
 
     pub fn init(allocator: std.mem.Allocator) WriteQueue {
         return .{
-            .messages = .{},
-            .mutex = .{},
-            .not_empty = .{},
+            .messages = .empty,
+            .mutex = .init,
+            .not_empty = .init,
             .closed = std.atomic.Value(bool).init(false),
             .stopped = std.atomic.Value(bool).init(true),
             .write_thread = null,
@@ -67,21 +68,22 @@ pub const WriteQueue = struct {
 
         self.closed.store(true, .release);
 
-        self.mutex.lock();
-        self.not_empty.signal();
-        self.mutex.unlock();
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        self.not_empty.signal(io);
+        self.mutex.unlock(io);
 
         if (self.write_thread) |t| {
             t.join();
             self.write_thread = null;
         }
 
-        self.mutex.lock();
+        self.mutex.lockUncancelable(io);
         for (self.messages.items) |*msg| {
             msg.deinit();
         }
         self.messages.clearAndFree(self.allocator);
-        self.mutex.unlock();
+        self.mutex.unlock(io);
 
         self.write_fn = null;
         self.write_ctx = null;
@@ -98,8 +100,9 @@ pub const WriteQueue = struct {
             return false;
         };
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         if (self.closed.load(.acquire)) {
             self.allocator.free(copy);
@@ -122,7 +125,7 @@ pub const WriteQueue = struct {
             return false;
         };
 
-        self.not_empty.signal();
+        self.not_empty.signal(io);
         return true;
     }
 
@@ -131,11 +134,12 @@ pub const WriteQueue = struct {
             var batch: []QueuedMessage = &.{};
 
             {
-                self.mutex.lock();
-                defer self.mutex.unlock();
+                const io = nostr.io.io();
+                self.mutex.lockUncancelable(io);
+                defer self.mutex.unlock(io);
 
                 while (self.messages.items.len == 0 and !self.closed.load(.acquire)) {
-                    self.not_empty.wait(&self.mutex);
+                    self.not_empty.waitUncancelable(io, &self.mutex);
                 }
 
                 if (self.closed.load(.acquire) and self.messages.items.len == 0) {
@@ -177,21 +181,23 @@ pub const WriteQueue = struct {
     }
 
     pub fn queueDepth(self: *WriteQueue) usize {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
         return self.messages.items.len;
     }
 };
 
 const TestContext = struct {
     received: std.ArrayListUnmanaged([]const u8),
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
     allocator: std.mem.Allocator,
 
     fn write(ctx: *anyopaque, data: []const u8) void {
         const self: *TestContext = @ptrCast(@alignCast(ctx));
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
         const copy = self.allocator.dupe(u8, data) catch return;
         self.received.append(self.allocator, copy) catch {
             self.allocator.free(copy);
@@ -209,8 +215,8 @@ test "WriteQueue basic functionality" {
     var queue = WriteQueue.init(allocator);
 
     var ctx = TestContext{
-        .received = .{},
-        .mutex = .{},
+        .received = .empty,
+        .mutex = .init,
         .allocator = allocator,
     };
     defer ctx.deinit();
@@ -221,10 +227,11 @@ test "WriteQueue basic functionality" {
     try std.testing.expect(queue.enqueue("hello"));
     try std.testing.expect(queue.enqueue("world"));
 
-    std.Thread.sleep(50 * std.time.ns_per_ms);
+    const io = nostr.io.io();
+    std.Io.sleep(io, .{ .nanoseconds = 50 * std.time.ns_per_ms }, .awake) catch {};
 
-    ctx.mutex.lock();
-    defer ctx.mutex.unlock();
+    ctx.mutex.lockUncancelable(io);
+    defer ctx.mutex.unlock(io);
     try std.testing.expectEqual(@as(usize, 2), ctx.received.items.len);
     try std.testing.expectEqualStrings("hello", ctx.received.items[0]);
     try std.testing.expectEqualStrings("world", ctx.received.items[1]);
@@ -253,7 +260,7 @@ const BlockingWriter = struct {
         const self: *BlockingWriter = @ptrCast(@alignCast(ctx));
         self.started.store(true, .release);
         while (!self.release.load(.acquire)) {
-            std.Thread.sleep(1 * std.time.ns_per_ms);
+            std.Io.sleep(nostr.io.io(), .{ .nanoseconds = 1 * std.time.ns_per_ms }, .awake) catch {};
         }
     }
 };
@@ -274,7 +281,7 @@ test "WriteQueue respects max queue size" {
     try std.testing.expect(queue.enqueue("1"));
 
     while (!blocker.started.load(.acquire)) {
-        std.Thread.sleep(1 * std.time.ns_per_ms);
+        std.Io.sleep(nostr.io.io(), .{ .nanoseconds = 1 * std.time.ns_per_ms }, .awake) catch {};
     }
 
     try std.testing.expect(queue.enqueue("2"));

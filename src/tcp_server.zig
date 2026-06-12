@@ -1,8 +1,20 @@
 const std = @import("std");
-const net = std.net;
+const net = std.Io.net;
 const posix = std.posix;
 const nostr = @import("nostr.zig");
 const ws = nostr.ws;
+
+fn streamWriteAll(stream: net.Stream, data: []const u8) !void {
+    const io = nostr.io.io();
+    var buf: [512]u8 = undefined;
+    var sw = stream.writer(io, &buf);
+    try sw.interface.writeAll(data);
+    try sw.interface.flush();
+}
+
+fn streamRead(stream: net.Stream, buf: []u8) !usize {
+    return std.posix.read(stream.socket.handle, buf);
+}
 
 const Config = @import("config.zig").Config;
 const MsgHandler = @import("handler.zig").Handler;
@@ -15,13 +27,14 @@ const Nip86Handler = @import("nip86.zig").Nip86Handler;
 
 const WsWriter = struct {
     stream: net.Stream,
-    mutex: std.Thread.Mutex = .{},
+    mutex: std.Io.Mutex = .init,
     failed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     fn write(ctx: *anyopaque, data: []const u8) void {
         const self: *WsWriter = @ptrCast(@alignCast(ctx));
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
         if (self.failed.load(.acquire)) return;
         self.writeWsFrame(data) catch {
             self.failed.store(true, .release);
@@ -55,27 +68,14 @@ const WsWriter = struct {
             header_len = 10;
         }
 
-        var iovecs = [_]std.posix.iovec_const{
-            .{ .base = &header, .len = header_len },
-            .{ .base = data.ptr, .len = data.len },
-        };
-        // SO_SNDTIMEO can make writev return a partial count without an error.
-        // Loop until every byte is written so a slow client can never leave a
-        // truncated frame behind (which would corrupt all later frames).
-        var i: usize = 0;
-        while (i < iovecs.len) {
-            const n = try self.stream.writev(iovecs[i..]);
-            if (n == 0) return error.ConnectionResetByPeer;
-            var rem = n;
-            while (i < iovecs.len and rem >= iovecs[i].len) {
-                rem -= iovecs[i].len;
-                i += 1;
-            }
-            if (i < iovecs.len and rem > 0) {
-                iovecs[i].base += rem;
-                iovecs[i].len -= rem;
-            }
-        }
+        // SO_SNDTIMEO can surface as a write error; writeVecAll loops until every
+        // byte is written so a slow client can never leave a truncated frame
+        // behind (which would corrupt all later frames).
+        const io = nostr.io.io();
+        var sw = self.stream.writer(io, &.{});
+        var vecs = [_][]const u8{ header[0..header_len], data };
+        try sw.interface.writeVecAll(&vecs);
+        try sw.interface.flush();
     }
 };
 
@@ -86,7 +86,7 @@ pub const TcpServer = struct {
     subs: *Subscriptions,
 
     next_id: u64 = 0,
-    mutex: std.Thread.Mutex = .{},
+    mutex: std.Io.Mutex = .init,
 
     listener: ?net.Server = null,
     shutdown: *std.atomic.Value(bool),
@@ -121,7 +121,7 @@ pub const TcpServer = struct {
 
     pub fn deinit(self: *TcpServer) void {
         if (self.listener) |*l| {
-            l.deinit();
+            l.deinit(nostr.io.io());
             self.listener = null;
         }
         self.conn_limiter.deinit();
@@ -129,36 +129,37 @@ pub const TcpServer = struct {
     }
 
     pub fn run(self: *TcpServer) !void {
-        const address = try net.Address.parseIp(self.config.host, self.config.port);
-        self.listener = try address.listen(.{
+        const io = nostr.io.io();
+        const address = try net.IpAddress.parse(self.config.host, self.config.port);
+        self.listener = try address.listen(io, .{
             .reuse_address = true,
         });
 
-        // Wake accept() periodically (it would otherwise block indefinitely
-        // waiting for a connection) so the loop observes the shutdown flag set
-        // by SIGINT/SIGTERM and exits promptly for a graceful shutdown.
-        const accept_timeout = posix.timeval{ .sec = 1, .usec = 0 };
-        posix.setsockopt(self.listener.?.stream.handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, &std.mem.toBytes(accept_timeout)) catch {};
-
+        // Poll the listener with a 1s timeout so the loop observes the shutdown
+        // flag promptly. 0.16's Io.Threaded accept panics on EAGAIN, so the old
+        // SO_RCVTIMEO-on-accept trick is gone; poll first, accept only when ready.
         std.log.info("Server running on {s}:{d}", .{ self.config.host, self.config.port });
 
         const idle_thread = std.Thread.spawn(.{}, idleTimeoutThread, .{ self, self.shutdown }) catch null;
         defer if (idle_thread) |t| t.join();
 
         while (!self.shutdown.load(.acquire)) {
-            const conn = self.listener.?.accept() catch |err| {
+            var pfd = [_]posix.pollfd{.{ .fd = self.listener.?.socket.handle, .events = posix.POLL.IN, .revents = 0 }};
+            const ready = posix.poll(&pfd, 1000) catch 0;
+            if (ready == 0) continue;
+            const stream = self.listener.?.accept(io) catch |err| {
                 if (err == error.SocketNotListening) break;
                 continue;
             };
 
             if (self.subs.connectionCount() >= self.config.max_connections) {
-                conn.stream.close();
+                stream.close(io);
                 continue;
             }
 
-            const thread = std.Thread.spawn(.{}, handleConnection, .{ self, conn }) catch |err| {
+            const thread = std.Thread.spawn(.{}, handleConnection, .{ self, stream }) catch |err| {
                 std.log.warn("Failed to spawn connection thread: {}", .{err});
-                conn.stream.close();
+                stream.close(io);
                 continue;
             };
             thread.detach();
@@ -166,10 +167,10 @@ pub const TcpServer = struct {
 
         std.log.info("Shutting down server...", .{});
         if (self.listener) |*l| {
-            l.deinit();
+            l.deinit(io);
             self.listener = null;
         }
-        std.Thread.sleep(200 * std.time.ns_per_ms);
+        std.Io.sleep(io, .{ .nanoseconds = 200 * std.time.ns_per_ms }, .awake) catch {};
     }
 
     fn idleTimeoutThread(self: *TcpServer, shutdown: *std.atomic.Value(bool)) void {
@@ -177,7 +178,7 @@ pub const TcpServer = struct {
         var seconds_waited: u64 = 0;
 
         while (!shutdown.load(.acquire)) {
-            std.Thread.sleep(std.time.ns_per_s);
+            std.Io.sleep(nostr.io.io(), .{ .nanoseconds = std.time.ns_per_s }, .awake) catch {};
             if (shutdown.load(.acquire)) break;
             seconds_waited += 1;
             if (seconds_waited < check_interval_s) continue;
@@ -200,24 +201,24 @@ pub const TcpServer = struct {
 
     pub fn stop(self: *TcpServer) void {
         if (self.listener) |*l| {
-            l.deinit();
+            l.deinit(nostr.io.io());
             self.listener = null;
         }
     }
 
-    fn handleConnection(self: *TcpServer, conn: net.Server.Connection) void {
-        defer conn.stream.close();
+    fn handleConnection(self: *TcpServer, stream: net.Stream) void {
+        defer stream.close(nostr.io.io());
 
         // Check shutdown early to avoid accessing freed resources
         if (self.shutdown.load(.acquire)) return;
 
         var addr_buf: [64]u8 = undefined;
-        const socket_ip = extractIp(conn.address, &addr_buf);
+        const socket_ip = extractIp(stream.socket.handle, &addr_buf);
 
         if (self.shutdown.load(.acquire)) return;
 
         var buf: [8192]u8 = undefined;
-        const n = conn.stream.read(&buf) catch return;
+        const n = streamRead(stream, &buf) catch return;
         if (n == 0) return;
 
         const req_data = buf[0..n];
@@ -241,17 +242,17 @@ pub const TcpServer = struct {
         }
 
         if (isWebsocketUpgrade(req_data)) {
-            self.handleWebsocket(conn, client_ip, req_data) catch |err| {
+            self.handleWebsocket(stream, client_ip, req_data) catch |err| {
                 std.log.debug("Websocket error: {}", .{err});
             };
         } else {
-            self.handleHttp(conn, req_data) catch {};
+            self.handleHttp(stream, req_data) catch {};
         }
     }
 
-    fn handleWebsocket(self: *TcpServer, conn: net.Server.Connection, client_ip: []const u8, initial_data: []const u8) !void {
+    fn handleWebsocket(self: *TcpServer, stream: net.Stream, client_ip: []const u8, initial_data: []const u8) !void {
         const TCP_NODELAY = 1;
-        posix.setsockopt(conn.stream.handle, posix.IPPROTO.TCP, TCP_NODELAY, &std.mem.toBytes(@as(i32, 1))) catch {};
+        posix.setsockopt(stream.socket.handle, posix.IPPROTO.TCP, TCP_NODELAY, &std.mem.toBytes(@as(i32, 1))) catch {};
 
         // Bound how long a write to a slow/stalled client can block. REQ results
         // are streamed synchronously while an LMDB read txn is open, so without
@@ -259,7 +260,7 @@ pub const TcpServer = struct {
         // write errors and the direct writer is marked failed; the REQ streaming
         // loop observes that and breaks early, releasing the read txn promptly.
         const send_timeout = posix.timeval{ .sec = 10, .usec = 0 };
-        posix.setsockopt(conn.stream.handle, posix.SOL.SOCKET, posix.SO.SNDTIMEO, &std.mem.toBytes(send_timeout)) catch {};
+        posix.setsockopt(stream.socket.handle, posix.SOL.SOCKET, posix.SO.SNDTIMEO, &std.mem.toBytes(send_timeout)) catch {};
 
         const req, const consumed = try ws.handshake.Req.parse(initial_data);
         _ = consumed;
@@ -267,19 +268,20 @@ pub const TcpServer = struct {
         const accept = ws.handshake.secAccept(req.key);
         var response_buf: [256]u8 = undefined;
         const response = try std.fmt.bufPrint(&response_buf, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {s}\r\n\r\n", .{&accept});
-        try conn.stream.writeAll(response);
+        try streamWriteAll(stream, response);
 
-        var ws_writer = WsWriter{ .stream = conn.stream };
+        var ws_writer = WsWriter{ .stream = stream };
 
-        self.mutex.lock();
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
         const conn_id = self.next_id;
         self.next_id += 1;
-        self.mutex.unlock();
+        self.mutex.unlock(io);
 
         const connection = try self.allocator.create(Connection);
         connection.init(self.allocator, conn_id);
         connection.setClientIp(client_ip);
-        connection.setSocketHandle(conn.stream.handle);
+        connection.setSocketHandle(stream.socket.handle);
         connection.setDirectWriter(WsWriter.write, @ptrCast(&ws_writer));
         connection.setDirectWriteFailedFlag(&ws_writer.failed);
         connection.startWriteQueue(WsWriter.write, @ptrCast(&ws_writer));
@@ -291,7 +293,14 @@ pub const TcpServer = struct {
             self.allocator.destroy(connection);
             return err;
         };
-        self.conn_limiter.addConnection(client_ip);
+        if (!self.conn_limiter.tryAcquireConnection(client_ip)) {
+            connection.stopWriteQueue();
+            connection.clearDirectWriter();
+            self.subs.removeConnection(conn_id);
+            connection.deinit();
+            self.allocator.destroy(connection);
+            return;
+        }
 
         defer {
             connection.stopWriteQueue();
@@ -317,11 +326,11 @@ pub const TcpServer = struct {
                 var close_response: [16]u8 = undefined;
                 const close_frame = ws.Frame{ .fin = 1, .opcode = .close, .payload = &.{}, .mask = 0 };
                 const close_len = close_frame.encode(&close_response, 1002);
-                conn.stream.writeAll(close_response[0..close_len]) catch {};
+                streamWriteAll(stream, close_response[0..close_len]) catch {};
                 return;
             }
 
-            const bytes_read = conn.stream.read(frame_buf[read_pos..]) catch |err| {
+            const bytes_read = streamRead(stream, frame_buf[read_pos..]) catch |err| {
                 if (err == error.ConnectionResetByPeer or err == error.BrokenPipe) break;
                 return err;
             };
@@ -331,7 +340,7 @@ pub const TcpServer = struct {
             connection.touch();
 
             while (read_pos > 0) {
-                if (try self.checkOversizedFrame(connection, conn, frame_buf[0..read_pos])) return;
+                if (try self.checkOversizedFrame(connection, stream, frame_buf[0..read_pos])) return;
 
                 const frame, const frame_len = ws.Frame.parse(frame_buf[0..read_pos]) catch |err| {
                     if (err == error.SplitBuffer) break;
@@ -344,13 +353,13 @@ pub const TcpServer = struct {
                     var close_response: [16]u8 = undefined;
                     const close_frame = ws.Frame{ .fin = 1, .opcode = .close, .payload = &.{}, .mask = 0 };
                     const close_len = close_frame.encode(&close_response, 1000);
-                    conn.stream.writeAll(close_response[0..close_len]) catch {};
+                    streamWriteAll(stream, close_response[0..close_len]) catch {};
                     return;
                 } else if (frame.opcode == .ping) {
                     var pong_buf: [256]u8 = undefined;
                     const pong_frame = ws.Frame{ .fin = 1, .opcode = .pong, .payload = frame.payload, .mask = 0 };
                     const pong_len = pong_frame.encode(&pong_buf, 0);
-                    conn.stream.writeAll(pong_buf[0..pong_len]) catch {};
+                    streamWriteAll(stream, pong_buf[0..pong_len]) catch {};
                 } else if (frame.opcode == .text or frame.opcode == .binary) {
                     self.handler.handle(connection, frame.payload);
                 }
@@ -363,7 +372,7 @@ pub const TcpServer = struct {
         }
     }
 
-    fn checkOversizedFrame(self: *TcpServer, connection: *Connection, conn: net.Server.Connection, data: []const u8) !bool {
+    fn checkOversizedFrame(self: *TcpServer, connection: *Connection, stream: net.Stream, data: []const u8) !bool {
         if (data.len < 2) return false;
         const payload_len_byte: u8 = data[1] & 0b0111_1111;
         const payload_len: u64 = switch (payload_len_byte) {
@@ -386,29 +395,29 @@ pub const TcpServer = struct {
             var close_response: [16]u8 = undefined;
             const close_frame = ws.Frame{ .fin = 1, .opcode = .close, .payload = &.{}, .mask = 0 };
             const close_len = close_frame.encode(&close_response, 1009);
-            conn.stream.writeAll(close_response[0..close_len]) catch {};
+            streamWriteAll(stream, close_response[0..close_len]) catch {};
             return true;
         }
         return false;
     }
 
-    fn handleHttp(self: *TcpServer, conn: net.Server.Connection, req_data: []const u8) !void {
+    fn handleHttp(self: *TcpServer, stream: net.Stream, req_data: []const u8) !void {
         const is_options = std.mem.startsWith(u8, req_data, "OPTIONS ");
         const is_nip86_rpc = std.mem.indexOf(u8, req_data, "application/nostr+json+rpc") != null;
         const accepts_json = std.mem.indexOf(u8, req_data, "application/nostr+json") != null;
 
         if (is_nip86_rpc or is_options) {
-            try self.handleNip86(conn, req_data);
+            try self.handleNip86(stream, req_data);
         } else if (accepts_json) {
             var response_buf: [4096]u8 = undefined;
             var content_buf: [2048]u8 = undefined;
 
-            var content_stream = std.io.fixedBufferStream(&content_buf);
-            try nip11.write(self.config, self.nip86_handler, content_stream.writer());
-            const content = content_stream.getWritten();
+            var content_stream = std.Io.Writer.fixed(&content_buf);
+            try nip11.write(self.config, self.nip86_handler, &content_stream);
+            const content = content_stream.buffered();
 
             const response = try std.fmt.bufPrint(&response_buf, "HTTP/1.1 200 OK\r\nContent-Type: application/nostr+json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {d}\r\n\r\n{s}", .{ content.len, content });
-            try conn.stream.writeAll(response);
+            try streamWriteAll(stream, response);
         } else {
             const html =
                 \\<!DOCTYPE html>
@@ -419,32 +428,32 @@ pub const TcpServer = struct {
                 \\</body></html>
             ;
             const response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: " ++ std.fmt.comptimePrint("{d}", .{html.len}) ++ "\r\n\r\n" ++ html;
-            try conn.stream.writeAll(response);
+            try streamWriteAll(stream, response);
         }
     }
 
-    fn handleNip86(self: *TcpServer, conn: net.Server.Connection, req_data: []const u8) !void {
+    fn handleNip86(self: *TcpServer, stream: net.Stream, req_data: []const u8) !void {
         if (std.mem.startsWith(u8, req_data, "OPTIONS ")) {
             const response = "HTTP/1.1 204 No Content\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: Authorization, Content-Type\r\nAccess-Control-Allow-Methods: POST, OPTIONS\r\nAccess-Control-Max-Age: 86400\r\n\r\n";
-            try conn.stream.writeAll(response);
+            try streamWriteAll(stream, response);
             return;
         }
 
         if (!std.mem.startsWith(u8, req_data, "POST ")) {
             const response = "HTTP/1.1 405 Method Not Allowed\r\nAllow: POST, OPTIONS\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 0\r\n\r\n";
-            try conn.stream.writeAll(response);
+            try streamWriteAll(stream, response);
             return;
         }
 
         if (self.config.admin_pubkeys.len == 0) {
             const response = "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 39\r\n\r\n{\"error\":\"management API not enabled\"}";
-            try conn.stream.writeAll(response);
+            try streamWriteAll(stream, response);
             return;
         }
 
         const header_end = std.mem.indexOf(u8, req_data, "\r\n\r\n") orelse {
             const response = "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 32\r\n\r\n{\"error\":\"missing request body\"}";
-            try conn.stream.writeAll(response);
+            try streamWriteAll(stream, response);
             return;
         };
         const body_offset = header_end + 4;
@@ -453,19 +462,19 @@ pub const TcpServer = struct {
         const content_length = blk: {
             const cl_str = extractHeader(req_data[0..header_end], "Content-Length: ") orelse {
                 const response = "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 34\r\n\r\n{\"error\":\"missing Content-Length\"}";
-                try conn.stream.writeAll(response);
+                try streamWriteAll(stream, response);
                 return;
             };
             break :blk std.fmt.parseInt(usize, cl_str, 10) catch {
                 const response = "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 34\r\n\r\n{\"error\":\"invalid Content-Length\"}";
-                try conn.stream.writeAll(response);
+                try streamWriteAll(stream, response);
                 return;
             };
         };
 
         if (content_length > max_body_size) {
             const response = "HTTP/1.1 413 Content Too Large\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 34\r\n\r\n{\"error\":\"request body too large\"}";
-            try conn.stream.writeAll(response);
+            try streamWriteAll(stream, response);
             return;
         }
 
@@ -479,13 +488,13 @@ pub const TcpServer = struct {
         } else {
             body_buf = self.allocator.alloc(u8, content_length) catch {
                 const response = "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 25\r\n\r\n{\"error\":\"out of memory\"}";
-                try conn.stream.writeAll(response);
+                try streamWriteAll(stream, response);
                 return;
             };
             @memcpy(body_buf.?[0..initial_body.len], initial_body);
             var total_read = initial_body.len;
             while (total_read < content_length) {
-                const bytes = conn.stream.read(body_buf.?[total_read..content_length]) catch {
+                const bytes = streamRead(stream, body_buf.?[total_read..content_length]) catch {
                     return;
                 };
                 if (bytes == 0) return;
@@ -507,7 +516,7 @@ pub const TcpServer = struct {
         const reason = statusReason(result.status);
         var response_buf: [65536]u8 = undefined;
         const response = std.fmt.bufPrint(&response_buf, "HTTP/1.1 {d} {s}\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: Authorization, Content-Type\r\nAccess-Control-Allow-Methods: POST, OPTIONS\r\nContent-Length: {d}\r\n\r\n{s}", .{ result.status, reason, result.body.len, result.body }) catch return;
-        conn.stream.writeAll(response) catch {};
+        streamWriteAll(stream, response) catch {};
 
         if (result.owned) {
             self.allocator.free(result.body);
@@ -546,8 +555,31 @@ pub const TcpServer = struct {
         return std.ascii.indexOfIgnoreCase(data, "upgrade: websocket") != null;
     }
 
-    fn extractIp(address: net.Address, buf: []u8) []const u8 {
-        const formatted = std.fmt.bufPrint(buf, "{any}", .{address}) catch return "unknown";
+    fn extractIp(fd: posix.socket_t, buf: []u8) []const u8 {
+        var storage: posix.sockaddr.storage = undefined;
+        var len: posix.socklen_t = @sizeOf(posix.sockaddr.storage);
+        posix.getpeername(fd, @ptrCast(&storage), &len) catch return "unknown";
+
+        const addr: net.IpAddress = switch (storage.family) {
+            posix.AF.INET => blk: {
+                const sin: *const posix.sockaddr.in = @ptrCast(@alignCast(&storage));
+                break :blk .{ .ip4 = .{ .bytes = @bitCast(sin.addr), .port = std.mem.bigToNative(u16, sin.port) } };
+            },
+            posix.AF.INET6 => blk: {
+                const sin6: *const posix.sockaddr.in6 = @ptrCast(@alignCast(&storage));
+                break :blk .{ .ip6 = .{ .port = std.mem.bigToNative(u16, sin6.port), .bytes = sin6.addr } };
+            },
+            else => return "unknown",
+        };
+
+        const formatted = std.fmt.bufPrint(buf, "{f}", .{addr}) catch return "unknown";
+        // IPv6 is formatted as "[addr]:port" — return the bracketed address so
+        // ACLs and per-IP limits see a plain IP (e.g. "::1", not "[::1]").
+        if (formatted.len > 0 and formatted[0] == '[') {
+            if (std.mem.indexOfScalar(u8, formatted, ']')) |end| {
+                return formatted[1..end];
+            }
+        }
         if (std.mem.lastIndexOf(u8, formatted, ":")) |colon| {
             return formatted[0..colon];
         }

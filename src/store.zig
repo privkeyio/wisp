@@ -265,7 +265,7 @@ pub const Store = struct {
         }
 
         try self.deleteEventInternal(&txn, &event);
-        const now = std.time.timestamp();
+        const now = nostr.io.timestamp();
         const now_bytes = std.mem.asBytes(&now);
         try txn.put(self.deleted, event_id, now_bytes);
         try txn.commit();
@@ -279,7 +279,7 @@ pub const Store = struct {
         var cursor = try txn.cursor(self.deleted);
         defer cursor.close();
 
-        const now = std.time.timestamp();
+        const now = nostr.io.timestamp();
         const cutoff = now - max_age_seconds;
         var deleted_count: u64 = 0;
 
@@ -313,7 +313,7 @@ pub const Store = struct {
         var cursor = try txn.cursor(self.idx_expiration);
         defer cursor.close();
 
-        const now: u64 = @intCast(std.time.timestamp());
+        const now: u64 = @intCast(nostr.io.timestamp());
         var expired_count: u64 = 0;
 
         var entry = try cursor.get(.first);

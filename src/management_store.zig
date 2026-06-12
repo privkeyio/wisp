@@ -3,6 +3,7 @@ const Lmdb = @import("lmdb.zig").Lmdb;
 const Txn = @import("lmdb.zig").Txn;
 const Dbi = @import("lmdb.zig").Dbi;
 const Cursor = @import("lmdb.zig").Cursor;
+const nostr = @import("nostr.zig");
 
 pub const ManagementStore = struct {
     lmdb: *Lmdb,
@@ -15,7 +16,7 @@ pub const ManagementStore = struct {
     blocked_ips: Dbi,
     relay_settings: Dbi,
 
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
 
     pub fn init(allocator: std.mem.Allocator, lmdb: *Lmdb) !ManagementStore {
         var txn = try lmdb.beginTxn(false);
@@ -39,13 +40,14 @@ pub const ManagementStore = struct {
             .allowed_kinds = allowed_kinds,
             .blocked_ips = blocked_ips,
             .relay_settings = relay_settings,
-            .mutex = .{},
+            .mutex = .init,
         };
     }
 
     pub fn banPubkey(self: *ManagementStore, pubkey: *const [32]u8, reason: []const u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         var txn = try self.lmdb.beginTxn(false);
         errdefer txn.abort();
@@ -54,8 +56,9 @@ pub const ManagementStore = struct {
     }
 
     pub fn unbanPubkey(self: *ManagementStore, pubkey: *const [32]u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         var txn = try self.lmdb.beginTxn(false);
         errdefer txn.abort();
@@ -76,7 +79,7 @@ pub const ManagementStore = struct {
         var cursor = try txn.cursor(self.banned_pubkeys);
         defer cursor.close();
 
-        var list: std.ArrayListUnmanaged(PubkeyEntry) = .{};
+        var list: std.ArrayListUnmanaged(PubkeyEntry) = .empty;
         errdefer {
             for (list.items) |*e| e.deinit(allocator);
             list.deinit(allocator);
@@ -101,8 +104,9 @@ pub const ManagementStore = struct {
     }
 
     pub fn allowPubkey(self: *ManagementStore, pubkey: *const [32]u8, reason: []const u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         var txn = try self.lmdb.beginTxn(false);
         errdefer txn.abort();
@@ -111,8 +115,9 @@ pub const ManagementStore = struct {
     }
 
     pub fn disallowPubkey(self: *ManagementStore, pubkey: *const [32]u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         var txn = try self.lmdb.beginTxn(false);
         errdefer txn.abort();
@@ -141,7 +146,7 @@ pub const ManagementStore = struct {
         var cursor = try txn.cursor(self.allowed_pubkeys);
         defer cursor.close();
 
-        var list: std.ArrayListUnmanaged(PubkeyEntry) = .{};
+        var list: std.ArrayListUnmanaged(PubkeyEntry) = .empty;
         errdefer {
             for (list.items) |*e| e.deinit(allocator);
             list.deinit(allocator);
@@ -166,8 +171,9 @@ pub const ManagementStore = struct {
     }
 
     pub fn banEvent(self: *ManagementStore, event_id: *const [32]u8, reason: []const u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         var txn = try self.lmdb.beginTxn(false);
         errdefer txn.abort();
@@ -176,8 +182,9 @@ pub const ManagementStore = struct {
     }
 
     pub fn unbanEvent(self: *ManagementStore, event_id: *const [32]u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         var txn = try self.lmdb.beginTxn(false);
         errdefer txn.abort();
@@ -198,7 +205,7 @@ pub const ManagementStore = struct {
         var cursor = try txn.cursor(self.banned_events);
         defer cursor.close();
 
-        var list: std.ArrayListUnmanaged(EventEntry) = .{};
+        var list: std.ArrayListUnmanaged(EventEntry) = .empty;
         errdefer {
             for (list.items) |*e| e.deinit(allocator);
             list.deinit(allocator);
@@ -223,8 +230,9 @@ pub const ManagementStore = struct {
     }
 
     pub fn allowKind(self: *ManagementStore, kind: i32) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         var txn = try self.lmdb.beginTxn(false);
         errdefer txn.abort();
@@ -234,8 +242,9 @@ pub const ManagementStore = struct {
     }
 
     pub fn disallowKind(self: *ManagementStore, kind: i32) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         var txn = try self.lmdb.beginTxn(false);
         errdefer txn.abort();
@@ -267,7 +276,7 @@ pub const ManagementStore = struct {
         var cursor = try txn.cursor(self.allowed_kinds);
         defer cursor.close();
 
-        var list: std.ArrayListUnmanaged(i32) = .{};
+        var list: std.ArrayListUnmanaged(i32) = .empty;
         errdefer list.deinit(allocator);
 
         var entry = try cursor.get(.first);
@@ -284,8 +293,9 @@ pub const ManagementStore = struct {
     }
 
     pub fn blockIp(self: *ManagementStore, ip: []const u8, reason: []const u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         var txn = try self.lmdb.beginTxn(false);
         errdefer txn.abort();
@@ -294,8 +304,9 @@ pub const ManagementStore = struct {
     }
 
     pub fn unblockIp(self: *ManagementStore, ip: []const u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         var txn = try self.lmdb.beginTxn(false);
         errdefer txn.abort();
@@ -325,7 +336,7 @@ pub const ManagementStore = struct {
         var cursor = try txn.cursor(self.blocked_ips);
         defer cursor.close();
 
-        var list: std.ArrayListUnmanaged(IpEntry) = .{};
+        var list: std.ArrayListUnmanaged(IpEntry) = .empty;
         errdefer {
             for (list.items) |*e| e.deinit(allocator);
             list.deinit(allocator);
@@ -348,8 +359,9 @@ pub const ManagementStore = struct {
     }
 
     pub fn setRelaySetting(self: *ManagementStore, key: []const u8, value: []const u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         var txn = try self.lmdb.beginTxn(false);
         errdefer txn.abort();

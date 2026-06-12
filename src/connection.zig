@@ -47,7 +47,7 @@ pub const Connection = struct {
     deinitialized: bool = false,
 
     pub fn init(self: *Connection, backing_allocator: std.mem.Allocator, id: u64) void {
-        const now = std.time.timestamp();
+        const now = nostr.io.timestamp();
         self.id = id;
         self.backing_allocator = backing_allocator;
         self.arena = std.heap.ArenaAllocator.init(backing_allocator);
@@ -63,7 +63,7 @@ pub const Connection = struct {
         self.direct_write_ctx = null;
         self.direct_write_failed = null;
         self.socket_handle = null;
-        std.crypto.random.bytes(&self.auth_challenge);
+        nostr.io.randomBytes(&self.auth_challenge);
         self.authenticated_pubkeys = std.AutoHashMap([32]u8, void).init(self.arena.allocator());
         self.challenge_sent = false;
         self.write_queue = WriteQueue.init(backing_allocator);
@@ -138,7 +138,8 @@ pub const Connection = struct {
 
     pub fn shutdown(self: *Connection) void {
         if (self.socket_handle) |handle| {
-            posix.shutdown(handle, .both) catch {};
+            const stream = std.Io.net.Stream{ .socket = .{ .handle = handle, .address = undefined } };
+            stream.shutdown(nostr.io.io(), .both) catch {};
             self.socket_handle = null;
         }
     }
@@ -175,7 +176,7 @@ pub const Connection = struct {
         try self.subscriptions.put(sub_id_copy, .{
             .id = sub_id_copy,
             .filters = filters_copy,
-            .created_at = std.time.timestamp(),
+            .created_at = nostr.io.timestamp(),
         });
     }
 
@@ -217,12 +218,12 @@ pub const Connection = struct {
     }
 
     pub fn touch(self: *Connection) void {
-        self.last_activity = std.time.timestamp();
+        self.last_activity = nostr.io.timestamp();
     }
 
     pub fn checkEventRateLimit(self: *Connection, max_events_per_minute: u32) bool {
         if (max_events_per_minute == 0) return true;
-        const now = std.time.timestamp();
+        const now = nostr.io.timestamp();
         const window_start = now - 60;
         var count: u32 = 0;
         var i: u8 = 0;
@@ -236,7 +237,7 @@ pub const Connection = struct {
     }
 
     pub fn recordEvent(self: *Connection) void {
-        const now = std.time.timestamp();
+        const now = nostr.io.timestamp();
         self.event_timestamps[self.event_ts_head] = now;
         self.event_ts_head +%= 1;
         if (self.event_ts_count < 255) {
