@@ -116,19 +116,14 @@ pub const Subscriptions = struct {
         for (filters) |f| {
             if (f.kinds()) |kinds| {
                 for (kinds) |kind| {
-                    var list = self.kind_index.getPtr(kind);
-                    if (list == null) {
-                        try self.kind_index.put(kind, .empty);
-                        list = self.kind_index.getPtr(kind);
-                    }
+                    const gop = try self.kind_index.getOrPut(kind);
+                    if (!gop.found_existing) gop.value_ptr.* = .empty;
 
-                    const found = for (list.?.items) |id| {
+                    const found = for (gop.value_ptr.items) |id| {
                         if (id == conn.id) break true;
                     } else false;
 
-                    if (!found) {
-                        try list.?.append(self.allocator, conn.id);
-                    }
+                    if (!found) try gop.value_ptr.append(self.allocator, conn.id);
                 }
             }
         }

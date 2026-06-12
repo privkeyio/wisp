@@ -215,8 +215,11 @@ pub fn main(init: std.process.Init) !void {
     };
     std.posix.sigaction(std.posix.SIG.PIPE, &ignore_sa, null);
 
-    const cleanup_thread = std.Thread.spawn(.{}, storeCleanupThread, .{ &server, &store, &config, &subs, &g_shutdown, &server.conn_limiter, &event_limiter }) catch null;
-    defer if (cleanup_thread) |t| t.join();
+    // Mandatory: the cleanup thread also drives graceful shutdown (it calls
+    // server.stop() after observing the flag the signal handler sets). Without it
+    // running, a SIGINT/SIGTERM would set the flag but nothing would unblock listen().
+    const cleanup_thread = try std.Thread.spawn(.{}, storeCleanupThread, .{ &server, &store, &config, &subs, &g_shutdown, &server.conn_limiter, &event_limiter });
+    defer cleanup_thread.join();
 
     try server.listen();
 
