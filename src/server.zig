@@ -284,9 +284,20 @@ pub const Server = struct {
         };
         const address = httpz.Config.Address{ .ip = ip };
 
+        // httpz defaults to a single epoll worker, which serializes all
+        // WebSocket I/O on one thread. Each worker drives an epoll loop over
+        // many connections (so a few cover large servers) and owns its own
+        // request thread pool, so both counts are kept small and bounded:
+        // worker_count scales the WS I/O parallelism; the per-worker pool only
+        // handles the light HTTP/upgrade path (NIP-11/NIP-86).
+        const cpu_count = std.Thread.getCpuCount() catch 1;
+        const worker_count: u16 = @intCast(@max(@as(usize, 1), @min(cpu_count, 4)));
+
         self.httpz_server = try httpz.Server(App).init(io, allocator, .{
             .address = address,
             .request = .{ .max_body_size = 131072 },
+            .workers = .{ .count = worker_count },
+            .thread_pool = .{ .count = 8 },
             .websocket = .{ .max_message_size = config.max_message_size },
         }, app);
 
