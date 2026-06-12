@@ -2,7 +2,8 @@
 # Copy to wisp.toml and customize
 
 [server]
-host = "0.0.0.0"
+# Bind to 127.0.0.1 for local use (default). Use 0.0.0.0 only behind a reverse proxy.
+host = "127.0.0.1"
 port = 7777
 
 [relay]
@@ -31,7 +32,6 @@ query_limit_default = 500
 query_limit_max = 5000
 # max_event_age = 94608000
 # max_future_seconds = 900
-# deleted_retention_days = 90
 # min_pow_difficulty = 0
 
 [rate_limits]
@@ -46,9 +46,7 @@ idle_seconds = 300
 # relay_url = "wss://relay.example.com"
 
 [security]
-# trust_proxy = false
-# events_per_minute_per_ip = 120
-# global_events_per_minute = 10000
+# trust_proxy = false  # set true when running behind a reverse proxy (see docs/deployment.md)
 # max_connections_per_ip = 10
 # ip_whitelist = "192.168.1,10.0.0"
 # ip_blacklist = ""
@@ -65,3 +63,7 @@ admin = ""  # your hex pubkey (use `zig-out/bin/wisp help` for npub support via 
 [negentropy]
 enabled = true
 max_sync_events = 1000000
+
+[management]
+# NIP-86 relay management. Comma-separated hex pubkeys allowed to run admin commands.
+# admin_pubkeys = ""

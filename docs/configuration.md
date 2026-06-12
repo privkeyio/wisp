@@ -15,16 +15,17 @@ the full, annotated list of options. The main sections:
 
 | Section | Purpose |
 |---------|---------|
-| `[server]` | Listen `host` and `port` (default `0.0.0.0:7777`). |
+| `[server]` | Listen `host` and `port` (default `127.0.0.1:7777`). |
 | `[relay]` | Public relay metadata: `name`, `description`, `pubkey`, `contact`. |
 | `[storage]` | LMDB data `path` and map size. Point at `/dev/shm` (tmpfs) for ~2x lower latency, but note it is volatile (see warning below). |
 | `[limits]` | Connection, subscription, filter, message-size, and query limits. |
 | `[rate_limits]` | Per-relay event rate (`events_per_minute`). |
 | `[timeouts]` | Idle connection timeout. |
 | `[auth]` | Optional NIP-42 authentication for reads and/or writes. |
-| `[security]` | Per-IP rate limits, proxy trust, and IP allow/deny lists. |
+| `[security]` | Per-IP connection limits, proxy trust, and IP allow/deny lists. |
 | `[spider]` | Sync events for followed pubkeys from external relays. |
 | `[negentropy]` | NIP-77 set-reconciliation sync. |
+| `[management]` | NIP-86 admin allowlist (`admin_pubkeys`). |
 
 > **Warning:** `/dev/shm` is volatile tmpfs — all data is lost on reboot. Use it only for
 > benchmarks or disposable caches. For production, point `path` at persistent storage (a

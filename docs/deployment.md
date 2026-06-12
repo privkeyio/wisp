@@ -27,3 +27,7 @@ sudo systemctl restart caddy
 ```
 
 Your relay is now live at `wss://relay.yourdomain.com`.
+
+> **Behind a proxy:** set `trust_proxy = true` in the `[security]` section of `wisp.toml` so
+> per-IP connection limits and IP allow/deny lists see the real client IP from Caddy's
+> `X-Forwarded-For` header instead of `127.0.0.1`.

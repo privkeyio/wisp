@@ -5,7 +5,7 @@
 ### Docker
 
 ```sh
-docker run -d -p 7777:7777 -v wisp-data:/data ghcr.io/privkeyio/wisp --spider-admin npub1yourkey...
+docker run -d -p 127.0.0.1:7777:7777 -v wisp-data:/data ghcr.io/privkeyio/wisp --spider-admin npub1yourkey...
 ```
 
 ### Build from source
