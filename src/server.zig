@@ -198,8 +198,12 @@ pub const WsConn = struct {
     }
 
     pub fn close(self: *WsConn) void {
+        // removeConnection drops the registry entry under the exclusive lock, so
+        // no broadcaster/idle-close can take a new write reference afterward.
+        // Drain any in-flight references before freeing to avoid use-after-free.
         self.app.subs.removeConnection(self.connection.id);
         self.app.conn_limiter.removeConnection(self.client_ip[0..self.client_ip_len]);
+        self.connection.waitForPendingWrites();
         self.connection.deinit();
         self.app.allocator.destroy(self.connection);
     }

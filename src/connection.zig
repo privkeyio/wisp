@@ -21,13 +21,13 @@ pub const Connection = struct {
     subscriptions: std.StringHashMap(Subscription),
     neg_sessions: std.StringHashMap(NegSession),
     created_at: i64,
-    last_activity: i64,
+    last_activity: std.atomic.Value(i64),
     // Thread-safe writer provided by websocket.zig; serializes per-connection
     // writes internally, so both REQ streaming and broadcast use it directly.
     ws_conn: ?*websocket.Conn = null,
 
     events_received: u64 = 0,
-    events_sent: u64 = 0,
+    events_sent: std.atomic.Value(u64) = .init(0),
     event_timestamps: [256]i64 = undefined,
     event_ts_head: u8 = 0,
     event_ts_count: u8 = 0,
@@ -41,6 +41,11 @@ pub const Connection = struct {
     backing_allocator: std.mem.Allocator,
     deinitialized: bool = false,
 
+    // Counts broadcasts/idle-closes that have snapshotted this connection under
+    // the shared subs lock and may write to it after releasing the lock. close()
+    // drains this to zero before freeing, preventing use-after-free.
+    write_guard: std.atomic.Value(u32) = .init(0),
+
     pub fn init(self: *Connection, backing_allocator: std.mem.Allocator, id: u64) void {
         const now = nostr.io.timestamp();
         self.id = id;
@@ -49,9 +54,10 @@ pub const Connection = struct {
         self.subscriptions = std.StringHashMap(Subscription).init(self.arena.allocator());
         self.neg_sessions = std.StringHashMap(NegSession).init(self.arena.allocator());
         self.created_at = now;
-        self.last_activity = now;
+        self.last_activity = .init(now);
         self.events_received = 0;
-        self.events_sent = 0;
+        self.events_sent = .init(0);
+        self.write_guard = .init(0);
         self.client_ip = undefined;
         self.client_ip_len = 0;
         self.ws_conn = null;
@@ -178,7 +184,16 @@ pub const Connection = struct {
     }
 
     pub fn touch(self: *Connection) void {
-        self.last_activity = nostr.io.timestamp();
+        self.last_activity.store(nostr.io.timestamp(), .monotonic);
+    }
+
+    /// Block until no broadcaster/idle-close still holds a write reference to this
+    /// connection. Must be called after the connection is removed from the subs
+    /// registry (so no new references can be taken) and before deinit/destroy.
+    pub fn waitForPendingWrites(self: *Connection) void {
+        while (self.write_guard.load(.acquire) != 0) {
+            std.Io.sleep(nostr.io.io(), .{ .nanoseconds = std.time.ns_per_ms }, .awake) catch {};
+        }
     }
 
     pub fn checkEventRateLimit(self: *Connection, max_events_per_minute: u32) bool {

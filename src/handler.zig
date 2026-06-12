@@ -36,7 +36,7 @@ fn streamQueryResults(conn: *Connection, sub_id: []const u8, iter: anytype) void
         // A write error (peer gone / send timeout on a slow client) stops the
         // stream so the LMDB read txn is released promptly.
         conn.write(event_msg) catch break;
-        conn.events_sent += 1;
+        _ = conn.events_sent.fetchAdd(1, .monotonic);
     }
 }
 
