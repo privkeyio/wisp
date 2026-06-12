@@ -284,7 +284,10 @@ fn runImport(allocator: std.mem.Allocator, db_path: []const u8) !void {
     var read_buf: [65536]u8 = undefined;
 
     while (true) {
-        const bytes_read = std.posix.read(std.posix.STDIN_FILENO, &read_buf) catch break;
+        const bytes_read = std.posix.read(std.posix.STDIN_FILENO, &read_buf) catch |err| {
+            printStatus(stderr_file, "Import aborted: read error: {}\n", .{err});
+            return err;
+        };
         if (bytes_read == 0) break;
 
         for (read_buf[0..bytes_read]) |byte| {
@@ -378,8 +381,14 @@ fn runExport(allocator: std.mem.Allocator, db_path: []const u8) !void {
     var exported: u64 = 0;
 
     while (try iter.next()) |json| {
-        stdout_file.writeStreamingAll(io, json) catch return;
-        stdout_file.writeStreamingAll(io, "\n") catch return;
+        stdout_file.writeStreamingAll(io, json) catch |err| {
+            printStatus(stderr_file, "Export aborted: write error: {}\n", .{err});
+            return err;
+        };
+        stdout_file.writeStreamingAll(io, "\n") catch |err| {
+            printStatus(stderr_file, "Export aborted: write error: {}\n", .{err});
+            return err;
+        };
         exported += 1;
     }
 

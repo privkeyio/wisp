@@ -154,6 +154,7 @@ pub const Subscriptions = struct {
         defer self.rwlock.unlockShared(io);
 
         var result: std.ArrayListUnmanaged(*Connection) = .empty;
+        errdefer result.deinit(self.allocator);
         var seen = std.AutoHashMap(u64, void).init(self.allocator);
         defer seen.deinit();
 
@@ -225,6 +226,9 @@ pub const Subscriptions = struct {
                 result.append(self.allocator, conn.*.id) catch continue;
             }
         }
-        return result.toOwnedSlice(self.allocator) catch &[_]u64{};
+        return result.toOwnedSlice(self.allocator) catch blk: {
+            result.deinit(self.allocator);
+            break :blk &[_]u64{};
+        };
     }
 };

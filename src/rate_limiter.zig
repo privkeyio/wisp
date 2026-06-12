@@ -42,7 +42,10 @@ pub const ConnectionLimiter = struct {
         return true;
     }
 
-    pub fn addConnection(self: *ConnectionLimiter, ip: []const u8) void {
+    /// Atomically check the per-IP limit and increment in one locked section.
+    /// Returns false (without incrementing) if the IP is already at the limit,
+    /// closing the canConnect/addConnection check-then-act race.
+    pub fn tryAcquireConnection(self: *ConnectionLimiter, ip: []const u8) bool {
         const io = nostr.io.io();
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
@@ -50,17 +53,21 @@ pub const ConnectionLimiter = struct {
         const now = nostr.io.timestamp();
 
         if (self.ip_buckets.getPtr(ip)) |bucket| {
+            if (bucket.connection_count >= self.max_connections_per_ip) return false;
             bucket.connection_count += 1;
             bucket.last_activity = now;
-        } else {
-            const ip_copy = self.allocator.dupe(u8, ip) catch return;
-            self.ip_buckets.put(ip_copy, .{
-                .connection_count = 1,
-                .last_activity = now,
-            }) catch {
-                self.allocator.free(ip_copy);
-            };
+            return true;
         }
+
+        const ip_copy = self.allocator.dupe(u8, ip) catch return false;
+        self.ip_buckets.put(ip_copy, .{
+            .connection_count = 1,
+            .last_activity = now,
+        }) catch {
+            self.allocator.free(ip_copy);
+            return false;
+        };
+        return true;
     }
 
     pub fn removeConnection(self: *ConnectionLimiter, ip: []const u8) void {

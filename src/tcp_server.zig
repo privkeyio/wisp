@@ -293,7 +293,14 @@ pub const TcpServer = struct {
             self.allocator.destroy(connection);
             return err;
         };
-        self.conn_limiter.addConnection(client_ip);
+        if (!self.conn_limiter.tryAcquireConnection(client_ip)) {
+            connection.stopWriteQueue();
+            connection.clearDirectWriter();
+            self.subs.removeConnection(conn_id);
+            connection.deinit();
+            self.allocator.destroy(connection);
+            return;
+        }
 
         defer {
             connection.stopWriteQueue();
@@ -566,6 +573,13 @@ pub const TcpServer = struct {
         };
 
         const formatted = std.fmt.bufPrint(buf, "{f}", .{addr}) catch return "unknown";
+        // IPv6 is formatted as "[addr]:port" — return the bracketed address so
+        // ACLs and per-IP limits see a plain IP (e.g. "::1", not "[::1]").
+        if (formatted.len > 0 and formatted[0] == '[') {
+            if (std.mem.indexOfScalar(u8, formatted, ']')) |end| {
+                return formatted[1..end];
+            }
+        }
         if (std.mem.lastIndexOf(u8, formatted, ":")) |colon| {
             return formatted[0..colon];
         }

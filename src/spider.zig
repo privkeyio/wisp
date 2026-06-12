@@ -414,10 +414,10 @@ pub const Spider = struct {
         conn.last_connect = now;
         conn.clearRateLimit();
 
-        const subscribed_count = blk: {
+        const subscribed_hash = blk: {
             self.follow_mutex.lockUncancelable(nostr.io.io());
             defer self.follow_mutex.unlock(nostr.io.io());
-            break :blk self.follow_pubkeys.items.len;
+            break :blk std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(self.follow_pubkeys.items));
         };
 
         self.sendSubscriptions(&client, relay_url) catch |err| {
@@ -425,7 +425,7 @@ pub const Spider = struct {
             return false;
         };
 
-        self.readLoop(&client, relay_url, subscribed_count);
+        self.readLoop(&client, relay_url, subscribed_hash);
 
         conn.last_disconnect = milliTimestamp();
         conn.state = .disconnected;
@@ -791,22 +791,25 @@ pub const Spider = struct {
         log.info("{s}: Sent {d} subscription batches", .{ relay_url, batch_idx });
     }
 
-    fn readLoop(self: *Spider, client: *websocket.Client, relay_url: []const u8, subscribed_count: usize) void {
+    fn readLoop(self: *Spider, client: *websocket.Client, relay_url: []const u8, subscribed_hash: u64) void {
         var events_received: u64 = 0;
 
         client.readTimeout(1000) catch {};
 
         while (self.shouldRun()) {
-            // Re-subscribe when the follow list changes (e.g. the admin contact
-            // list was bootstrapped after connecting): exit so the relay loop
-            // reconnects, re-subscribes with the new pubkeys, and catches up.
-            const current_count = blk: {
+            // Re-subscribe when the follow list changes (added, removed, or
+            // replaced pubkeys): exit so the relay loop reconnects, re-subscribes
+            // with the current pubkeys, and catches up. The non-empty guard skips
+            // the transient empty state while refreshFollowList re-bootstraps.
+            const changed = blk: {
                 self.follow_mutex.lockUncancelable(nostr.io.io());
                 defer self.follow_mutex.unlock(nostr.io.io());
-                break :blk self.follow_pubkeys.items.len;
+                if (self.follow_pubkeys.items.len == 0) break :blk false;
+                const hash = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(self.follow_pubkeys.items));
+                break :blk hash != subscribed_hash;
             };
-            if (current_count > subscribed_count) {
-                log.info("{s}: Follow list grew ({d} -> {d}), reconnecting", .{ relay_url, subscribed_count, current_count });
+            if (changed) {
+                log.info("{s}: Follow list changed, reconnecting", .{relay_url});
                 break;
             }
 
