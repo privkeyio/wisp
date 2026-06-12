@@ -175,7 +175,7 @@ pub const Nip86Handler = struct {
         const entries = self.mgmt_store.listBannedEvents(self.allocator) catch return nip86.Response.internalError();
         defer ManagementStore.freeEventEntries(entries, self.allocator);
 
-        var buf: std.ArrayListUnmanaged(u8) = .{};
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
         defer buf.deinit(self.allocator);
 
         buf.appendSlice(self.allocator, "{\"result\":[") catch return nip86.Response.internalError();
@@ -245,7 +245,7 @@ pub const Nip86Handler = struct {
         const kinds = self.mgmt_store.listAllowedKinds(self.allocator) catch return nip86.Response.internalError();
         defer self.allocator.free(kinds);
 
-        var buf: std.ArrayListUnmanaged(u8) = .{};
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
         defer buf.deinit(self.allocator);
 
         buf.appendSlice(self.allocator, "{\"result\":[") catch return nip86.Response.internalError();
@@ -281,7 +281,7 @@ pub const Nip86Handler = struct {
         const entries = self.mgmt_store.listBlockedIps(self.allocator) catch return nip86.Response.internalError();
         defer ManagementStore.freeIpEntries(entries, self.allocator);
 
-        var buf: std.ArrayListUnmanaged(u8) = .{};
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
         defer buf.deinit(self.allocator);
 
         buf.appendSlice(self.allocator, "{\"result\":[") catch return nip86.Response.internalError();
@@ -300,7 +300,7 @@ pub const Nip86Handler = struct {
     }
 
     fn formatPubkeyList(self: *Nip86Handler, entries: []const ManagementStore.PubkeyEntry) nip86.Response {
-        var buf: std.ArrayListUnmanaged(u8) = .{};
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
         defer buf.deinit(self.allocator);
 
         buf.appendSlice(self.allocator, "{\"result\":[") catch return nip86.Response.internalError();

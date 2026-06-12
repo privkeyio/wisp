@@ -1,8 +1,9 @@
 const std = @import("std");
+const nostr = @import("nostr.zig");
 
 pub const ConnectionLimiter = struct {
     allocator: std.mem.Allocator,
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
     ip_buckets: std.StringHashMap(IpBucket),
     max_connections_per_ip: u32,
     cleanup_interval_seconds: i64,
@@ -15,7 +16,7 @@ pub const ConnectionLimiter = struct {
     pub fn init(allocator: std.mem.Allocator, max_connections_per_ip: u32) ConnectionLimiter {
         return .{
             .allocator = allocator,
-            .mutex = .{},
+            .mutex = .init,
             .ip_buckets = std.StringHashMap(IpBucket).init(allocator),
             .max_connections_per_ip = max_connections_per_ip,
             .cleanup_interval_seconds = 300,
@@ -31,8 +32,9 @@ pub const ConnectionLimiter = struct {
     }
 
     pub fn canConnect(self: *ConnectionLimiter, ip: []const u8) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         if (self.ip_buckets.get(ip)) |bucket| {
             return bucket.connection_count < self.max_connections_per_ip;
@@ -41,10 +43,11 @@ pub const ConnectionLimiter = struct {
     }
 
     pub fn addConnection(self: *ConnectionLimiter, ip: []const u8) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
-        const now = std.time.timestamp();
+        const now = nostr.io.timestamp();
 
         if (self.ip_buckets.getPtr(ip)) |bucket| {
             bucket.connection_count += 1;
@@ -61,8 +64,9 @@ pub const ConnectionLimiter = struct {
     }
 
     pub fn removeConnection(self: *ConnectionLimiter, ip: []const u8) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         if (self.ip_buckets.getPtr(ip)) |bucket| {
             if (bucket.connection_count > 0) {
@@ -72,11 +76,12 @@ pub const ConnectionLimiter = struct {
     }
 
     pub fn cleanup(self: *ConnectionLimiter) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
-        const now = std.time.timestamp();
-        var to_remove: std.ArrayListUnmanaged([]const u8) = .{};
+        const now = nostr.io.timestamp();
+        var to_remove: std.ArrayListUnmanaged([]const u8) = .empty;
         defer to_remove.deinit(self.allocator);
 
         var iter = self.ip_buckets.iterator();
@@ -95,8 +100,9 @@ pub const ConnectionLimiter = struct {
     }
 
     pub fn getStats(self: *ConnectionLimiter) Stats {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         return .{
             .tracked_ips = self.ip_buckets.count(),
@@ -113,7 +119,7 @@ pub const IpFilter = struct {
     whitelist: std.StringHashMap(void),
     blacklist: std.StringHashMap(void),
     whitelist_enabled: bool,
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
 
     pub fn init(allocator: std.mem.Allocator) IpFilter {
         return .{
@@ -121,7 +127,7 @@ pub const IpFilter = struct {
             .whitelist = std.StringHashMap(void).init(allocator),
             .blacklist = std.StringHashMap(void).init(allocator),
             .whitelist_enabled = false,
-            .mutex = .{},
+            .mutex = .init,
         };
     }
 
@@ -140,8 +146,9 @@ pub const IpFilter = struct {
     }
 
     pub fn loadWhitelist(self: *IpFilter, list: []const u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         if (list.len == 0) return;
 
@@ -157,8 +164,9 @@ pub const IpFilter = struct {
     }
 
     pub fn loadBlacklist(self: *IpFilter, list: []const u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         if (list.len == 0) return;
 
@@ -173,8 +181,9 @@ pub const IpFilter = struct {
     }
 
     pub fn isAllowed(self: *IpFilter, ip: []const u8) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         if (self.matchesPrefix(&self.blacklist, ip)) {
             return false;
@@ -261,7 +270,7 @@ test "normalizeIp" {
 
 pub const EventRateLimiter = struct {
     allocator: std.mem.Allocator,
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
     ip_buckets: std.StringHashMap(EventBucket),
     events_per_minute: u32,
 
@@ -276,7 +285,7 @@ pub const EventRateLimiter = struct {
     pub fn init(allocator: std.mem.Allocator, events_per_minute: u32) EventRateLimiter {
         return .{
             .allocator = allocator,
-            .mutex = .{},
+            .mutex = .init,
             .ip_buckets = std.StringHashMap(EventBucket).init(allocator),
             .events_per_minute = events_per_minute,
         };
@@ -293,10 +302,11 @@ pub const EventRateLimiter = struct {
     pub fn checkAndRecord(self: *EventRateLimiter, ip: []const u8) bool {
         if (self.events_per_minute == 0) return true;
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
-        const now = std.time.timestamp();
+        const now = nostr.io.timestamp();
         const window_start = now - WINDOW_SIZE;
 
         if (self.ip_buckets.getPtr(ip)) |bucket| {
@@ -336,12 +346,13 @@ pub const EventRateLimiter = struct {
     }
 
     pub fn cleanup(self: *EventRateLimiter) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
-        const now = std.time.timestamp();
+        const now = nostr.io.timestamp();
         const window_start = now - WINDOW_SIZE;
-        var to_remove: std.ArrayListUnmanaged([]const u8) = .{};
+        var to_remove: std.ArrayListUnmanaged([]const u8) = .empty;
         defer to_remove.deinit(self.allocator);
 
         var iter = self.ip_buckets.iterator();

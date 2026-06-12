@@ -1,4 +1,10 @@
 const std = @import("std");
+const nostr = @import("nostr.zig");
+
+fn getenv(name: [*:0]const u8) ?[]const u8 {
+    const v = std.c.getenv(name) orelse return null;
+    return std.mem.sliceTo(v, 0);
+}
 
 pub const Config = struct {
     host: []const u8,
@@ -97,12 +103,10 @@ pub const Config = struct {
     pub fn load(allocator: std.mem.Allocator, path: []const u8) !Config {
         var config = defaults();
         config._allocator = allocator;
-        config._allocated = .{};
+        config._allocated = .empty;
 
-        const file = try std.fs.cwd().openFile(path, .{});
-        defer file.close();
-
-        const content = try file.readToEndAlloc(allocator, 1024 * 1024);
+        const io = nostr.io.io();
+        const content = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024));
         defer allocator.free(content);
 
         var section: []const u8 = "";
@@ -247,55 +251,55 @@ pub const Config = struct {
     }
 
     pub fn loadEnv(self: *Config) void {
-        if (std.posix.getenv("WISP_HOST")) |v| self.host = v;
-        if (std.posix.getenv("WISP_PORT")) |v| {
+        if (getenv("WISP_HOST")) |v| self.host = v;
+        if (getenv("WISP_PORT")) |v| {
             self.port = std.fmt.parseInt(u16, v, 10) catch self.port;
         }
-        if (std.posix.getenv("WISP_RELAY_NAME")) |v| self.name = v;
-        if (std.posix.getenv("WISP_STORAGE_PATH")) |v| self.storage_path = v;
-        if (std.posix.getenv("WISP_MAX_CONNECTIONS")) |v| {
+        if (getenv("WISP_RELAY_NAME")) |v| self.name = v;
+        if (getenv("WISP_STORAGE_PATH")) |v| self.storage_path = v;
+        if (getenv("WISP_MAX_CONNECTIONS")) |v| {
             self.max_connections = std.fmt.parseInt(u32, v, 10) catch self.max_connections;
         }
-        if (std.posix.getenv("WISP_AUTH_REQUIRED")) |v| {
+        if (getenv("WISP_AUTH_REQUIRED")) |v| {
             self.auth_required = std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "1");
         }
-        if (std.posix.getenv("WISP_AUTH_TO_WRITE")) |v| {
+        if (getenv("WISP_AUTH_TO_WRITE")) |v| {
             self.auth_to_write = std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "1");
         }
-        if (std.posix.getenv("WISP_RELAY_URL")) |v| self.relay_url = v;
-        if (std.posix.getenv("WISP_TRUST_PROXY")) |v| {
+        if (getenv("WISP_RELAY_URL")) |v| self.relay_url = v;
+        if (getenv("WISP_TRUST_PROXY")) |v| {
             self.trust_proxy = std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "1");
         }
-        if (std.posix.getenv("WISP_MAX_CONNECTIONS_PER_IP")) |v| {
+        if (getenv("WISP_MAX_CONNECTIONS_PER_IP")) |v| {
             self.max_connections_per_ip = std.fmt.parseInt(u32, v, 10) catch self.max_connections_per_ip;
         }
-        if (std.posix.getenv("WISP_EVENTS_PER_MINUTE")) |v| {
+        if (getenv("WISP_EVENTS_PER_MINUTE")) |v| {
             self.events_per_minute = std.fmt.parseInt(u32, v, 10) catch self.events_per_minute;
         }
-        if (std.posix.getenv("WISP_IDLE_SECONDS")) |v| {
+        if (getenv("WISP_IDLE_SECONDS")) |v| {
             self.idle_seconds = std.fmt.parseInt(u32, v, 10) catch self.idle_seconds;
         }
-        if (std.posix.getenv("WISP_IP_WHITELIST")) |v| self.ip_whitelist = v;
-        if (std.posix.getenv("WISP_IP_BLACKLIST")) |v| self.ip_blacklist = v;
-        if (std.posix.getenv("WISP_SPIDER_ENABLED")) |v| {
+        if (getenv("WISP_IP_WHITELIST")) |v| self.ip_whitelist = v;
+        if (getenv("WISP_IP_BLACKLIST")) |v| self.ip_blacklist = v;
+        if (getenv("WISP_SPIDER_ENABLED")) |v| {
             self.spider_enabled = std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "1");
         }
-        if (std.posix.getenv("WISP_SPIDER_RELAYS")) |v| self.spider_relays = v;
-        if (std.posix.getenv("WISP_SPIDER_ADMIN")) |v| self.spider_admin = v;
-        if (std.posix.getenv("WISP_SPIDER_PUBKEYS")) |v| self.spider_pubkeys = v;
-        if (std.posix.getenv("WISP_SPIDER_SYNC_INTERVAL")) |v| {
+        if (getenv("WISP_SPIDER_RELAYS")) |v| self.spider_relays = v;
+        if (getenv("WISP_SPIDER_ADMIN")) |v| self.spider_admin = v;
+        if (getenv("WISP_SPIDER_PUBKEYS")) |v| self.spider_pubkeys = v;
+        if (getenv("WISP_SPIDER_SYNC_INTERVAL")) |v| {
             self.spider_sync_interval = std.fmt.parseInt(u32, v, 10) catch self.spider_sync_interval;
         }
-        if (std.posix.getenv("WISP_NEGENTROPY_ENABLED")) |v| {
+        if (getenv("WISP_NEGENTROPY_ENABLED")) |v| {
             self.negentropy_enabled = std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "1");
         }
-        if (std.posix.getenv("WISP_NEGENTROPY_MAX_SYNC_EVENTS")) |v| {
+        if (getenv("WISP_NEGENTROPY_MAX_SYNC_EVENTS")) |v| {
             self.negentropy_max_sync_events = std.fmt.parseInt(u32, v, 10) catch self.negentropy_max_sync_events;
         }
-        if (std.posix.getenv("WISP_MIN_POW_DIFFICULTY")) |v| {
+        if (getenv("WISP_MIN_POW_DIFFICULTY")) |v| {
             self.min_pow_difficulty = std.fmt.parseInt(u8, v, 10) catch self.min_pow_difficulty;
         }
-        if (std.posix.getenv("WISP_ADMIN_PUBKEYS")) |v| self.admin_pubkeys = v;
+        if (getenv("WISP_ADMIN_PUBKEYS")) |v| self.admin_pubkeys = v;
     }
 
     pub fn deinit(self: *Config) void {

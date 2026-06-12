@@ -1,11 +1,12 @@
 const std = @import("std");
+const nostr = @import("nostr.zig");
 
 pub const QueryCache = struct {
     allocator: std.mem.Allocator,
     entries: std.AutoHashMap(CacheKey, CacheEntry),
     access_order: std.ArrayListUnmanaged(CacheKey),
     max_entries: usize,
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
     hits: u64 = 0,
     misses: u64 = 0,
     generation: u64 = 0,
@@ -28,9 +29,9 @@ pub const QueryCache = struct {
         return .{
             .allocator = allocator,
             .entries = std.AutoHashMap(CacheKey, CacheEntry).init(allocator),
-            .access_order = .{},
+            .access_order = .empty,
             .max_entries = MAX_ENTRIES,
-            .mutex = .{},
+            .mutex = .init,
         };
     }
 
@@ -47,12 +48,13 @@ pub const QueryCache = struct {
     }
 
     pub fn get(self: *QueryCache, kind: i32, limit: u32) ?[]const []const u8 {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         const key = CacheKey{ .kind = kind, .limit = limit };
         if (self.entries.get(key)) |entry| {
-            const now = std.time.timestamp();
+            const now = nostr.io.timestamp();
             if (now - entry.timestamp <= TTL_SECONDS and entry.generation == self.generation) {
                 self.hits += 1;
                 return entry.results;
@@ -64,8 +66,9 @@ pub const QueryCache = struct {
     }
 
     pub fn put(self: *QueryCache, kind: i32, limit: u32, results: []const []const u8) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         const key = CacheKey{ .kind = kind, .limit = limit };
 
@@ -89,15 +92,16 @@ pub const QueryCache = struct {
         self.entries.put(key, .{
             .results = results_copy,
             .generation = self.generation,
-            .timestamp = std.time.timestamp(),
+            .timestamp = nostr.io.timestamp(),
         }) catch return;
 
         self.access_order.append(self.allocator, key) catch {};
     }
 
     pub fn invalidate(self: *QueryCache) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
         self.generation +%= 1;
     }
 
@@ -129,8 +133,9 @@ pub const QueryCache = struct {
     }
 
     pub fn stats(self: *QueryCache) struct { hits: u64, misses: u64, entries: usize } {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
         return .{
             .hits = self.hits,
             .misses = self.misses,

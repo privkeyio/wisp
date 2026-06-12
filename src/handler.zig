@@ -215,7 +215,7 @@ pub const Handler = struct {
     }
 
     fn validateMessageStructure(message: []const u8) bool {
-        const trimmed = std.mem.trimRight(u8, message, " \t\r\n");
+        const trimmed = std.mem.trimEnd(u8, message, " \t\r\n");
         if (trimmed.len < 5) return false;
         if (trimmed[0] != '[') return false;
         if (trimmed[trimmed.len - 1] != ']') return false;
@@ -271,7 +271,7 @@ pub const Handler = struct {
             return;
         }
 
-        const now = std.time.timestamp();
+        const now = nostr.io.timestamp();
         const created = event.createdAt();
 
         if (created > now + self.config.max_future_seconds) {
@@ -567,7 +567,7 @@ pub const Handler = struct {
             return;
         }
 
-        const now = std.time.timestamp();
+        const now = nostr.io.timestamp();
         const created = event.createdAt();
         const time_diff = if (now > created) now - created else created - now;
         if (time_diff > 600) {

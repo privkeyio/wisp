@@ -8,6 +8,10 @@ const websocket = @import("websocket");
 const log = std.log.scoped(.spider);
 const negentropy = nostr.negentropy;
 
+fn milliTimestamp() i64 {
+    return @intCast(@divTrunc(nostr.io.nanoTimestamp(), std.time.ns_per_ms));
+}
+
 const BATCH_SIZE: usize = 20;
 const BATCH_CREATION_DELAY_MS: u64 = 500;
 const RECONNECT_DELAY_MS: u64 = 10_000;
@@ -25,9 +29,9 @@ pub const Spider = struct {
     broadcaster: *Broadcaster,
     running: std.atomic.Value(bool),
     global_shutdown: *std.atomic.Value(bool),
-    relays: std.StringArrayHashMap(RelayConn),
+    relays: std.StringArrayHashMapUnmanaged(RelayConn),
     follow_pubkeys: std.ArrayListUnmanaged([32]u8),
-    follow_mutex: std.Thread.Mutex,
+    follow_mutex: std.Io.Mutex,
     threads: std.ArrayListUnmanaged(std.Thread),
     ca_bundle: std.crypto.Certificate.Bundle,
 
@@ -45,14 +49,15 @@ pub const Spider = struct {
             .broadcaster = broadcaster,
             .running = std.atomic.Value(bool).init(false),
             .global_shutdown = global_shutdown,
-            .relays = std.StringArrayHashMap(RelayConn).init(allocator),
-            .follow_pubkeys = .{},
-            .follow_mutex = .{},
-            .threads = .{},
-            .ca_bundle = .{},
+            .relays = .empty,
+            .follow_pubkeys = .empty,
+            .follow_mutex = .init,
+            .threads = .empty,
+            .ca_bundle = .empty,
         };
 
-        try spider.ca_bundle.rescan(allocator);
+        const io = nostr.io.io();
+        try spider.ca_bundle.rescan(allocator, io, std.Io.Timestamp.now(io, .real));
 
         var relay_iter = std.mem.splitScalar(u8, config.spider_relays, ',');
         while (relay_iter.next()) |relay_url| {
@@ -60,7 +65,7 @@ pub const Spider = struct {
             if (trimmed.len == 0) continue;
 
             const url_copy = try allocator.dupe(u8, trimmed);
-            try spider.relays.put(url_copy, RelayConn.init(url_copy));
+            try spider.relays.put(allocator, url_copy, RelayConn.init(url_copy));
         }
 
         return spider;
@@ -71,7 +76,7 @@ pub const Spider = struct {
         for (self.relays.keys()) |key| {
             self.allocator.free(key);
         }
-        self.relays.deinit();
+        self.relays.deinit(self.allocator);
         self.follow_pubkeys.deinit(self.allocator);
         self.threads.deinit(self.allocator);
     }
@@ -112,7 +117,7 @@ pub const Spider = struct {
         var remaining = ms;
         while (remaining > 0 and self.shouldRun()) {
             const sleep_ms = @min(remaining, interval_ms);
-            std.Thread.sleep(sleep_ms * @as(u64, std.time.ns_per_ms));
+            std.Io.sleep(nostr.io.io(), .{ .nanoseconds = @intCast(sleep_ms * @as(u64, std.time.ns_per_ms)) }, .awake) catch {};
             remaining -|= sleep_ms;
         }
     }
@@ -134,8 +139,8 @@ pub const Spider = struct {
     }
 
     fn refreshFollowList(self: *Spider) void {
-        self.follow_mutex.lock();
-        defer self.follow_mutex.unlock();
+        self.follow_mutex.lockUncancelable(nostr.io.io());
+        defer self.follow_mutex.unlock(nostr.io.io());
 
         self.follow_pubkeys.clearRetainingCapacity();
 
@@ -145,9 +150,9 @@ pub const Spider = struct {
                 return;
             }
             log.info("No local kind 3 found, bootstrapping from remote relay...", .{});
-            self.follow_mutex.unlock();
+            self.follow_mutex.unlock(nostr.io.io());
             self.bootstrapKind3();
-            self.follow_mutex.lock();
+            self.follow_mutex.lockUncancelable(nostr.io.io());
             if (self.loadKind3FollowList()) {
                 log.info("Loaded {d} pubkeys from bootstrapped kind 3 contact list", .{self.follow_pubkeys.items.len});
                 return;
@@ -169,7 +174,7 @@ pub const Spider = struct {
 
             const parsed = parseRelayUrl(relay_url) orelse continue;
 
-            var client = websocket.Client.init(self.allocator, .{
+            var client = websocket.Client.init(nostr.io.io(), self.allocator, .{
                 .host = parsed.host,
                 .port = parsed.port,
                 .tls = parsed.use_tls,
@@ -192,10 +197,9 @@ pub const Spider = struct {
 
             var events_received: u64 = 0;
             var got_kind3 = false;
-            const bootstrap_start = std.time.milliTimestamp();
-            while (std.time.milliTimestamp() - bootstrap_start < 10_000) {
-                const message = client.read() catch |err| {
-                    if (err == error.WouldBlock) continue;
+            const bootstrap_start = milliTimestamp();
+            while (milliTimestamp() - bootstrap_start < 10_000) {
+                const message = client.read() catch {
                     break;
                 };
                 if (message) |msg| {
@@ -276,16 +280,16 @@ pub const Spider = struct {
             if (!self.shouldRun()) break;
 
             const old_count = blk: {
-                self.follow_mutex.lock();
-                defer self.follow_mutex.unlock();
+                self.follow_mutex.lockUncancelable(nostr.io.io());
+                defer self.follow_mutex.unlock(nostr.io.io());
                 break :blk self.follow_pubkeys.items.len;
             };
 
             self.refreshFollowList();
 
             const new_count = blk: {
-                self.follow_mutex.lock();
-                defer self.follow_mutex.unlock();
+                self.follow_mutex.lockUncancelable(nostr.io.io());
+                defer self.follow_mutex.unlock(nostr.io.io());
                 break :blk self.follow_pubkeys.items.len;
             };
 
@@ -302,7 +306,7 @@ pub const Spider = struct {
 
         while (self.shouldRun()) {
             if (conn.blackout_until > 0) {
-                const now = std.time.milliTimestamp();
+                const now = milliTimestamp();
                 if (now < conn.blackout_until) {
                     const wait_ms: u64 = @intCast(conn.blackout_until - now);
                     log.info("{s}: In blackout for {d}ms more", .{ relay_url, wait_ms });
@@ -314,9 +318,9 @@ pub const Spider = struct {
             }
 
             log.info("{s}: Connecting...", .{relay_url});
-            const connect_start = std.time.milliTimestamp();
+            const connect_start = milliTimestamp();
             const success = self.connectAndSubscribe(conn, relay_url);
-            const connection_duration = std.time.milliTimestamp() - connect_start;
+            const connection_duration = milliTimestamp() - connect_start;
 
             if (!self.shouldRun()) break;
 
@@ -337,7 +341,7 @@ pub const Spider = struct {
             }
 
             if (conn.reconnect_delay_ms >= MAX_RECONNECT_DELAY_MS) {
-                conn.blackout_until = std.time.milliTimestamp() + @as(i64, @intCast(BLACKOUT_MS));
+                conn.blackout_until = milliTimestamp() + @as(i64, @intCast(BLACKOUT_MS));
                 conn.reconnect_delay_ms = RECONNECT_DELAY_MS;
                 log.warn("{s}: Entering 24h blackout", .{relay_url});
             }
@@ -348,7 +352,7 @@ pub const Spider = struct {
 
     fn connectAndSubscribe(self: *Spider, conn: *RelayConn, relay_url: []const u8) bool {
         if (conn.isRateLimited()) {
-            const wait_ms: u64 = @intCast(@max(0, conn.rate_limit_until - std.time.milliTimestamp()));
+            const wait_ms: u64 = @intCast(@max(0, conn.rate_limit_until - milliTimestamp()));
             log.info("{s}: Rate limited, waiting {d}ms", .{ relay_url, wait_ms });
             self.interruptibleSleep(wait_ms);
             if (!self.shouldRun()) return false;
@@ -359,7 +363,7 @@ pub const Spider = struct {
             return false;
         };
 
-        var client = websocket.Client.init(self.allocator, .{
+        var client = websocket.Client.init(nostr.io.io(), self.allocator, .{
             .host = parsed.host,
             .port = parsed.port,
             .tls = parsed.use_tls,
@@ -389,7 +393,7 @@ pub const Spider = struct {
 
         log.info("{s}: Connected{s}", .{ relay_url, if (parsed.use_tls) " (TLS)" else "" });
         conn.state = .connected;
-        const now = std.time.milliTimestamp();
+        const now = milliTimestamp();
 
         client.readTimeout(1000) catch {};
 
@@ -417,21 +421,21 @@ pub const Spider = struct {
 
         self.readLoop(&client, relay_url);
 
-        conn.last_disconnect = std.time.milliTimestamp();
+        conn.last_disconnect = milliTimestamp();
         conn.state = .disconnected;
         return true;
     }
 
     fn performCatchup(self: *Spider, client: *websocket.Client, conn: *RelayConn, relay_url: []const u8) bool {
         const since_ts = conn.last_disconnect - CATCHUP_WINDOW_MS;
-        const until_ts = std.time.milliTimestamp() + CATCHUP_WINDOW_MS;
+        const until_ts = milliTimestamp() + CATCHUP_WINDOW_MS;
         const since_unix = @divFloor(since_ts, 1000);
         const until_unix = @divFloor(until_ts, 1000);
 
         log.info("{s}: Performing catch-up from {d} to {d}", .{ relay_url, since_unix, until_unix });
 
-        self.follow_mutex.lock();
-        defer self.follow_mutex.unlock();
+        self.follow_mutex.lockUncancelable(nostr.io.io());
+        defer self.follow_mutex.unlock(nostr.io.io());
 
         if (self.follow_pubkeys.items.len == 0) return true;
 
@@ -447,11 +451,11 @@ pub const Spider = struct {
         };
 
         var catchup_events: u64 = 0;
-        const catchup_start = std.time.milliTimestamp();
+        const catchup_start = milliTimestamp();
         const catchup_timeout_ms: i64 = 30_000;
         var read_error = false;
 
-        while (std.time.milliTimestamp() - catchup_start < catchup_timeout_ms) {
+        while (milliTimestamp() - catchup_start < catchup_timeout_ms) {
             const message = client.read() catch {
                 read_error = true;
                 break;
@@ -494,12 +498,12 @@ pub const Spider = struct {
     }
 
     fn performNegentropySync(self: *Spider, client: *websocket.Client, relay_url: []const u8, conn: *RelayConn) bool {
-        self.follow_mutex.lock();
+        self.follow_mutex.lockUncancelable(nostr.io.io());
         const pubkeys = self.allocator.dupe([32]u8, self.follow_pubkeys.items) catch {
-            self.follow_mutex.unlock();
+            self.follow_mutex.unlock(nostr.io.io());
             return true;
         };
-        self.follow_mutex.unlock();
+        self.follow_mutex.unlock(nostr.io.io());
         defer self.allocator.free(pubkeys);
 
         if (pubkeys.len == 0) return true;
@@ -549,15 +553,14 @@ pub const Spider = struct {
         };
 
         var neg_open_buf: [131072]u8 = undefined;
-        var fbs_neg = std.io.fixedBufferStream(&neg_open_buf);
-        const neg_writer = fbs_neg.writer();
+        var neg_writer = std.Io.Writer.fixed(&neg_open_buf);
         neg_writer.print("[\"NEG-OPEN\",\"neg-sync\",{s},\"", .{filter_json}) catch {
             log.err("{s}: NEG-OPEN message too large", .{relay_url});
             return true;
         };
         for (init_msg) |b| neg_writer.print("{x:0>2}", .{b}) catch return true;
         neg_writer.writeAll("\"]") catch return true;
-        const neg_open = fbs_neg.getWritten();
+        const neg_open = neg_writer.buffered();
 
         client.writeText(@constCast(neg_open)) catch |err| {
             log.err("{s}: Failed to send NEG-OPEN: {}", .{ relay_url, err });
@@ -566,28 +569,27 @@ pub const Spider = struct {
 
         client.readTimeout(1000) catch {};
 
-        var have_ids: std.ArrayListUnmanaged([32]u8) = .{};
+        var have_ids: std.ArrayListUnmanaged([32]u8) = .empty;
         defer have_ids.deinit(self.allocator);
-        var need_ids: std.ArrayListUnmanaged([32]u8) = .{};
+        var need_ids: std.ArrayListUnmanaged([32]u8) = .empty;
         defer need_ids.deinit(self.allocator);
 
-        const sync_start = std.time.milliTimestamp();
+        const sync_start = milliTimestamp();
         const initial_timeout_ms: i64 = 5_000;
         const sync_timeout_ms: i64 = 60_000;
         var rounds: usize = 0;
         var got_response = false;
         var connection_alive = true;
 
-        while (std.time.milliTimestamp() - sync_start < sync_timeout_ms) {
+        while (milliTimestamp() - sync_start < sync_timeout_ms) {
             if (!self.shouldRun()) return false;
 
-            if (!got_response and std.time.milliTimestamp() - sync_start > initial_timeout_ms) {
+            if (!got_response and milliTimestamp() - sync_start > initial_timeout_ms) {
                 log.warn("{s}: No negentropy response, disabling for this relay", .{relay_url});
                 conn.negentropy_supported = false;
                 return true;
             }
-            const message = client.read() catch |err| {
-                if (err == error.WouldBlock) continue;
+            const message = client.read() catch {
                 connection_alive = false;
                 break;
             };
@@ -624,8 +626,7 @@ pub const Spider = struct {
                     }
 
                     var neg_msg_buf: [131072]u8 = undefined;
-                    var fbs_msg = std.io.fixedBufferStream(&neg_msg_buf);
-                    const msg_writer = fbs_msg.writer();
+                    var msg_writer = std.Io.Writer.fixed(&neg_msg_buf);
                     msg_writer.writeAll("[\"NEG-MSG\",\"neg-sync\",\"") catch {
                         result.deinit();
                         continue;
@@ -640,7 +641,7 @@ pub const Spider = struct {
                     };
                     result.deinit();
 
-                    client.writeText(@constCast(fbs_msg.getWritten())) catch {
+                    client.writeText(@constCast(msg_writer.buffered())) catch {
                         connection_alive = false;
                         break;
                     };
@@ -682,8 +683,7 @@ pub const Spider = struct {
             const batch = ids[i..end];
 
             var msg_buf: [65536]u8 = undefined;
-            var fbs = std.io.fixedBufferStream(&msg_buf);
-            const writer = fbs.writer();
+            var writer = std.Io.Writer.fixed(&msg_buf);
 
             const req_msg = build_req: {
                 writer.writeAll("[\"REQ\",\"fetch\",{\"ids\":[") catch break :build_req null;
@@ -694,7 +694,7 @@ pub const Spider = struct {
                     writer.writeAll("\"") catch break :build_req null;
                 }
                 writer.writeAll("]}]") catch break :build_req null;
-                break :build_req fbs.getWritten();
+                break :build_req writer.buffered();
             };
 
             if (req_msg) |msg| {
@@ -707,12 +707,11 @@ pub const Spider = struct {
                 continue;
             }
 
-            const fetch_start = std.time.milliTimestamp();
+            const fetch_start = milliTimestamp();
             var read_error = false;
-            while (std.time.milliTimestamp() - fetch_start < 30_000) {
+            while (milliTimestamp() - fetch_start < 30_000) {
                 if (!self.shouldRun()) return true;
-                const message = client.read() catch |err| {
-                    if (err == error.WouldBlock) continue;
+                const message = client.read() catch {
                     read_error = true;
                     break;
                 };
@@ -745,8 +744,8 @@ pub const Spider = struct {
     }
 
     fn sendSubscriptions(self: *Spider, client: *websocket.Client, relay_url: []const u8) !void {
-        self.follow_mutex.lock();
-        defer self.follow_mutex.unlock();
+        self.follow_mutex.lockUncancelable(nostr.io.io());
+        defer self.follow_mutex.unlock(nostr.io.io());
 
         if (self.follow_pubkeys.items.len == 0) {
             log.warn("{s}: No pubkeys to subscribe to", .{relay_url});
@@ -779,7 +778,7 @@ pub const Spider = struct {
             i = end;
 
             if (i < self.follow_pubkeys.items.len) {
-                std.Thread.sleep(BATCH_CREATION_DELAY_MS * std.time.ns_per_ms);
+                std.Io.sleep(nostr.io.io(), .{ .nanoseconds = @intCast(BATCH_CREATION_DELAY_MS * std.time.ns_per_ms) }, .awake) catch {};
             }
         }
 
@@ -793,7 +792,6 @@ pub const Spider = struct {
 
         while (self.shouldRun()) {
             const message = client.read() catch |err| {
-                if (err == error.WouldBlock) continue;
                 if (err == error.Closed or err == error.ConnectionResetByPeer) {
                     log.info("{s}: Connection closed", .{relay_url});
                 } else {
@@ -958,14 +956,14 @@ const RelayConn = struct {
     }
 
     fn applyRateLimit(self: *RelayConn) void {
-        const now = std.time.milliTimestamp();
+        const now = milliTimestamp();
         self.rate_limit_until = now + @as(i64, @intCast(self.rate_limit_backoff_ms));
         log.warn("{s}: Rate limited, backing off for {d}ms", .{ self.url, self.rate_limit_backoff_ms });
         self.rate_limit_backoff_ms = @min(self.rate_limit_backoff_ms * 2, MAX_RATE_LIMIT_BACKOFF_MS);
     }
 
     fn isRateLimited(self: *const RelayConn) bool {
-        return std.time.milliTimestamp() < self.rate_limit_until;
+        return milliTimestamp() < self.rate_limit_until;
     }
 
     fn clearRateLimit(self: *RelayConn) void {
@@ -1018,8 +1016,7 @@ fn parseRelayUrl(url: []const u8) ?ParsedUrl {
 }
 
 fn buildReqMessage(buf: []u8, batch_idx: usize, pubkeys: [][32]u8) ![]u8 {
-    var fbs = std.io.fixedBufferStream(buf);
-    const writer = fbs.writer();
+    var writer = std.Io.Writer.fixed(buf);
 
     try writer.print("[\"REQ\",\"spider-batch-{d}\",", .{batch_idx});
 
@@ -1037,12 +1034,11 @@ fn buildReqMessage(buf: []u8, batch_idx: usize, pubkeys: [][32]u8) ![]u8 {
     }
     try writer.writeAll("]}]");
 
-    return fbs.getWritten();
+    return writer.buffered();
 }
 
 fn buildCatchupReqMessage(buf: []u8, pubkeys: [][32]u8, since: i64, until: i64) ![]u8 {
-    var fbs = std.io.fixedBufferStream(buf);
-    const writer = fbs.writer();
+    var writer = std.Io.Writer.fixed(buf);
 
     try writer.writeAll("[\"REQ\",\"catchup\",");
     try writer.writeAll("{\"authors\":[");
@@ -1058,12 +1054,11 @@ fn buildCatchupReqMessage(buf: []u8, pubkeys: [][32]u8, since: i64, until: i64) 
     }
     try writer.print("],\"since\":{d},\"until\":{d}}}]", .{ since, until });
 
-    return fbs.getWritten();
+    return writer.buffered();
 }
 
 fn buildNegentropyFilter(buf: []u8, pubkeys: [][32]u8) ![]u8 {
-    var fbs = std.io.fixedBufferStream(buf);
-    const writer = fbs.writer();
+    var writer = std.Io.Writer.fixed(buf);
 
     try writer.writeAll("{\"authors\":[");
     for (pubkeys, 0..) |pk, i| {
@@ -1072,7 +1067,7 @@ fn buildNegentropyFilter(buf: []u8, pubkeys: [][32]u8) ![]u8 {
     }
     try writer.writeAll("]}");
 
-    return fbs.getWritten();
+    return writer.buffered();
 }
 
 fn extractNegPayload(data: []const u8) ?[]const u8 {

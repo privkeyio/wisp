@@ -3,17 +3,16 @@
     .version = "0.2.2",
     .fingerprint = 0xc4bdec9fe6401a8d,
     .dependencies = .{
-        // websocket client for spider outbound connections.
-        // Pinned to a fixed commit (not refs/heads/master) so builds stay
-        // reproducible; master has since moved to Zig 0.16 APIs that do not
-        // compile under the Zig version this project targets.
+        // websocket.zig: client for spider outbound connections and the
+        // epoll worker-pool server. Pinned to a fixed commit for reproducible
+        // builds.
         .websocket = .{
-            .url = "https://github.com/karlseguin/websocket.zig/archive/97fefafa59cc78ce177cff540b8685cd7f699276.tar.gz",
-            .hash = "websocket-0.1.0-ZPISdRlzAwBB_Bz2UMMqxYqF6YEVTIBoFsbzwPUJTHIc",
+            .url = "https://github.com/karlseguin/websocket.zig/archive/6d309f7a9790030f2fc070323b5defc64a15c13b.tar.gz",
+            .hash = "websocket-0.1.0-ZPISdV_aBACU9pGuvrTQ2z8uxz_Sp8JnJgQaiGKQIx1l",
         },
         .nostr = .{
-            .url = "https://github.com/privkeyio/libnostr-z/archive/3322715dc9c75b4cb50087c14dad8b7996b31a82.tar.gz",
-            .hash = "nostr-0.1.8-JY6OcJ72CADZ8IIi9NQYOFFjj5Rldf-17TXKwv-Y9lY4",
+            .url = "https://github.com/privkeyio/libnostr-z/archive/refs/tags/v0.3.0.tar.gz",
+            .hash = "nostr-0.3.0-JY6OcJJ0DwDrcooJo6viPaiDg6ohNPie0wV10XykgQPE",
         },
     },
     .paths = .{

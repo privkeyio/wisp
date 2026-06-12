@@ -32,7 +32,7 @@ pub fn build(b: *std.Build) void {
 
     // System libraries
     exe.root_module.linkSystemLibrary("lmdb", .{});
-    exe.linkLibC();
+    exe.root_module.link_libc = true;
 
     b.installArtifact(exe);
 
@@ -50,10 +50,27 @@ pub fn build(b: *std.Build) void {
         }),
     });
     test_lmdb.root_module.linkSystemLibrary("lmdb", .{});
-    test_lmdb.linkLibC();
+    test_lmdb.root_module.link_libc = true;
     b.installArtifact(test_lmdb);
 
     const run_test_lmdb = b.addRunArtifact(test_lmdb);
     run_test_lmdb.step.dependOn(b.getInstallStep());
     b.step("test-lmdb", "Test LMDB bindings").dependOn(&run_test_lmdb.step);
+
+    const unit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "nostr", .module = nostr.module("nostr") },
+                .{ .name = "websocket", .module = websocket.module("websocket") },
+            },
+        }),
+    });
+    unit_tests.root_module.linkSystemLibrary("lmdb", .{});
+    unit_tests.root_module.link_libc = true;
+
+    const run_unit_tests = b.addRunArtifact(unit_tests);
+    b.step("test", "Run unit tests").dependOn(&run_unit_tests.step);
 }
