@@ -238,6 +238,49 @@ fn formatPeerIp(address: anytype, buf: *[64]u8) []const u8 {
     return formatted;
 }
 
+const PoolConfig = struct { workers: u16, pool: u16 };
+
+// Each httpz worker runs one epoll loop and dispatches connection work to its own
+// thread pool. httpz defaults to 1 worker, so the epoll/accept readiness loop is
+// single-threaded; scaling workers with CPU count (capped at 4) spreads that
+// syscall load across cores. The per-worker pool runs the WS message handlers, so
+// total handler concurrency is workers * pool. We split a fixed budget (httpz's
+// single-worker default of 32) across workers rather than running 32 per worker,
+// so extra workers buy epoll parallelism without multiplying thread/buffer memory
+// (4 workers * 32 = ~50 MB extra RSS otherwise). Floor division holds the total at
+// the budget when it divides evenly (1/2/4 workers) and just under it otherwise
+// (30 on a 3-CPU host). The pool floor of 4 keeps each pool usable should the
+// worker cap ever exceed the budget; at the current cap of 4 it never binds.
+fn computePoolConfig(cpu_count: usize) PoolConfig {
+    const total_handler_budget: usize = 32;
+    const worker_count = @max(@as(usize, 1), @min(cpu_count, 4));
+    const pool_count = @max(@as(usize, 4), @divTrunc(total_handler_budget, worker_count));
+    return .{ .workers = @intCast(worker_count), .pool = @intCast(pool_count) };
+}
+
+test computePoolConfig {
+    // 1 worker gets the full budget.
+    try std.testing.expectEqual(PoolConfig{ .workers = 1, .pool = 32 }, computePoolConfig(1));
+    // Budget splits evenly across 2 and 4 workers, holding the total at 32.
+    try std.testing.expectEqual(PoolConfig{ .workers = 2, .pool = 16 }, computePoolConfig(2));
+    try std.testing.expectEqual(PoolConfig{ .workers = 4, .pool = 8 }, computePoolConfig(4));
+    // 3 workers: floor division leaves the total just under budget (3 * 10 = 30).
+    try std.testing.expectEqual(PoolConfig{ .workers = 3, .pool = 10 }, computePoolConfig(3));
+    // Worker count is capped at 4, so more CPUs do not shrink the pool further.
+    try std.testing.expectEqual(PoolConfig{ .workers = 4, .pool = 8 }, computePoolConfig(8));
+    try std.testing.expectEqual(PoolConfig{ .workers = 4, .pool = 8 }, computePoolConfig(64));
+    // Degenerate cpu_count of 0 (e.g. getCpuCount failure fallback) still yields one worker.
+    try std.testing.expectEqual(PoolConfig{ .workers = 1, .pool = 32 }, computePoolConfig(0));
+
+    // Total handler concurrency never exceeds the budget for any reachable cpu_count.
+    var cpu: usize = 0;
+    while (cpu <= 128) : (cpu += 1) {
+        const cfg = computePoolConfig(cpu);
+        try std.testing.expect(@as(usize, cfg.workers) >= 1);
+        try std.testing.expect(@as(usize, cfg.workers) * @as(usize, cfg.pool) <= 32);
+    }
+}
+
 /// Owns the httpz server plus the per-IP limiter / filter / id counter that the
 /// App points into.
 pub const Server = struct {
@@ -284,22 +327,17 @@ pub const Server = struct {
         };
         const address = httpz.Config.Address{ .ip = ip };
 
-        // Each httpz worker runs one epoll loop and dispatches connection work
-        // to its own thread pool; a single connection is never processed by two
-        // threads at once. httpz defaults to 1 worker, so the epoll readiness
-        // loop is single-threaded; adding workers spreads that epoll/accept
-        // syscall load across cores. The per-worker thread pool runs the actual
-        // WS message handlers (REQ streaming, EVENT broadcast), which do
-        // blocking socket writes, so it stays at httpz's default of 32 to keep
-        // the slow-client tolerance the single-worker default already had.
+        // See computePoolConfig: workers scale with CPU count to spread epoll/accept
+        // syscalls, while the handler thread pool is split from a fixed budget so
+        // total handler concurrency does not multiply thread/buffer memory per worker.
         const cpu_count = std.Thread.getCpuCount() catch 1;
-        const worker_count: u16 = @intCast(@max(@as(usize, 1), @min(cpu_count, 4)));
+        const pool_config = computePoolConfig(cpu_count);
 
         self.httpz_server = try httpz.Server(App).init(io, allocator, .{
             .address = address,
             .request = .{ .max_body_size = 131072 },
-            .workers = .{ .count = worker_count },
-            .thread_pool = .{ .count = 32 },
+            .workers = .{ .count = pool_config.workers },
+            .thread_pool = .{ .count = pool_config.pool },
             .websocket = .{ .max_message_size = config.max_message_size },
         }, app);
 
