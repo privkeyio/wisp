@@ -1,32 +1,28 @@
 # wisp testing docs
 
-Tests should be run from the *root* of the project.
+Run all commands from the *root* of the project.
 
-## Prerequisites
+## Unit tests
 
-- [nostril](https://github.com/jb55/nostril) - tool for creating nostr events
+Inline Zig tests for parsing, filtering, rate limiting, NIP-86 dispatch, and the
+metrics endpoint:
 
-Build nostril:
+    zig build test
 
-    git clone https://github.com/jb55/nostril /tmp/nostril
-    cd /tmp/nostril && make
-    cp /tmp/nostril/nostril test/
+LMDB binding smoke test:
 
-## Tests for event writing, including replacements, deletions, etc:
+    zig build test-lmdb
 
-    perl test/writeTest.pl
+## Integration tests
 
-## Fuzz tests
+Shell scripts that exercise a running relay over the wire. Each takes the
+relay's URL (start a relay first, e.g. `./zig-out/bin/wisp`):
 
-Note that these tests need a well populated DB. For best coverage, use the [wellordered 500k](https://wiki.wellorder.net/wiki/nostr-datasets/) data-set:
+    bash tests/integration.sh ws://127.0.0.1:7777              # protocol, NIPs, CORS
+    bash tests/integration_restrict.sh ws://127.0.0.1:7777     # auth / protected / PoW
+    bash tests/integration_management.sh http://127.0.0.1:7777 # NIP-86 + IP block
+    bash tests/integration_negentropy.sh ws://A ws://B         # NIP-77 relay sync
+    bash tests/integration_spider.sh ws://A ws://B             # spider NIP-77 client
+    bash tests/integration_concurrency.sh ws://127.0.0.1:7777  # many concurrent conns
 
-    zstdcat ../nostr-dumps/nostr-wellorder-early-500k-v1.jsonl.zst | ./zig-out/bin/wisp import --db wisp-db-test/wisp.db
-
-If successful, these tests will run forever, so you can run them overnight to see if any errors occur.
-
-The tests are deterministic, but you can change the seed by setting the `SEED` env variable.
-
-These commands test the query engine, with and without `limit`:
-
-    perl test/filterFuzzTest.pl scan-limit
-    perl test/filterFuzzTest.pl scan
+These mirror the jobs in `.github/workflows/ci.yml`.
