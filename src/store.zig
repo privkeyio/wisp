@@ -517,7 +517,7 @@ pub const QueryIterator = struct {
                     iter.index_type = .pubkey;
                     @memcpy(iter.prefix[0..32], &authors[0]);
                     iter.prefix_len = 32;
-                    iter.skip_filter = (f.kinds() == null and f.ids() == null and !f.hasTagFilters() and f.search() == null);
+                    iter.skip_filter = (f.kinds() == null and f.ids() == null and !f.hasTagFilters() and f.search() == null and f.since() == 0 and f.until() == 0);
                     return iter;
                 }
             }
@@ -529,7 +529,7 @@ pub const QueryIterator = struct {
                         const kind_be = @byteSwap(@as(u32, @bitCast(kinds[0])));
                         @memcpy(iter.prefix[0..4], std.mem.asBytes(&kind_be));
                         iter.prefix_len = 4;
-                        iter.skip_filter = (f.search() == null);
+                        iter.skip_filter = (f.search() == null and f.since() == 0 and f.until() == 0);
                         return iter;
                     }
                 }
@@ -546,7 +546,7 @@ pub const QueryIterator = struct {
                                 iter.prefix[0] = tag_filter.letter;
                                 @memcpy(iter.prefix[1..33], &bytes);
                                 iter.prefix_len = 33;
-                                iter.skip_filter = (f.kinds() == null and f.authors() == null and f.ids() == null and f.search() == null);
+                                iter.skip_filter = (f.kinds() == null and f.authors() == null and f.ids() == null and f.search() == null and f.since() == 0 and f.until() == 0);
                             },
                             .string => {},
                         }
@@ -593,6 +593,19 @@ pub const QueryIterator = struct {
             };
 
             if (first_entry) |entry| {
+                // For the seeked indexes (kind/pubkey) the first entry is the
+                // greatest key <= the prefix max; if its prefix differs, there
+                // are no entries for this prefix (e.g. an empty kind whose seek
+                // fell back to .last on another kind). Without this, a
+                // wrong-prefix event leaks when skip_filter is set. The tag index
+                // is not seeked (it scans from .last), so the loop below does its
+                // prefix-checking there.
+                const seeked = self.index_type == .kind or self.index_type == .pubkey;
+                if (seeked and self.prefix_len > 0 and (entry.key.len < self.prefix_len or
+                    !std.mem.eql(u8, entry.key[0..self.prefix_len], self.prefix[0..self.prefix_len])))
+                {
+                    return null;
+                }
                 if (try self.processEntry(entry)) |json| {
                     return json;
                 }
