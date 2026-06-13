@@ -9,10 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Updated libnostr-z to v0.3.3
 - Updated libnostr-z to v0.1.6
 
 ### Fixed
 
+- No longer send `CLOSED` in reply to a client `CLOSE` (NIP-01)
 - Fixed config file argument parsing and inline comment handling
 - Fixed spider connection handling
 
