@@ -53,6 +53,9 @@ pub fn write(w: anytype, active_connections: u64) !void {
 }
 
 test write {
+    const conn_before = connections_total.load(.monotonic);
+    const bcast_before = events_broadcast.load(.monotonic);
+
     connectionOpened();
     eventBroadcast(3);
     eventBroadcast(0); // no-op: a zero-recipient broadcast must not move the counter
@@ -68,7 +71,11 @@ test write {
     // The active-connections gauge reflects the caller-supplied live count.
     try std.testing.expect(std.mem.indexOf(u8, out, "# TYPE wisp_connections_active gauge\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "wisp_connections_active 7\n") != null);
-    // Counters carry the accumulated process-global totals.
-    try std.testing.expect(std.mem.indexOf(u8, out, "wisp_connections_total 1\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "wisp_events_broadcast_total 3\n") != null);
+    // Counters are process-global atomics shared across the test binary, so assert
+    // the delta from this test's own calls rather than hard-coded absolute totals.
+    var line_buf: [128]u8 = undefined;
+    const conn_line = try std.fmt.bufPrint(&line_buf, "wisp_connections_total {d}\n", .{conn_before + 1});
+    try std.testing.expect(std.mem.indexOf(u8, out, conn_line) != null);
+    const bcast_line = try std.fmt.bufPrint(&line_buf, "wisp_events_broadcast_total {d}\n", .{bcast_before + 3});
+    try std.testing.expect(std.mem.indexOf(u8, out, bcast_line) != null);
 }

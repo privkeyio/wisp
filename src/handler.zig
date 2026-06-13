@@ -349,6 +349,7 @@ pub const Handler = struct {
 
         if (!result.stored) {
             const success = std.mem.startsWith(u8, result.message, "duplicate");
+            if (!success) metrics.eventRejected();
             self.replyOk(conn, id, success, result.message);
             return;
         }
@@ -379,9 +380,10 @@ pub const Handler = struct {
             return;
         };
 
-        _ = self.store.store(event, json) catch {};
+        const stored = if (self.store.store(event, json)) |r| r.stored else |_| false;
 
-        self.sendOk(conn, id, true, "");
+        self.replyOk(conn, id, true, "");
+        if (stored) metrics.eventStored();
 
         self.broadcaster.broadcast(event);
     }

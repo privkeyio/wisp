@@ -205,7 +205,10 @@ pub const WsConn = struct {
         errdefer connection.deinit();
 
         // Global connection limit + registry.
-        try app.subs.tryAddConnection(connection, app.config.max_connections);
+        app.subs.tryAddConnection(connection, app.config.max_connections) catch |err| {
+            metrics.rateLimited();
+            return err;
+        };
         metrics.connectionOpened();
 
         var self = WsConn{
