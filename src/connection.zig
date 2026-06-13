@@ -26,11 +26,7 @@ pub const Connection = struct {
     // writes internally, so both REQ streaming and broadcast use it directly.
     ws_conn: ?*websocket.Conn = null,
 
-    events_received: u64 = 0,
     events_sent: std.atomic.Value(u64) = .init(0),
-    event_timestamps: [256]i64 = undefined,
-    event_ts_head: u8 = 0,
-    event_ts_count: u8 = 0,
 
     client_ip: [64]u8 = undefined,
     client_ip_len: u8 = 0,
@@ -55,10 +51,7 @@ pub const Connection = struct {
         self.neg_sessions = std.StringHashMap(NegSession).init(self.arena.allocator());
         self.created_at = now;
         self.last_activity = .init(now);
-        self.events_received = 0;
         self.events_sent = .init(0);
-        self.event_ts_head = 0;
-        self.event_ts_count = 0;
         self.write_guard = .init(0);
         self.client_ip = undefined;
         self.client_ip_len = 0;
@@ -200,30 +193,6 @@ pub const Connection = struct {
         }
     }
 
-    pub fn checkEventRateLimit(self: *Connection, max_events_per_minute: u32) bool {
-        if (max_events_per_minute == 0) return true;
-        const now = nostr.io.timestamp();
-        const window_start = now - 60;
-        var count: u32 = 0;
-        var i: u8 = 0;
-        while (i < self.event_ts_count) : (i += 1) {
-            const idx = self.event_ts_head -% i -% 1;
-            if (self.event_timestamps[idx] >= window_start) {
-                count += 1;
-            }
-        }
-        return count < max_events_per_minute;
-    }
-
-    pub fn recordEvent(self: *Connection) void {
-        const now = nostr.io.timestamp();
-        self.event_timestamps[self.event_ts_head] = now;
-        self.event_ts_head +%= 1;
-        if (self.event_ts_count < 255) {
-            self.event_ts_count += 1;
-        }
-        self.events_received += 1;
-    }
 };
 
 pub const Subscription = struct {
@@ -243,35 +212,6 @@ fn eventJson(comptime kind: []const u8) []const u8 {
     return "[\"EVENT\",{\"id\":\"" ++ HID ++ "\",\"pubkey\":\"" ++ HPK ++
         "\",\"created_at\":1700000000,\"kind\":" ++ kind ++
         ",\"tags\":[],\"content\":\"hi\",\"sig\":\"" ++ HSIG ++ "\"}]";
-}
-
-test "checkEventRateLimit ring buffer" {
-    var conn: Connection = undefined;
-    conn.init(testing.allocator, 1);
-    defer conn.deinit();
-
-    // init() must zero the ring state; production allocates via create(),
-    // which does not apply field defaults.
-    try testing.expectEqual(@as(u8, 0), conn.event_ts_count);
-    try testing.expectEqual(@as(u8, 0), conn.event_ts_head);
-
-    // A zero limit disables rate limiting entirely.
-    try testing.expect(conn.checkEventRateLimit(0));
-    // An empty window is under any positive limit.
-    try testing.expect(conn.checkEventRateLimit(5));
-
-    var n: usize = 0;
-    while (n < 4) : (n += 1) conn.recordEvent();
-    try testing.expect(conn.checkEventRateLimit(5)); // 4 < 5
-    conn.recordEvent(); // 5th in the same window
-    try testing.expect(!conn.checkEventRateLimit(5)); // 5 is not < 5
-
-    // The 256-slot ring caps its in-window count at 255 no matter how many
-    // more arrive, so a limit above 255 can never be reached.
-    n = 0;
-    while (n < 300) : (n += 1) conn.recordEvent();
-    try testing.expect(!conn.checkEventRateLimit(255));
-    try testing.expect(conn.checkEventRateLimit(256));
 }
 
 test "addSubscription enforces max_subs" {
