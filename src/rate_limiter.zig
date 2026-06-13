@@ -208,8 +208,16 @@ pub const IpFilter = struct {
         if (map.contains(ip)) return true;
 
         var iter = map.keyIterator();
-        while (iter.next()) |prefix| {
-            if (std.mem.startsWith(u8, ip, prefix.*)) {
+        while (iter.next()) |entry| {
+            const e = entry.*;
+            // Only an entry written as an explicit prefix (trailing '.' or ':')
+            // matches by prefix, and then only at an octet/group boundary. A full
+            // address like "10.0.0.5" must match exactly, never as a prefix of
+            // "10.0.0.50", otherwise an allowlist entry silently admits a whole
+            // range and a blocklist entry over-blocks unrelated addresses.
+            if (e.len > 0 and (e[e.len - 1] == '.' or e[e.len - 1] == ':') and
+                std.mem.startsWith(u8, ip, e))
+            {
                 return true;
             }
         }
@@ -224,18 +232,22 @@ pub fn extractClientIp(
     trust_proxy: bool,
 ) []const u8 {
     if (trust_proxy) {
-        if (real_ip) |ip| {
-            if (ip.len > 0) {
-                return normalizeIp(ip);
-            }
-        }
-
+        // Prefer X-Forwarded-For: the trusted proxy appends the address it
+        // actually received from, so the rightmost entry is proxy-controlled.
+        // X-Real-IP is only a fallback because a client can set it when the proxy
+        // does not, which would let it spoof the key used for every per-IP control.
         if (forwarded_for) |xff| {
             if (xff.len > 0) {
                 if (std.mem.lastIndexOf(u8, xff, ",")) |comma| {
                     return normalizeIp(std.mem.trim(u8, xff[comma + 1 ..], " "));
                 }
                 return normalizeIp(xff);
+            }
+        }
+
+        if (real_ip) |ip| {
+            if (ip.len > 0) {
+                return normalizeIp(ip);
             }
         }
     }
@@ -263,10 +275,42 @@ fn normalizeIp(ip: []const u8) []const u8 {
 }
 
 test "extractClientIp" {
+    // Proxy headers ignored unless trust_proxy is set.
     try std.testing.expectEqualStrings("192.168.1.1", extractClientIp(null, null, "192.168.1.1:8080", false));
     try std.testing.expectEqualStrings("10.0.0.1", extractClientIp("1.2.3.4", null, "10.0.0.1:8080", false));
+    // Trusted: rightmost X-Forwarded-For entry (the hop the proxy appended).
     try std.testing.expectEqualStrings("10.0.0.1", extractClientIp("1.2.3.4, 10.0.0.1", null, "127.0.0.1:8080", true));
-    try std.testing.expectEqualStrings("5.6.7.8", extractClientIp("1.2.3.4", "5.6.7.8", "127.0.0.1:8080", true));
+    // X-Forwarded-For is preferred over client-settable X-Real-IP.
+    try std.testing.expectEqualStrings("1.2.3.4", extractClientIp("1.2.3.4", "5.6.7.8", "127.0.0.1:8080", true));
+    // X-Real-IP is used only when no X-Forwarded-For is present.
+    try std.testing.expectEqualStrings("5.6.7.8", extractClientIp(null, "5.6.7.8", "127.0.0.1:8080", true));
+}
+
+test "IpFilter full address matches exactly, not as a prefix" {
+    var f = IpFilter.init(std.testing.allocator);
+    defer f.deinit();
+    try f.loadWhitelist("10.0.0.5");
+    try std.testing.expect(f.isAllowed("10.0.0.5"));
+    // The bug: "10.0.0.5" must not admit "10.0.0.50"/"10.0.0.55".
+    try std.testing.expect(!f.isAllowed("10.0.0.50"));
+    try std.testing.expect(!f.isAllowed("10.0.0.55"));
+}
+
+test "IpFilter trailing-dot entry is an explicit subnet prefix" {
+    var f = IpFilter.init(std.testing.allocator);
+    defer f.deinit();
+    try f.loadWhitelist("10.0.0.");
+    try std.testing.expect(f.isAllowed("10.0.0.5"));
+    try std.testing.expect(f.isAllowed("10.0.0.50"));
+    try std.testing.expect(!f.isAllowed("10.0.1.5"));
+}
+
+test "IpFilter blacklist does not over-block on shared prefix" {
+    var f = IpFilter.init(std.testing.allocator);
+    defer f.deinit();
+    try f.loadBlacklist("1.2.3.4");
+    try std.testing.expect(!f.isAllowed("1.2.3.4"));
+    try std.testing.expect(f.isAllowed("1.2.3.40"));
 }
 
 test "normalizeIp" {

@@ -174,7 +174,10 @@ pub fn main(init: std.process.Init) !void {
     var event_limiter = rate_limiter.EventRateLimiter.init(allocator, config.events_per_minute);
     defer event_limiter.deinit();
 
-    var handler = Handler.init(allocator, &config, &store, &subs, &broadcaster, &event_limiter, &g_shutdown, &mgmt_store);
+    var query_limiter = rate_limiter.EventRateLimiter.init(allocator, config.queries_per_minute);
+    defer query_limiter.deinit();
+
+    var handler = Handler.init(allocator, &config, &store, &subs, &broadcaster, &event_limiter, &query_limiter, &g_shutdown, &mgmt_store);
 
     var server: Server = undefined;
     try server.init(allocator, init.io, &config, &handler, &subs, &g_shutdown, &nip86_handler);
@@ -218,7 +221,7 @@ pub fn main(init: std.process.Init) !void {
     // Mandatory: the cleanup thread also drives graceful shutdown (it calls
     // server.stop() after observing the flag the signal handler sets). Without it
     // running, a SIGINT/SIGTERM would set the flag but nothing would unblock listen().
-    const cleanup_thread = try std.Thread.spawn(.{}, storeCleanupThread, .{ &server, &store, &config, &subs, &g_shutdown, &server.conn_limiter, &event_limiter });
+    const cleanup_thread = try std.Thread.spawn(.{}, storeCleanupThread, .{ &server, &store, &config, &subs, &g_shutdown, &server.conn_limiter, &event_limiter, &query_limiter });
     defer cleanup_thread.join();
 
     try server.listen();
@@ -226,7 +229,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("Shutdown complete", .{});
 }
 
-fn storeCleanupThread(server: *Server, store: *Store, config: *const Config, subs: *Subscriptions, shutdown: *std.atomic.Value(bool), conn_limiter: *rate_limiter.ConnectionLimiter, event_limiter: *rate_limiter.EventRateLimiter) void {
+fn storeCleanupThread(server: *Server, store: *Store, config: *const Config, subs: *Subscriptions, shutdown: *std.atomic.Value(bool), conn_limiter: *rate_limiter.ConnectionLimiter, event_limiter: *rate_limiter.EventRateLimiter, query_limiter: *rate_limiter.EventRateLimiter) void {
     const check_interval_ns: u64 = std.time.ns_per_s;
     const hour_checks: u64 = 3600;
     const limiter_cleanup_checks: u64 = 300;
@@ -256,6 +259,7 @@ fn storeCleanupThread(server: *Server, store: *Store, config: *const Config, sub
         if (checks % limiter_cleanup_checks == 0) {
             conn_limiter.cleanup();
             event_limiter.cleanup();
+            query_limiter.cleanup();
         }
 
         if (checks < hour_checks) continue;

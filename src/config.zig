@@ -31,6 +31,8 @@ pub const Config = struct {
     storage_map_size_mb: u32,
     idle_seconds: u32,
     events_per_minute: u32,
+    // Per-IP limit on expensive query messages (REQ/COUNT/NEG_OPEN). 0 disables.
+    queries_per_minute: u32,
     deleted_retention_days: u32,
 
     auth_required: bool,
@@ -83,6 +85,7 @@ pub const Config = struct {
             .storage_map_size_mb = 10240,
             .idle_seconds = 300,
             .events_per_minute = 120,
+            .queries_per_minute = 300,
             .deleted_retention_days = 90,
             .auth_required = false,
             .auth_to_write = false,
@@ -204,6 +207,8 @@ pub const Config = struct {
         } else if (std.mem.eql(u8, section, "rate_limits")) {
             if (std.mem.eql(u8, key, "events_per_minute")) {
                 self.events_per_minute = try std.fmt.parseInt(u32, value, 10);
+            } else if (std.mem.eql(u8, key, "queries_per_minute")) {
+                self.queries_per_minute = try std.fmt.parseInt(u32, value, 10);
             }
         } else if (std.mem.eql(u8, section, "auth")) {
             if (std.mem.eql(u8, key, "required")) {
@@ -285,6 +290,9 @@ pub const Config = struct {
         }
         if (getenv("WISP_EVENTS_PER_MINUTE")) |v| {
             self.events_per_minute = std.fmt.parseInt(u32, v, 10) catch self.events_per_minute;
+        }
+        if (getenv("WISP_QUERIES_PER_MINUTE")) |v| {
+            self.queries_per_minute = std.fmt.parseInt(u32, v, 10) catch self.queries_per_minute;
         }
         if (getenv("WISP_IDLE_SECONDS")) |v| {
             self.idle_seconds = std.fmt.parseInt(u32, v, 10) catch self.idle_seconds;
