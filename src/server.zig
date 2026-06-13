@@ -275,11 +275,15 @@ const PoolConfig = struct { workers: u16, pool: u16 };
 //
 // configured_workers comes from config.workers: 0 keeps the CPU-derived default,
 // any positive value overrides it (a personal or memory-constrained relay can set
-// 1 to shed the extra per-worker buffer pools and threads).
+// 1 to shed the extra per-worker buffer pools and threads). The override is clamped
+// to max_workers so a typo (e.g. workers = 65535) cannot spawn tens of thousands of
+// threads and buffer pools, which would defeat the memory budget this feature exists
+// to protect.
 fn computePoolConfig(cpu_count: usize, configured_workers: u16) PoolConfig {
     const total_handler_budget: usize = 32;
+    const max_workers: usize = 64;
     const worker_count = if (configured_workers > 0)
-        @as(usize, configured_workers)
+        @min(@as(usize, configured_workers), max_workers)
     else
         @max(@as(usize, 1), @min(cpu_count, 4));
     const pool_count = @max(@as(usize, 4), @divTrunc(total_handler_budget, worker_count));
@@ -305,6 +309,9 @@ test computePoolConfig {
     try std.testing.expectEqual(PoolConfig{ .workers = 2, .pool = 16 }, computePoolConfig(16, 2));
     // The budget still splits across configured workers, with the pool floor of 4.
     try std.testing.expectEqual(PoolConfig{ .workers = 16, .pool = 4 }, computePoolConfig(16, 16));
+    // The override is clamped at 64, so a runaway value cannot spawn unbounded workers.
+    try std.testing.expectEqual(PoolConfig{ .workers = 64, .pool = 4 }, computePoolConfig(4, 64));
+    try std.testing.expectEqual(PoolConfig{ .workers = 64, .pool = 4 }, computePoolConfig(4, 65535));
 
     // Total handler concurrency never exceeds the budget on the auto path.
     var cpu: usize = 0;
