@@ -9,6 +9,7 @@ const NegSession = connection.NegSession;
 const nostr = @import("nostr.zig");
 const rate_limiter = @import("rate_limiter.zig");
 const ManagementStore = @import("management_store.zig").ManagementStore;
+const metrics = @import("relay_metrics.zig");
 
 fn isKindOnlyQuery(f: *const nostr.Filter) bool {
     const kinds = f.kinds() orelse return false;
@@ -256,6 +257,7 @@ pub const Handler = struct {
         }
 
         if (!self.event_limiter.checkAndRecord(conn.getClientIp())) {
+            metrics.rateLimited();
             self.sendOk(conn, id, false, "rate-limited: too many events");
             return;
         }
@@ -400,6 +402,7 @@ pub const Handler = struct {
     }
 
     fn handleReq(self: *Handler, conn: *Connection, msg: *nostr.ClientMsg) void {
+        metrics.reqReceived();
         const sub_id_raw = msg.subscriptionId();
 
         if (sub_id_raw.len == 0 or sub_id_raw.len > 64) {
@@ -716,6 +719,7 @@ pub const Handler = struct {
     }
 
     fn sendOk(self: *Handler, conn: *Connection, event_id: *const [32]u8, success: bool, message: []const u8) void {
+        if (success) metrics.eventStored() else metrics.eventRejected();
         if (self.shutdown.load(.acquire)) return;
         var buf: [512]u8 = undefined;
         const msg = nostr.RelayMsg.ok(event_id, success, message, &buf) catch return;

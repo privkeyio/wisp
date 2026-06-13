@@ -45,6 +45,14 @@ For more options, see `wisp.toml.example`.
 * LMDB storage (no external database)
 * Spider mode for syncing events from external relays
 * Import/export to JSONL
+* Prometheus metrics at `GET /metrics`
+
+## Monitoring
+
+Operational metrics are exposed in Prometheus format at `GET /metrics` on the
+relay's port (connections, events stored/rejected/broadcast, REQ count, rate
+limiting). The endpoint honors the relay's IP allowlist/blocklist, so restrict
+it there or at your reverse proxy/firewall if you don't want it public.
 
 ## Import/Export
 
