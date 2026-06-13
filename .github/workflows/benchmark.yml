@@ -45,7 +45,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p /tmp/wisp-data
-          WISP_STORAGE_PATH=/tmp/wisp-data/wisp.lmdb ./zig-out/bin/wisp &
+          WISP_EVENTS_PER_MINUTE=100000 WISP_QUERIES_PER_MINUTE=100000 \
+            WISP_STORAGE_PATH=/tmp/wisp-data/wisp.lmdb ./zig-out/bin/wisp &
           WISP_PID=$!
           trap 'kill ${WISP_PID} 2>/dev/null || true' EXIT
 

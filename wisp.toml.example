@@ -58,7 +58,9 @@ idle_seconds = 300
 # Restrict which peers are trusted to a proxy IP/prefix list; empty trusts any peer.
 # trusted_proxies = "127.0.0.1,10.0.0."
 # max_connections_per_ip = 10
-# ip_whitelist = "192.168.1,10.0.0"
+# Prefix entries must end in '.' (IPv4) or ':' (IPv6); entries without a trailing
+# separator match exactly. CIDR and '*' wildcards are not supported.
+# ip_whitelist = "192.168.1.,10.0.0."
 # ip_blacklist = ""
 
 [spider]

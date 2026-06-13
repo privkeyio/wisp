@@ -225,10 +225,10 @@ pub const IpFilter = struct {
         if (map.contains(ip)) return true;
 
         var iter = map.keyIterator();
-        while (iter.next()) |entry| {
-            const e = entry.*;
-            if (e.len == 0) continue;
-            const last = e[e.len - 1];
+        while (iter.next()) |key| {
+            const prefix = key.*;
+            if (prefix.len == 0) continue;
+            const last = prefix[prefix.len - 1];
             // Only an entry written as an explicit prefix (trailing '.' or ':')
             // matches by prefix, and then only at an octet/group boundary. A full
             // address like "10.0.0.5" must match exactly, never as a prefix of
@@ -237,8 +237,8 @@ pub const IpFilter = struct {
             if (last != '.' and last != ':') continue;
             // A complete IPv6 address can end in ':' (via "::"); such an entry is an
             // exact match (handled above), not a subnet prefix.
-            if (last == ':' and isCompleteIp6(e)) continue;
-            if (std.mem.startsWith(u8, ip, e)) return true;
+            if (last == ':' and isCompleteIp6(prefix)) continue;
+            if (std.mem.startsWith(u8, ip, prefix)) return true;
         }
         return false;
     }
@@ -290,7 +290,22 @@ pub fn extractClientIp(
 fn bucketKey(ip: []const u8, buf: *[19]u8) []const u8 {
     if (std.mem.count(u8, ip, ":") < 2) return ip;
     const addr = std.Io.net.Ip6Address.parse(ip, 0) catch return ip;
-    const hex = std.fmt.bytesToHex(addr.bytes[0..8].*, .lower);
+    const b = addr.bytes;
+
+    // IPv4-mapped (::ffff:a.b.c.d): key on the embedded IPv4 so a dual-stack
+    // listener does not collapse every IPv4 client into one /64 bucket.
+    var zero_prefix = true;
+    for (b[0..10]) |x| {
+        if (x != 0) {
+            zero_prefix = false;
+            break;
+        }
+    }
+    if (zero_prefix and b[10] == 0xff and b[11] == 0xff) {
+        return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{ b[12], b[13], b[14], b[15] }) catch ip;
+    }
+
+    const hex = std.fmt.bytesToHex(b[0..8].*, .lower);
     return std.fmt.bufPrint(buf, "{s}/64", .{hex}) catch ip;
 }
 
