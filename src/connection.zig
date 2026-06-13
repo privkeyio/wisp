@@ -227,3 +227,90 @@ pub const Subscription = struct {
     filters: []const nostr.Filter,
     created_at: i64,
 };
+
+const testing = std.testing;
+
+// 64- and 128-hex-char fields so Event.parse accepts the structure.
+const HID = "0" ** 63 ++ "1";
+const HPK = "0" ** 63 ++ "2";
+const HSIG = "0" ** 127 ++ "3";
+
+fn eventJson(comptime kind: []const u8) []const u8 {
+    return "[\"EVENT\",{\"id\":\"" ++ HID ++ "\",\"pubkey\":\"" ++ HPK ++
+        "\",\"created_at\":1700000000,\"kind\":" ++ kind ++
+        ",\"tags\":[],\"content\":\"hi\",\"sig\":\"" ++ HSIG ++ "\"}]";
+}
+
+test "checkEventRateLimit ring buffer" {
+    var conn: Connection = undefined;
+    conn.init(testing.allocator, 1);
+    defer conn.deinit();
+
+    // A zero limit disables rate limiting entirely.
+    try testing.expect(conn.checkEventRateLimit(0));
+    // An empty window is under any positive limit.
+    try testing.expect(conn.checkEventRateLimit(5));
+
+    var n: usize = 0;
+    while (n < 4) : (n += 1) conn.recordEvent();
+    try testing.expect(conn.checkEventRateLimit(5)); // 4 < 5
+    conn.recordEvent(); // 5th in the same window
+    try testing.expect(!conn.checkEventRateLimit(5)); // 5 is not < 5
+
+    // The 256-slot ring caps its in-window count at 255 no matter how many
+    // more arrive, so a limit above 255 can never be reached.
+    n = 0;
+    while (n < 300) : (n += 1) conn.recordEvent();
+    try testing.expect(!conn.checkEventRateLimit(255));
+    try testing.expect(conn.checkEventRateLimit(256));
+}
+
+test "addSubscription enforces max_subs" {
+    var conn: Connection = undefined;
+    conn.init(testing.allocator, 1);
+    defer conn.deinit();
+
+    var req = try nostr.ClientMsg.parse("[\"REQ\",\"s\",{\"kinds\":[1]}]");
+    defer req.deinit();
+    const filters = try req.getFilters(conn.allocator());
+
+    try conn.addSubscription("a", filters, 2);
+    try conn.addSubscription("b", filters, 2);
+    try testing.expectError(error.TooManySubscriptions, conn.addSubscription("c", filters, 2));
+    try testing.expectEqual(@as(usize, 2), conn.subscriptions.count());
+}
+
+test "addSubscription replaces an existing id in place" {
+    var conn: Connection = undefined;
+    conn.init(testing.allocator, 1);
+    defer conn.deinit();
+
+    var req = try nostr.ClientMsg.parse("[\"REQ\",\"s\",{\"kinds\":[1]}]");
+    defer req.deinit();
+    const filters = try req.getFilters(conn.allocator());
+
+    try conn.addSubscription("a", filters, 5);
+    try conn.addSubscription("a", filters, 5);
+    try testing.expectEqual(@as(usize, 1), conn.subscriptions.count());
+}
+
+test "matchesEvent returns the matching sub id or null" {
+    var conn: Connection = undefined;
+    conn.init(testing.allocator, 1);
+    defer conn.deinit();
+
+    var req = try nostr.ClientMsg.parse("[\"REQ\",\"kind1\",{\"kinds\":[1]}]");
+    defer req.deinit();
+    const filters = try req.getFilters(conn.allocator());
+    try conn.addSubscription("kind1", filters, 5);
+
+    var ev1 = try nostr.ClientMsg.parse(eventJson("1"));
+    defer ev1.deinit();
+    const event1 = try ev1.getEvent();
+    try testing.expectEqualStrings("kind1", conn.matchesEvent(&event1).?);
+
+    var ev7 = try nostr.ClientMsg.parse(eventJson("7"));
+    defer ev7.deinit();
+    const event7 = try ev7.getEvent();
+    try testing.expect(conn.matchesEvent(&event7) == null);
+}

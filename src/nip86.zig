@@ -336,3 +336,63 @@ pub const Nip86Handler = struct {
         return false;
     }
 };
+
+const testing = std.testing;
+
+test "isAdmin matches the configured pubkey list" {
+    var config = Config.defaults();
+    config.admin_pubkeys = "00000000000000000000000000000000000000000000000000000000000000aa, 00000000000000000000000000000000000000000000000000000000000000bb";
+
+    var mgmt: ManagementStore = undefined;
+    var handler = Nip86Handler.init(testing.allocator, &config, &mgmt);
+
+    var admin: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&admin, "00000000000000000000000000000000000000000000000000000000000000bb");
+    try testing.expect(handler.isAdmin(&admin));
+
+    var stranger: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&stranger, "00000000000000000000000000000000000000000000000000000000000000cc");
+    try testing.expect(!handler.isAdmin(&stranger));
+
+    // An empty admin list denies everyone.
+    config.admin_pubkeys = "";
+    try testing.expect(!handler.isAdmin(&admin));
+}
+
+test "nip86 dispatch routing, param guards, and store round-trip" {
+    const Lmdb = @import("lmdb.zig").Lmdb;
+    const io = nostr.io.io();
+    const cwd = std.Io.Dir.cwd();
+    const db_path = "./test_nip86_db";
+    defer {
+        cwd.deleteFile(io, db_path) catch {};
+        cwd.deleteFile(io, db_path ++ "-lock") catch {};
+    }
+
+    var lmdb = try Lmdb.init(testing.allocator, db_path, 10);
+    defer lmdb.deinit();
+    var mgmt = try ManagementStore.init(testing.allocator, &lmdb);
+
+    var config = Config.defaults();
+    var handler = Nip86Handler.init(testing.allocator, &config, &mgmt);
+    defer handler.deinit();
+
+    // The static method list responds 200.
+    try testing.expectEqual(@as(u16, 200), handler.dispatch("supportedmethods", "[]").status);
+
+    // An unknown method is rejected.
+    try testing.expectEqual(@as(u16, 400), handler.dispatch("bogus", "[]").status);
+
+    // A malformed pubkey is rejected before the store is touched.
+    try testing.expectEqual(@as(u16, 400), handler.dispatch("banpubkey", "[\"notahexpubkey\"]").status);
+
+    // A valid pubkey bans successfully and the store reflects it.
+    const pk_hex = "00000000000000000000000000000000000000000000000000000000000000bb";
+    const r = handler.dispatch("banpubkey", "[\"" ++ pk_hex ++ "\"]");
+    defer if (r.owned) testing.allocator.free(r.body);
+    try testing.expectEqual(@as(u16, 200), r.status);
+
+    var pk: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&pk, pk_hex);
+    try testing.expect(mgmt.isPubkeyBanned(&pk));
+}
