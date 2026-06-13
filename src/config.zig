@@ -14,6 +14,10 @@ pub const Config = struct {
     pubkey: ?[]const u8,
     contact: ?[]const u8,
     max_connections: u32,
+    // Epoll worker threads. 0 means auto (scale with CPU, capped at 4). Lower it
+    // (e.g. 1) on a personal or memory-constrained relay: each worker carries its
+    // own buffer pools and thread subset, so fewer workers means a smaller footprint.
+    workers: u16,
     max_subscriptions: u32,
     max_filters: u32,
     max_message_size: u32,
@@ -65,6 +69,7 @@ pub const Config = struct {
             .pubkey = null,
             .contact = null,
             .max_connections = 1000,
+            .workers = 0,
             .max_subscriptions = 20,
             .max_filters = 10,
             .max_message_size = 65536,
@@ -163,6 +168,8 @@ pub const Config = struct {
         } else if (std.mem.eql(u8, section, "limits")) {
             if (std.mem.eql(u8, key, "max_connections")) {
                 self.max_connections = try std.fmt.parseInt(u32, value, 10);
+            } else if (std.mem.eql(u8, key, "workers")) {
+                self.workers = try std.fmt.parseInt(u16, value, 10);
             } else if (std.mem.eql(u8, key, "max_subscriptions")) {
                 self.max_subscriptions = try std.fmt.parseInt(u32, value, 10);
             } else if (std.mem.eql(u8, key, "max_filters")) {
@@ -272,6 +279,9 @@ pub const Config = struct {
         }
         if (getenv("WISP_MAX_CONNECTIONS_PER_IP")) |v| {
             self.max_connections_per_ip = std.fmt.parseInt(u32, v, 10) catch self.max_connections_per_ip;
+        }
+        if (getenv("WISP_WORKERS")) |v| {
+            self.workers = std.fmt.parseInt(u16, v, 10) catch self.workers;
         }
         if (getenv("WISP_EVENTS_PER_MINUTE")) |v| {
             self.events_per_minute = std.fmt.parseInt(u32, v, 10) catch self.events_per_minute;

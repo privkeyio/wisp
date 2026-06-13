@@ -23,6 +23,9 @@ path = "./data"
 
 [limits]
 max_connections = 1000
+# Epoll worker threads. 0 = auto (scales with CPU, capped at 4). Set to 1 on a
+# personal or memory-constrained relay to shed per-worker buffers and threads.
+workers = 0
 max_subscriptions = 20
 max_filters = 10
 max_message_size = 65536
