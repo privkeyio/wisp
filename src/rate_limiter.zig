@@ -281,12 +281,17 @@ pub const EventRateLimiter = struct {
     ip_buckets: std.StringHashMap(EventBucket),
     events_per_minute: u32,
 
-    const WINDOW_SIZE: usize = 60;
+    // Idle buckets are reclaimed after this many seconds; a bucket idle for a
+    // full window has refilled to capacity, so dropping it is indistinguishable
+    // from a fresh IP.
+    const IDLE_SECONDS: i64 = 60;
 
+    // Token bucket per IP: capacity is events_per_minute, refilled at
+    // events_per_minute/60 tokens per second. O(1) state, so any configured
+    // limit is enforced (the previous 256-slot ring silently capped at 255).
     const EventBucket = struct {
-        timestamps: [256]i64,
-        head: u8,
-        count: u8,
+        tokens: f64,
+        last_refill: i64,
     };
 
     pub fn init(allocator: std.mem.Allocator, events_per_minute: u32) EventRateLimiter {
@@ -308,44 +313,34 @@ pub const EventRateLimiter = struct {
 
     pub fn checkAndRecord(self: *EventRateLimiter, ip: []const u8) bool {
         if (self.events_per_minute == 0) return true;
+        return self.checkAndRecordAt(ip, nostr.io.timestamp());
+    }
 
+    fn checkAndRecordAt(self: *EventRateLimiter, ip: []const u8, now: i64) bool {
         const io = nostr.io.io();
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
-        const now = nostr.io.timestamp();
-        const window_start = now - WINDOW_SIZE;
+        const capacity: f64 = @floatFromInt(self.events_per_minute);
+        const refill_per_sec: f64 = capacity / 60.0;
 
         if (self.ip_buckets.getPtr(ip)) |bucket| {
-            var count: u32 = 0;
-            var i: u8 = 0;
-            while (i < bucket.count) : (i += 1) {
-                const idx = bucket.head -% i -% 1;
-                if (bucket.timestamps[idx] >= window_start) {
-                    count += 1;
-                }
+            const elapsed: f64 = @floatFromInt(@max(@as(i64, 0), now - bucket.last_refill));
+            bucket.tokens = @min(capacity, bucket.tokens + elapsed * refill_per_sec);
+            bucket.last_refill = now;
+            if (bucket.tokens >= 1.0) {
+                bucket.tokens -= 1.0;
+                return true;
             }
-
-            if (count >= self.events_per_minute) {
-                return false;
-            }
-
-            bucket.timestamps[bucket.head] = now;
-            bucket.head +%= 1;
-            if (bucket.count < 255) {
-                bucket.count += 1;
-            }
-            return true;
+            return false;
         }
 
+        // First event from this IP: start with a full bucket, then consume one.
         const ip_copy = self.allocator.dupe(u8, ip) catch return false;
-        var new_bucket = EventBucket{
-            .timestamps = undefined,
-            .head = 1,
-            .count = 1,
-        };
-        new_bucket.timestamps[0] = now;
-        self.ip_buckets.put(ip_copy, new_bucket) catch {
+        self.ip_buckets.put(ip_copy, .{
+            .tokens = capacity - 1.0,
+            .last_refill = now,
+        }) catch {
             self.allocator.free(ip_copy);
             return false;
         };
@@ -353,27 +348,20 @@ pub const EventRateLimiter = struct {
     }
 
     pub fn cleanup(self: *EventRateLimiter) void {
+        self.cleanupAt(nostr.io.timestamp());
+    }
+
+    fn cleanupAt(self: *EventRateLimiter, now: i64) void {
         const io = nostr.io.io();
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
-        const now = nostr.io.timestamp();
-        const window_start = now - WINDOW_SIZE;
         var to_remove: std.ArrayListUnmanaged([]const u8) = .empty;
         defer to_remove.deinit(self.allocator);
 
         var iter = self.ip_buckets.iterator();
         while (iter.next()) |entry| {
-            var has_recent = false;
-            var i: u8 = 0;
-            while (i < entry.value_ptr.count) : (i += 1) {
-                const idx = entry.value_ptr.head -% i -% 1;
-                if (entry.value_ptr.timestamps[idx] >= window_start) {
-                    has_recent = true;
-                    break;
-                }
-            }
-            if (!has_recent) {
+            if (now - entry.value_ptr.last_refill >= IDLE_SECONDS) {
                 to_remove.append(self.allocator, entry.key_ptr.*) catch continue;
             }
         }
@@ -384,3 +372,88 @@ pub const EventRateLimiter = struct {
         }
     }
 };
+
+test "EventRateLimiter enforces a limit above 255" {
+    var limiter = EventRateLimiter.init(std.testing.allocator, 300);
+    defer limiter.deinit();
+
+    // The bucket holds a full minute's capacity, so a burst within the same
+    // second allows up to 300 events and throttles the rest. The old 256-slot
+    // ring capped its count at 255, so a 300/min limit never tripped and all
+    // 400 would have passed.
+    var allowed: u32 = 0;
+    var i: u32 = 0;
+    while (i < 400) : (i += 1) {
+        if (limiter.checkAndRecord("1.2.3.4")) allowed += 1;
+    }
+    try std.testing.expect(allowed >= 300); // limit honored, not over-throttled
+    try std.testing.expect(allowed < 400); // and actually throttled
+}
+
+test "EventRateLimiter is disabled when the limit is zero" {
+    var limiter = EventRateLimiter.init(std.testing.allocator, 0);
+    defer limiter.deinit();
+    var i: u32 = 0;
+    while (i < 500) : (i += 1) {
+        try std.testing.expect(limiter.checkAndRecord("9.9.9.9"));
+    }
+}
+
+test "EventRateLimiter refills tokens over time" {
+    var limiter = EventRateLimiter.init(std.testing.allocator, 60); // 1 token/sec
+    defer limiter.deinit();
+
+    // Drain the full bucket within the same second.
+    var allowed: u32 = 0;
+    var i: u32 = 0;
+    while (i < 60) : (i += 1) {
+        if (limiter.checkAndRecordAt("1.2.3.4", 1000)) allowed += 1;
+    }
+    try std.testing.expectEqual(@as(u32, 60), allowed);
+    try std.testing.expect(!limiter.checkAndRecordAt("1.2.3.4", 1000)); // empty now
+
+    // After 10 seconds, ~10 tokens have refilled.
+    allowed = 0;
+    i = 0;
+    while (i < 20) : (i += 1) {
+        if (limiter.checkAndRecordAt("1.2.3.4", 1010)) allowed += 1;
+    }
+    try std.testing.expectEqual(@as(u32, 10), allowed);
+}
+
+test "EventRateLimiter tracks IPs independently" {
+    var limiter = EventRateLimiter.init(std.testing.allocator, 5);
+    defer limiter.deinit();
+
+    // Drain the first IP completely.
+    var i: u32 = 0;
+    while (i < 5) : (i += 1) {
+        try std.testing.expect(limiter.checkAndRecordAt("1.1.1.1", 1000));
+    }
+    try std.testing.expect(!limiter.checkAndRecordAt("1.1.1.1", 1000));
+
+    // A different IP is unaffected and gets its own full bucket.
+    i = 0;
+    while (i < 5) : (i += 1) {
+        try std.testing.expect(limiter.checkAndRecordAt("2.2.2.2", 1000));
+    }
+    try std.testing.expect(!limiter.checkAndRecordAt("2.2.2.2", 1000));
+}
+
+test "EventRateLimiter cleanup reclaims only idle buckets" {
+    var limiter = EventRateLimiter.init(std.testing.allocator, 10);
+    defer limiter.deinit();
+
+    try std.testing.expect(limiter.checkAndRecordAt("1.1.1.1", 1000));
+    try std.testing.expect(limiter.checkAndRecordAt("2.2.2.2", 1050));
+
+    // At t=1059, the first bucket is idle for 59s (<60), so nothing is reclaimed.
+    limiter.cleanupAt(1059);
+    try std.testing.expectEqual(@as(u32, 2), limiter.ip_buckets.count());
+
+    // At t=1060, the first bucket hits IDLE_SECONDS and is removed; the second
+    // (idle 10s) is retained.
+    limiter.cleanupAt(1060);
+    try std.testing.expectEqual(@as(u32, 1), limiter.ip_buckets.count());
+    try std.testing.expect(limiter.ip_buckets.contains("2.2.2.2"));
+}

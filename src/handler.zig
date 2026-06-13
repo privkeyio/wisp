@@ -355,7 +355,6 @@ pub const Handler = struct {
         }
 
         self.sendOk(conn, id, true, "");
-        conn.recordEvent();
 
         self.broadcaster.broadcast(&event);
     }
