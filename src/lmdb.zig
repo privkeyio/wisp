@@ -27,7 +27,20 @@ pub const Lmdb = struct {
     env: *c.MDB_env,
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, path: []const u8, map_size_mb: u32) !Lmdb {
+    pub const SyncMode = enum {
+        none,
+        meta,
+        full,
+
+        pub fn fromString(s: []const u8) ?SyncMode {
+            if (std.mem.eql(u8, s, "none")) return .none;
+            if (std.mem.eql(u8, s, "meta")) return .meta;
+            if (std.mem.eql(u8, s, "full")) return .full;
+            return null;
+        }
+    };
+
+    pub fn init(allocator: std.mem.Allocator, path: []const u8, map_size_mb: u32, sync_mode: SyncMode) !Lmdb {
         var env: ?*c.MDB_env = null;
 
         if (c.mdb_env_create(&env) != 0) {
@@ -56,7 +69,12 @@ pub const Lmdb = struct {
         const path_z = try allocator.dupeZ(u8, path);
         defer allocator.free(path_z);
 
-        const flags: c_uint = c.MDB_NOSUBDIR | c.MDB_NOSYNC | c.MDB_NOMETASYNC | c.MDB_WRITEMAP | c.MDB_NORDAHEAD;
+        var flags: c_uint = c.MDB_NOSUBDIR | c.MDB_WRITEMAP | c.MDB_NORDAHEAD;
+        switch (sync_mode) {
+            .none => flags |= c.MDB_NOSYNC | c.MDB_NOMETASYNC,
+            .meta => flags |= c.MDB_NOMETASYNC,
+            .full => {},
+        }
         const rc = c.mdb_env_open(env, path_z.ptr, flags, 0o600);
         if (rc != 0) {
             std.log.err("LMDB open failed: {}", .{rc});
