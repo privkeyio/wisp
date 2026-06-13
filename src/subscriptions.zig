@@ -1,6 +1,7 @@
 const std = @import("std");
 const Connection = @import("connection.zig").Connection;
 const nostr = @import("nostr.zig");
+const metrics = @import("relay_metrics.zig");
 
 pub const Subscriptions = struct {
     allocator: std.mem.Allocator,
@@ -180,12 +181,15 @@ pub const Subscriptions = struct {
             }
         }
 
+        var delivered: u64 = 0;
         for (pending.items) |item| {
             defer _ = item.conn.write_guard.fetchSub(1, .release);
             const msg = nostr.RelayMsg.event(item.sub_id, event, msg_buf) catch continue;
             item.conn.write(msg) catch {};
             _ = item.conn.events_sent.fetchAdd(1, .monotonic);
+            delivered += 1;
         }
+        metrics.eventBroadcast(delivered);
     }
 
     fn snapshotMatch(

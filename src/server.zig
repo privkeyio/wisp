@@ -10,6 +10,7 @@ const Connection = @import("connection.zig").Connection;
 const nip11 = @import("nip11.zig");
 const rate_limiter = @import("rate_limiter.zig");
 const Nip86Handler = @import("nip86.zig").Nip86Handler;
+const metrics = @import("relay_metrics.zig");
 
 const log = std.log.scoped(.server);
 
@@ -113,6 +114,19 @@ pub const App = struct {
         res.body = try res.arena.dupe(u8, result.body);
     }
 
+    /// GET /metrics — Prometheus operational metrics. Honors the same IP policy
+    /// as the relay, so an operator allowlist/blocklist also covers the scraper.
+    pub fn getMetrics(app: App, req: *httpz.Request, res: *httpz.Response) !void {
+        var ip_buf: [64]u8 = undefined;
+        if (app.ipDenied(app.clientIp(req, res, &ip_buf))) {
+            res.status = 403;
+            return;
+        }
+        res.header("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
+        const w = res.writer();
+        try metrics.write(w, app.subs.connectionCount());
+    }
+
     /// OPTIONS / — CORS preflight.
     pub fn optionsRoot(_: App, _: *httpz.Request, res: *httpz.Response) !void {
         res.status = 204;
@@ -165,7 +179,10 @@ pub const WsConn = struct {
         const ip = ctx.ip();
 
         // Atomic per-IP connection limit.
-        if (!app.conn_limiter.tryAcquireConnection(ip)) return error.TooManyConnectionsPerIp;
+        if (!app.conn_limiter.tryAcquireConnection(ip)) {
+            metrics.rateLimited();
+            return error.TooManyConnectionsPerIp;
+        }
         errdefer app.conn_limiter.removeConnection(ip);
 
         const connection = try app.allocator.create(Connection);
@@ -189,6 +206,7 @@ pub const WsConn = struct {
 
         // Global connection limit + registry.
         try app.subs.tryAddConnection(connection, app.config.max_connections);
+        metrics.connectionOpened();
 
         var self = WsConn{
             .app = app,
@@ -343,6 +361,7 @@ pub const Server = struct {
 
         var router = try self.httpz_server.router(.{});
         router.get("/", App.getRoot, .{});
+        router.get("/metrics", App.getMetrics, .{});
         router.post("/", App.postRoot, .{});
         router.options("/", App.optionsRoot, .{});
 
