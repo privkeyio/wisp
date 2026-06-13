@@ -127,13 +127,15 @@ pub const Connection = struct {
     }
 
     pub fn addSubscription(self: *Connection, sub_id: []const u8, filters: []const nostr.Filter, max_subs: u32) !void {
+        // Drop any existing subscription with this id first so replacing one at
+        // capacity is allowed; only genuinely new ids are subject to the limit.
+        self.removeSubscription(sub_id);
+
         if (self.subscriptions.count() >= max_subs) {
             return error.TooManySubscriptions;
         }
 
         const alloc = self.allocator();
-
-        self.removeSubscription(sub_id);
 
         const sub_id_copy = try alloc.dupe(u8, sub_id);
         const filters_copy = try alloc.alloc(nostr.Filter, filters.len);
@@ -299,6 +301,15 @@ test "addSubscription replaces an existing id in place" {
     try conn.addSubscription("a", filters, 5);
     try conn.addSubscription("a", filters, 5);
     try testing.expectEqual(@as(usize, 1), conn.subscriptions.count());
+
+    // Replacing an existing id is allowed even at capacity; only new ids are
+    // rejected once max_subs is reached.
+    try conn.addSubscription("b", filters, 2);
+    try testing.expectEqual(@as(usize, 2), conn.subscriptions.count());
+    try conn.addSubscription("a", filters, 2);
+    try testing.expectEqual(@as(usize, 2), conn.subscriptions.count());
+    try testing.expect(conn.subscriptions.contains("a"));
+    try testing.expectError(error.TooManySubscriptions, conn.addSubscription("c", filters, 2));
 }
 
 test "matchesEvent returns the matching sub id or null" {
