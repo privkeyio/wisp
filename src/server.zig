@@ -122,7 +122,7 @@ pub const App = struct {
             res.status = 403;
             return;
         }
-        res.content_type = .TEXT;
+        res.header("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
         const w = res.writer();
         try metrics.write(w, app.subs.connectionCount());
     }

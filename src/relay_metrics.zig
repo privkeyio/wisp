@@ -51,3 +51,24 @@ pub fn write(w: anytype, active_connections: u64) !void {
     try metric(w, "wisp_req_total", "REQ subscription messages received", "counter", reqs_total.load(.monotonic));
     try metric(w, "wisp_rate_limited_total", "Connections/events rejected by rate or connection limits", "counter", rate_limited.load(.monotonic));
 }
+
+test write {
+    connectionOpened();
+    eventBroadcast(3);
+    eventBroadcast(0); // no-op: a zero-recipient broadcast must not move the counter
+
+    var buf: [4096]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try write(&w, 7);
+    const out = w.buffered();
+
+    // Each metric emits HELP, TYPE, and a value line.
+    try std.testing.expect(std.mem.indexOf(u8, out, "# HELP wisp_connections_total Total WebSocket connections accepted\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "# TYPE wisp_connections_total counter\n") != null);
+    // The active-connections gauge reflects the caller-supplied live count.
+    try std.testing.expect(std.mem.indexOf(u8, out, "# TYPE wisp_connections_active gauge\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "wisp_connections_active 7\n") != null);
+    // Counters carry the accumulated process-global totals.
+    try std.testing.expect(std.mem.indexOf(u8, out, "wisp_connections_total 1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "wisp_events_broadcast_total 3\n") != null);
+}

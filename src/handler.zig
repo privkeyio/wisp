@@ -349,7 +349,7 @@ pub const Handler = struct {
 
         if (!result.stored) {
             const success = std.mem.startsWith(u8, result.message, "duplicate");
-            self.sendOk(conn, id, success, result.message);
+            self.replyOk(conn, id, success, result.message);
             return;
         }
 
@@ -555,7 +555,7 @@ pub const Handler = struct {
         const id = event.id();
 
         if (event.kind() != 22242) {
-            self.sendOk(conn, id, false, "invalid: AUTH event must be kind 22242");
+            self.replyOk(conn, id, false, "invalid: AUTH event must be kind 22242");
             return;
         }
 
@@ -563,7 +563,7 @@ pub const Handler = struct {
         const created = event.createdAt();
         const time_diff = if (now > created) now - created else created - now;
         if (time_diff > 600) {
-            self.sendOk(conn, id, false, "invalid: AUTH event timestamp too far from current time");
+            self.replyOk(conn, id, false, "invalid: AUTH event timestamp too far from current time");
             return;
         }
 
@@ -571,33 +571,33 @@ pub const Handler = struct {
 
         var expected_challenge: [64]u8 = undefined;
         _ = std.fmt.bufPrint(&expected_challenge, "{x}", .{conn.auth_challenge}) catch {
-            self.sendOk(conn, id, false, "error: internal error");
+            self.replyOk(conn, id, false, "error: internal error");
             return;
         };
 
         if (auth_tags.challenge == null or !std.mem.eql(u8, auth_tags.challenge.?, &expected_challenge)) {
-            self.sendOk(conn, id, false, "invalid: challenge mismatch");
+            self.replyOk(conn, id, false, "invalid: challenge mismatch");
             return;
         }
 
         if (self.config.relay_url.len > 0) {
             if (auth_tags.relay == null or !nostr.Auth.domainsMatch(self.config.relay_url, auth_tags.relay.?)) {
-                self.sendOk(conn, id, false, "invalid: relay URL mismatch");
+                self.replyOk(conn, id, false, "invalid: relay URL mismatch");
                 return;
             }
         }
 
         event.validate() catch |err| {
-            self.sendOk(conn, id, false, nostr.errorMessage(err));
+            self.replyOk(conn, id, false, nostr.errorMessage(err));
             return;
         };
 
         conn.addAuthenticatedPubkey(event.pubkey()) catch {
-            self.sendOk(conn, id, false, "error: failed to record authentication");
+            self.replyOk(conn, id, false, "error: failed to record authentication");
             return;
         };
 
-        self.sendOk(conn, id, true, "");
+        self.replyOk(conn, id, true, "");
     }
 
     fn handleNegOpen(self: *Handler, conn: *Connection, msg: *nostr.ClientMsg) void {
@@ -718,12 +718,19 @@ pub const Handler = struct {
         conn.write(msg) catch {};
     }
 
-    fn sendOk(self: *Handler, conn: *Connection, event_id: *const [32]u8, success: bool, message: []const u8) void {
-        if (success) metrics.eventStored() else metrics.eventRejected();
+    fn replyOk(self: *Handler, conn: *Connection, event_id: *const [32]u8, success: bool, message: []const u8) void {
         if (self.shutdown.load(.acquire)) return;
         var buf: [512]u8 = undefined;
         const msg = nostr.RelayMsg.ok(event_id, success, message, &buf) catch return;
         conn.write(msg) catch {};
+    }
+
+    /// OK responder for EVENT submissions: records the store/reject metric, then
+    /// replies. AUTH and duplicate acks use `replyOk` directly so they are not
+    /// miscounted as stored or rejected events.
+    fn sendOk(self: *Handler, conn: *Connection, event_id: *const [32]u8, success: bool, message: []const u8) void {
+        if (success) metrics.eventStored() else metrics.eventRejected();
+        self.replyOk(conn, event_id, success, message);
     }
 
     fn sendEose(self: *Handler, conn: *Connection, sub_id: []const u8) void {
