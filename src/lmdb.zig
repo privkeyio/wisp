@@ -33,12 +33,23 @@ pub const Lmdb = struct {
         full,
 
         pub fn fromString(s: []const u8) ?SyncMode {
-            if (std.mem.eql(u8, s, "none")) return .none;
-            if (std.mem.eql(u8, s, "meta")) return .meta;
-            if (std.mem.eql(u8, s, "full")) return .full;
+            const trimmed = std.mem.trim(u8, s, &std.ascii.whitespace);
+            if (std.mem.eql(u8, trimmed, "none")) return .none;
+            if (std.mem.eql(u8, trimmed, "meta")) return .meta;
+            if (std.mem.eql(u8, trimmed, "full")) return .full;
             return null;
         }
     };
+
+    fn flagsFor(sync_mode: SyncMode) c_uint {
+        var flags: c_uint = c.MDB_NOSUBDIR | c.MDB_WRITEMAP | c.MDB_NORDAHEAD;
+        switch (sync_mode) {
+            .none => flags |= c.MDB_NOSYNC | c.MDB_NOMETASYNC,
+            .meta => flags |= c.MDB_NOMETASYNC,
+            .full => {},
+        }
+        return flags;
+    }
 
     pub fn init(allocator: std.mem.Allocator, path: []const u8, map_size_mb: u32, sync_mode: SyncMode) !Lmdb {
         var env: ?*c.MDB_env = null;
@@ -69,12 +80,7 @@ pub const Lmdb = struct {
         const path_z = try allocator.dupeZ(u8, path);
         defer allocator.free(path_z);
 
-        var flags: c_uint = c.MDB_NOSUBDIR | c.MDB_WRITEMAP | c.MDB_NORDAHEAD;
-        switch (sync_mode) {
-            .none => flags |= c.MDB_NOSYNC | c.MDB_NOMETASYNC,
-            .meta => flags |= c.MDB_NOMETASYNC,
-            .full => {},
-        }
+        const flags = flagsFor(sync_mode);
         const rc = c.mdb_env_open(env, path_z.ptr, flags, 0o600);
         if (rc != 0) {
             std.log.err("LMDB open failed: {}", .{rc});
@@ -255,3 +261,37 @@ pub const Entry = struct {
     key: []const u8,
     value: []const u8,
 };
+
+const testing = std.testing;
+
+test "SyncMode.fromString valid values" {
+    try testing.expectEqual(Lmdb.SyncMode.none, Lmdb.SyncMode.fromString("none").?);
+    try testing.expectEqual(Lmdb.SyncMode.meta, Lmdb.SyncMode.fromString("meta").?);
+    try testing.expectEqual(Lmdb.SyncMode.full, Lmdb.SyncMode.fromString("full").?);
+}
+
+test "SyncMode.fromString invalid values return null" {
+    try testing.expectEqual(@as(?Lmdb.SyncMode, null), Lmdb.SyncMode.fromString("ful"));
+    try testing.expectEqual(@as(?Lmdb.SyncMode, null), Lmdb.SyncMode.fromString(""));
+    try testing.expectEqual(@as(?Lmdb.SyncMode, null), Lmdb.SyncMode.fromString("FULL"));
+}
+
+test "SyncMode.fromString trims surrounding whitespace" {
+    try testing.expectEqual(Lmdb.SyncMode.full, Lmdb.SyncMode.fromString("full\n").?);
+    try testing.expectEqual(Lmdb.SyncMode.full, Lmdb.SyncMode.fromString(" full ").?);
+    try testing.expectEqual(Lmdb.SyncMode.meta, Lmdb.SyncMode.fromString("\tmeta\r\n").?);
+}
+
+test "flagsFor selects correct sync flags per mode" {
+    const none_flags = Lmdb.flagsFor(.none);
+    try testing.expect(none_flags & c.MDB_NOSYNC != 0);
+    try testing.expect(none_flags & c.MDB_NOMETASYNC != 0);
+
+    const meta_flags = Lmdb.flagsFor(.meta);
+    try testing.expect(meta_flags & c.MDB_NOSYNC == 0);
+    try testing.expect(meta_flags & c.MDB_NOMETASYNC != 0);
+
+    const full_flags = Lmdb.flagsFor(.full);
+    try testing.expect(full_flags & c.MDB_NOSYNC == 0);
+    try testing.expect(full_flags & c.MDB_NOMETASYNC == 0);
+}

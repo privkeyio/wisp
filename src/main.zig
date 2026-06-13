@@ -150,9 +150,9 @@ pub fn main(init: std.process.Init) !void {
     try nostr.init();
     defer nostr.cleanup();
 
-    const sync_mode = Lmdb.SyncMode.fromString(config.storage_sync) orelse blk: {
-        std.log.warn("Unknown storage sync mode '{s}', using 'none'", .{config.storage_sync});
-        break :blk .none;
+    const sync_mode = Lmdb.SyncMode.fromString(config.storage_sync) orelse {
+        std.log.err("Invalid storage sync mode '{s}', valid options are: none, meta, full", .{config.storage_sync});
+        return error.InvalidSyncMode;
     };
 
     std.log.info("Wisp v0.4.2 starting", .{});
