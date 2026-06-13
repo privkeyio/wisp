@@ -576,10 +576,19 @@ pub const QueryIterator = struct {
             self.started = true;
 
             const first_entry = switch (self.index_type) {
-                .kind, .pubkey => blk: {
-                    var seek_key: [72]u8 = undefined;
+                .kind, .pubkey, .tag => blk: {
+                    var seek_key: [73]u8 = undefined;
                     @memcpy(seek_key[0..self.prefix_len], self.prefix[0..self.prefix_len]);
-                    @memset(seek_key[self.prefix_len..][0..8], 0xFF);
+                    // Seek to the newest key at or below `until` for this prefix
+                    // so bounded queries don't scan the whole partition; with no
+                    // until, target the prefix max (all-0xFF timestamp).
+                    const until = self.filters[0].until();
+                    if (until > 0) {
+                        const until_be = @byteSwap(@as(u64, @bitCast(until)));
+                        @memcpy(seek_key[self.prefix_len..][0..8], std.mem.asBytes(&until_be));
+                    } else {
+                        @memset(seek_key[self.prefix_len..][0..8], 0xFF);
+                    }
                     @memset(seek_key[self.prefix_len + 8 ..][0..32], 0xFF);
                     const key_len = self.prefix_len + 40;
 
@@ -593,15 +602,12 @@ pub const QueryIterator = struct {
             };
 
             if (first_entry) |entry| {
-                // For the seeked indexes (kind/pubkey) the first entry is the
-                // greatest key <= the prefix max; if its prefix differs, there
+                // For the seeked indexes (kind/pubkey/tag) the first entry is the
+                // greatest key <= the seek target; if its prefix differs, there
                 // are no entries for this prefix (e.g. an empty kind whose seek
-                // fell back to .last on another kind). Without this, a
-                // wrong-prefix event leaks when skip_filter is set. The tag index
-                // is not seeked (it scans from .last), so the loop below does its
-                // prefix-checking there.
-                const seeked = self.index_type == .kind or self.index_type == .pubkey;
-                if (seeked and self.prefix_len > 0 and (entry.key.len < self.prefix_len or
+                // fell back to .last on another kind), so we must stop rather
+                // than leak a wrong-prefix event when skip_filter is set.
+                if (self.prefix_len > 0 and (entry.key.len < self.prefix_len or
                     !std.mem.eql(u8, entry.key[0..self.prefix_len], self.prefix[0..self.prefix_len])))
                 {
                     return null;

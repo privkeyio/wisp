@@ -44,6 +44,17 @@ pub --sec $SEC1 -k 1 -t t=wisptag -c "tagged"
 sleep 0.5
 chk "NIP-01 #t tag filter" 1 "$(req -k 1 -t t=wisptag)"
 
+# --- Tag index: a non-maximal binary tag must not leak the lexicographic-max event ---
+# #e (0x65) sorts below the #p (0x70) entries already stored. Before the tag-index
+# seek/prefix fix, a bare #e query returned the max-key (#p) event regardless of the
+# queried value; assert exact matches and a clean empty result for an unknown value.
+EREF=00000000000000000000000000000000000000000000000000000000deadbeef
+pub --sec $SEC1 -k 1 -e "$EREF" -c "references deadbeef"
+sleep 0.5
+chk "tag index #e returns only matching events" 1 "$(req -e "$EREF")"
+chk "tag index #e unknown value is empty" 0 \
+  "$(req -e 00000000000000000000000000000000000000000000000000000000feedface)"
+
 # --- NIP-09 deletion ---
 DID=$(idof --sec $SEC1 -c "delete me")
 sleep 0.5
