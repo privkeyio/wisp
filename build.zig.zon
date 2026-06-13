@@ -17,7 +17,8 @@
         // http.zig: HTTP routing (NIP-11/NIP-86) + WebSocket upgrade onto
         // websocket.zig's epoll worker pool. Pinned to privkeyio fork commit
         // 061104c (upstream karlseguin 5f60277 + a fix for a lost websocket read
-        // event that leaked connections under load, CLOSE_WAIT); pending upstream PR.
+        // event that leaked connections under load, CLOSE_WAIT); upstream PR
+        // karlseguin/http.zig#212.
         .httpz = .{
             .url = "https://github.com/privkeyio/http.zig/archive/061104c8e5a67dd22941da2d5f38f011550f5bc0.tar.gz",
             .hash = "httpz-0.0.0-PNVzrJLlCAClBJ52r0KravlJNK8UVNOSxnb4ppTlC_WG",
