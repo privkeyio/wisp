@@ -40,6 +40,9 @@ pub const Config = struct {
     relay_url: []const u8,
 
     trust_proxy: bool,
+    // Comma-separated IPs/prefixes of reverse proxies whose forwarded headers are
+    // honored. Empty with trust_proxy=true honors headers from any peer.
+    trusted_proxies: []const u8,
     max_connections_per_ip: u32,
     ip_whitelist: []const u8,
     ip_blacklist: []const u8,
@@ -54,6 +57,10 @@ pub const Config = struct {
     // Negentropy (NIP-77) configuration
     negentropy_enabled: bool,
     negentropy_max_sync_events: u32,
+    // Concurrent negentropy sessions per connection. Each buffers up to
+    // negentropy_max_sync_events IDs, so this is kept small independent of
+    // max_subscriptions.
+    max_neg_sessions: u32,
 
     min_pow_difficulty: u8,
 
@@ -91,6 +98,7 @@ pub const Config = struct {
             .auth_to_write = false,
             .relay_url = "",
             .trust_proxy = false,
+            .trusted_proxies = "",
             .max_connections_per_ip = 10,
             .ip_whitelist = "",
             .ip_blacklist = "",
@@ -101,6 +109,7 @@ pub const Config = struct {
             .spider_sync_interval = 300,
             .negentropy_enabled = true,
             .negentropy_max_sync_events = 1000000,
+            .max_neg_sessions = 4,
             .min_pow_difficulty = 0,
             .admin_pubkeys = "",
             ._allocated = undefined,
@@ -221,6 +230,8 @@ pub const Config = struct {
         } else if (std.mem.eql(u8, section, "security")) {
             if (std.mem.eql(u8, key, "trust_proxy")) {
                 self.trust_proxy = std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1");
+            } else if (std.mem.eql(u8, key, "trusted_proxies")) {
+                self.trusted_proxies = try self.allocString(value);
             } else if (std.mem.eql(u8, key, "max_connections_per_ip")) {
                 self.max_connections_per_ip = try std.fmt.parseInt(u32, value, 10);
             } else if (std.mem.eql(u8, key, "ip_whitelist")) {
@@ -245,6 +256,8 @@ pub const Config = struct {
                 self.negentropy_enabled = std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1");
             } else if (std.mem.eql(u8, key, "max_sync_events")) {
                 self.negentropy_max_sync_events = try std.fmt.parseInt(u32, value, 10);
+            } else if (std.mem.eql(u8, key, "max_sessions")) {
+                self.max_neg_sessions = try std.fmt.parseInt(u32, value, 10);
             }
         } else if (std.mem.eql(u8, section, "management")) {
             if (std.mem.eql(u8, key, "admin_pubkeys")) {
@@ -282,6 +295,7 @@ pub const Config = struct {
         if (getenv("WISP_TRUST_PROXY")) |v| {
             self.trust_proxy = std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "1");
         }
+        if (getenv("WISP_TRUSTED_PROXIES")) |v| self.trusted_proxies = v;
         if (getenv("WISP_MAX_CONNECTIONS_PER_IP")) |v| {
             self.max_connections_per_ip = std.fmt.parseInt(u32, v, 10) catch self.max_connections_per_ip;
         }
@@ -313,6 +327,9 @@ pub const Config = struct {
         }
         if (getenv("WISP_NEGENTROPY_MAX_SYNC_EVENTS")) |v| {
             self.negentropy_max_sync_events = std.fmt.parseInt(u32, v, 10) catch self.negentropy_max_sync_events;
+        }
+        if (getenv("WISP_NEGENTROPY_MAX_SESSIONS")) |v| {
+            self.max_neg_sessions = std.fmt.parseInt(u32, v, 10) catch self.max_neg_sessions;
         }
         if (getenv("WISP_MIN_POW_DIFFICULTY")) |v| {
             self.min_pow_difficulty = std.fmt.parseInt(u8, v, 10) catch self.min_pow_difficulty;

@@ -27,6 +27,7 @@ pub const App = struct {
     nip86_handler: *Nip86Handler,
     conn_limiter: *rate_limiter.ConnectionLimiter,
     ip_filter: *rate_limiter.IpFilter,
+    trusted_proxies: *rate_limiter.IpFilter,
     next_id: *std.atomic.Value(u64),
 
     // httpz requires this declaration to enable WebSocket upgrades.
@@ -143,6 +144,10 @@ pub const App = struct {
     fn clientIp(app: App, req: *httpz.Request, res: *httpz.Response, buf: *[64]u8) []const u8 {
         const socket_ip = formatPeerIp(res.conn.address, buf);
         if (!app.config.trust_proxy) return socket_ip;
+        // Only honor forwarded headers when the socket peer is a configured trusted
+        // proxy; otherwise an attacker hitting the backend directly could forge them
+        // to spoof any client IP. An empty trusted_proxies set trusts any peer.
+        if (!app.trusted_proxies.isTrustedProxy(socket_ip)) return socket_ip;
         const xff = req.header("x-forwarded-for");
         const xrip = req.header("x-real-ip");
         return rate_limiter.extractClientIp(xff, xrip, socket_ip, true);
@@ -329,6 +334,7 @@ pub const Server = struct {
     httpz_server: httpz.Server(App),
     conn_limiter: rate_limiter.ConnectionLimiter,
     ip_filter: rate_limiter.IpFilter,
+    trusted_proxy_filter: rate_limiter.IpFilter,
     next_id: std.atomic.Value(u64),
 
     pub fn init(
@@ -347,6 +353,8 @@ pub const Server = struct {
         self.ip_filter = rate_limiter.IpFilter.init(allocator);
         try self.ip_filter.loadWhitelist(config.ip_whitelist);
         try self.ip_filter.loadBlacklist(config.ip_blacklist);
+        self.trusted_proxy_filter = rate_limiter.IpFilter.init(allocator);
+        try self.trusted_proxy_filter.loadWhitelist(config.trusted_proxies);
 
         const app = App{
             .allocator = allocator,
@@ -357,6 +365,7 @@ pub const Server = struct {
             .nip86_handler = nip86_handler,
             .conn_limiter = &self.conn_limiter,
             .ip_filter = &self.ip_filter,
+            .trusted_proxies = &self.trusted_proxy_filter,
             .next_id = &self.next_id,
         };
 
@@ -413,5 +422,6 @@ pub const Server = struct {
         self.httpz_server.deinit();
         self.conn_limiter.deinit();
         self.ip_filter.deinit();
+        self.trusted_proxy_filter.deinit();
     }
 };

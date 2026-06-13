@@ -52,6 +52,11 @@ idle_seconds = 300
 
 [security]
 # trust_proxy = false  # set true when running behind a reverse proxy (see docs/deployment.md)
+# Honor X-Forwarded-For/X-Real-IP only when trust_proxy is true. The proxy MUST
+# append the real client to X-Forwarded-For and the backend port MUST NOT be
+# directly reachable, otherwise clients can forge these headers to spoof any IP.
+# Restrict which peers are trusted to a proxy IP/prefix list; empty trusts any peer.
+# trusted_proxies = "127.0.0.1,10.0.0."
 # max_connections_per_ip = 10
 # ip_whitelist = "192.168.1,10.0.0"
 # ip_blacklist = ""
@@ -68,6 +73,9 @@ admin = ""  # your hex pubkey (use `zig-out/bin/wisp help` for npub support via 
 [negentropy]
 enabled = true
 max_sync_events = 1000000
+# Concurrent reconciliation sessions per connection. Each can buffer up to
+# max_sync_events IDs, so keep this small.
+max_sessions = 4
 
 [management]
 # NIP-86 relay management. Comma-separated hex pubkeys allowed to run admin commands.

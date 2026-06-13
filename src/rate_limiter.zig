@@ -31,11 +31,13 @@ pub const ConnectionLimiter = struct {
         self.ip_buckets.deinit();
     }
 
-    pub fn canConnect(self: *ConnectionLimiter, ip: []const u8) bool {
+    pub fn canConnect(self: *ConnectionLimiter, raw_ip: []const u8) bool {
         const io = nostr.io.io();
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
+        var key_buf: [19]u8 = undefined;
+        const ip = bucketKey(raw_ip, &key_buf);
         if (self.ip_buckets.get(ip)) |bucket| {
             return bucket.connection_count < self.max_connections_per_ip;
         }
@@ -45,13 +47,15 @@ pub const ConnectionLimiter = struct {
     /// Atomically check the per-IP limit and increment in one locked section.
     /// Returns false (without incrementing) if the IP is already at the limit,
     /// closing the canConnect/addConnection check-then-act race.
-    pub fn tryAcquireConnection(self: *ConnectionLimiter, ip: []const u8) bool {
+    pub fn tryAcquireConnection(self: *ConnectionLimiter, raw_ip: []const u8) bool {
         const io = nostr.io.io();
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
         const now = nostr.io.timestamp();
 
+        var key_buf: [19]u8 = undefined;
+        const ip = bucketKey(raw_ip, &key_buf);
         if (self.ip_buckets.getPtr(ip)) |bucket| {
             if (bucket.connection_count >= self.max_connections_per_ip) return false;
             bucket.connection_count += 1;
@@ -70,11 +74,13 @@ pub const ConnectionLimiter = struct {
         return true;
     }
 
-    pub fn removeConnection(self: *ConnectionLimiter, ip: []const u8) void {
+    pub fn removeConnection(self: *ConnectionLimiter, raw_ip: []const u8) void {
         const io = nostr.io.io();
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
+        var key_buf: [19]u8 = undefined;
+        const ip = bucketKey(raw_ip, &key_buf);
         if (self.ip_buckets.getPtr(ip)) |bucket| {
             if (bucket.connection_count > 0) {
                 bucket.connection_count -= 1;
@@ -203,6 +209,17 @@ pub const IpFilter = struct {
         return true;
     }
 
+    pub fn isTrustedProxy(self: *IpFilter, ip: []const u8) bool {
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+
+        // An empty trusted-proxy set trusts every peer; otherwise only configured
+        // IPs/prefixes are honored.
+        if (!self.whitelist_enabled) return true;
+        return self.matchesPrefix(&self.whitelist, ip);
+    }
+
     fn matchesPrefix(self: *IpFilter, map: *std.StringHashMap(void), ip: []const u8) bool {
         _ = self;
         if (map.contains(ip)) return true;
@@ -210,20 +227,27 @@ pub const IpFilter = struct {
         var iter = map.keyIterator();
         while (iter.next()) |entry| {
             const e = entry.*;
+            if (e.len == 0) continue;
+            const last = e[e.len - 1];
             // Only an entry written as an explicit prefix (trailing '.' or ':')
             // matches by prefix, and then only at an octet/group boundary. A full
             // address like "10.0.0.5" must match exactly, never as a prefix of
             // "10.0.0.50", otherwise an allowlist entry silently admits a whole
             // range and a blocklist entry over-blocks unrelated addresses.
-            if (e.len > 0 and (e[e.len - 1] == '.' or e[e.len - 1] == ':') and
-                std.mem.startsWith(u8, ip, e))
-            {
-                return true;
-            }
+            if (last != '.' and last != ':') continue;
+            // A complete IPv6 address can end in ':' (via "::"); such an entry is an
+            // exact match (handled above), not a subnet prefix.
+            if (last == ':' and isCompleteIp6(e)) continue;
+            if (std.mem.startsWith(u8, ip, e)) return true;
         }
         return false;
     }
 };
+
+fn isCompleteIp6(text: []const u8) bool {
+    _ = std.Io.net.Ip6Address.parse(text, 0) catch return false;
+    return true;
+}
 
 pub fn extractClientIp(
     forwarded_for: ?[]const u8,
@@ -238,10 +262,14 @@ pub fn extractClientIp(
         // does not, which would let it spoof the key used for every per-IP control.
         if (forwarded_for) |xff| {
             if (xff.len > 0) {
-                if (std.mem.lastIndexOf(u8, xff, ",")) |comma| {
-                    return normalizeIp(std.mem.trim(u8, xff[comma + 1 ..], " "));
-                }
-                return normalizeIp(xff);
+                const segment = if (std.mem.lastIndexOf(u8, xff, ",")) |comma|
+                    xff[comma + 1 ..]
+                else
+                    xff;
+                const entry = std.mem.trim(u8, segment, " \t");
+                // A trailing comma or whitespace-only segment trims to empty; fall
+                // back to X-Real-IP, then remote_addr, instead of one shared key.
+                if (entry.len > 0) return normalizeIp(entry);
             }
         }
 
@@ -253,6 +281,17 @@ pub fn extractClientIp(
     }
 
     return normalizeIp(remote_addr);
+}
+
+// Derive the per-IP rate-limit bucket key. IPv6 clients are keyed on their /64
+// prefix so a client rotating addresses within a single /64 allocation cannot get
+// fresh allowance per address or bloat the bucket map. IPv4 and non-address
+// strings pass through unchanged. `buf` backs the returned slice for the IPv6 case.
+fn bucketKey(ip: []const u8, buf: *[19]u8) []const u8 {
+    if (std.mem.count(u8, ip, ":") < 2) return ip;
+    const addr = std.Io.net.Ip6Address.parse(ip, 0) catch return ip;
+    const hex = std.fmt.bytesToHex(addr.bytes[0..8].*, .lower);
+    return std.fmt.bufPrint(buf, "{s}/64", .{hex}) catch ip;
 }
 
 fn normalizeIp(ip: []const u8) []const u8 {
@@ -357,7 +396,8 @@ pub const EventRateLimiter = struct {
 
     pub fn checkAndRecord(self: *EventRateLimiter, ip: []const u8) bool {
         if (self.events_per_minute == 0) return true;
-        return self.checkAndRecordAt(ip, nostr.io.timestamp());
+        var buf: [19]u8 = undefined;
+        return self.checkAndRecordAt(bucketKey(ip, &buf), nostr.io.timestamp());
     }
 
     fn checkAndRecordAt(self: *EventRateLimiter, ip: []const u8, now: i64) bool {

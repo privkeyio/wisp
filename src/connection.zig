@@ -108,9 +108,10 @@ pub const Connection = struct {
     pub fn deinit(self: *Connection) void {
         if (self.deinitialized) return;
         self.deinitialized = true;
-        var neg_iter = self.neg_sessions.valueIterator();
-        while (neg_iter.next()) |session| {
-            session.deinit();
+        var neg_iter = self.neg_sessions.iterator();
+        while (neg_iter.next()) |entry| {
+            entry.value_ptr.deinit();
+            self.backing_allocator.free(entry.key_ptr.*);
         }
         self.arena.deinit();
     }
@@ -148,12 +149,16 @@ pub const Connection = struct {
     }
 
     pub fn addNegSession(self: *Connection, sub_id: []const u8) !*NegSession {
-        const alloc = self.allocator();
+        // Reuse the existing key/slot on re-open so the previously duped key is not
+        // leaked. Keys are owned by backing_allocator (not the arena) so close can
+        // free them; the arena only frees on connection teardown.
         if (self.neg_sessions.getPtr(sub_id)) |existing| {
             existing.deinit();
-            _ = self.neg_sessions.remove(sub_id);
+            existing.* = NegSession.init(self.backing_allocator);
+            return existing;
         }
-        const sub_id_copy = try alloc.dupe(u8, sub_id);
+        const sub_id_copy = try self.backing_allocator.dupe(u8, sub_id);
+        errdefer self.backing_allocator.free(sub_id_copy);
         try self.neg_sessions.put(sub_id_copy, NegSession.init(self.backing_allocator));
         return self.neg_sessions.getPtr(sub_id_copy).?;
     }
@@ -163,10 +168,11 @@ pub const Connection = struct {
     }
 
     pub fn removeNegSession(self: *Connection, sub_id: []const u8) void {
-        if (self.neg_sessions.getPtr(sub_id)) |session| {
+        if (self.neg_sessions.fetchRemove(sub_id)) |kv| {
+            var session = kv.value;
             session.deinit();
+            self.backing_allocator.free(kv.key);
         }
-        _ = self.neg_sessions.remove(sub_id);
     }
 
     pub fn matchesEvent(self: *Connection, event: *const nostr.Event) ?[]const u8 {

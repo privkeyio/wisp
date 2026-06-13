@@ -419,7 +419,7 @@ pub const Handler = struct {
         const sub_id = sub_id_buf[0..sub_id_raw.len];
 
         if (!self.query_limiter.checkAndRecord(conn.getClientIp())) {
-            metrics.rateLimited();
+            metrics.queryRateLimited();
             self.sendClosed(conn, sub_id, "rate-limited: too many queries");
             return;
         }
@@ -513,7 +513,7 @@ pub const Handler = struct {
         }
 
         if (!self.query_limiter.checkAndRecord(conn.getClientIp())) {
-            metrics.rateLimited();
+            metrics.queryRateLimited();
             self.sendClosed(conn, sub_id, "rate-limited: too many queries");
             return;
         }
@@ -630,7 +630,7 @@ pub const Handler = struct {
         }
 
         if (!self.query_limiter.checkAndRecord(conn.getClientIp())) {
-            metrics.rateLimited();
+            metrics.queryRateLimited();
             self.sendNegErr(conn, sub_id, "rate-limited: too many queries");
             return;
         }
@@ -646,7 +646,7 @@ pub const Handler = struct {
         // number of concurrent sessions so a connection cannot exhaust memory by
         // opening many distinct sub_ids. Re-opening an existing sub_id is allowed.
         if (conn.getNegSession(sub_id) == null and
-            conn.neg_sessions.count() >= self.config.max_subscriptions)
+            conn.neg_sessions.count() >= self.config.max_neg_sessions)
         {
             self.sendNegErr(conn, sub_id, "blocked: too many negentropy sessions");
             return;
