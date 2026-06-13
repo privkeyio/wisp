@@ -30,6 +30,9 @@ jobs:
       - name: Test LMDB bindings
         run: zig build test-lmdb
 
+      - name: Unit tests
+        run: zig build test
+
   integration:
     runs-on: ubuntu-latest
     if: github.event.pull_request.draft != true
