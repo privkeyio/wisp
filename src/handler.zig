@@ -349,6 +349,7 @@ pub const Handler = struct {
 
         if (!result.stored) {
             const success = std.mem.startsWith(u8, result.message, "duplicate");
+            if (!success) metrics.eventRejected();
             self.replyOk(conn, id, success, result.message);
             return;
         }
@@ -379,9 +380,10 @@ pub const Handler = struct {
             return;
         };
 
-        _ = self.store.store(event, json) catch {};
+        const stored = if (self.store.store(event, json)) |r| r.stored else |_| false;
 
-        self.sendOk(conn, id, true, "");
+        self.replyOk(conn, id, true, "");
+        if (stored) metrics.eventStored();
 
         self.broadcaster.broadcast(event);
     }
@@ -772,3 +774,129 @@ pub const Handler = struct {
         conn.challenge_sent = true;
     }
 };
+
+const testing = std.testing;
+
+test countLeadingZeroBits {
+    var id = [_]u8{0} ** 32;
+    try testing.expectEqual(@as(u8, 255), countLeadingZeroBits(&id));
+
+    id[0] = 0xff;
+    try testing.expectEqual(@as(u8, 0), countLeadingZeroBits(&id));
+
+    id[0] = 0x01;
+    try testing.expectEqual(@as(u8, 7), countLeadingZeroBits(&id));
+
+    id = [_]u8{0} ** 32;
+    id[1] = 0x0f;
+    try testing.expectEqual(@as(u8, 12), countLeadingZeroBits(&id));
+}
+
+test extractNonceTarget {
+    try testing.expectEqual(@as(?u8, 21), extractNonceTarget("[\"nonce\",\"12345\",\"21\"]"));
+    try testing.expectEqual(@as(?u8, null), extractNonceTarget("[\"p\",\"abc\"]"));
+    try testing.expectEqual(@as(?u8, null), extractNonceTarget("[\"nonce\",\"12345\"]"));
+    // Target overflowing u8 must parse-fail to null, never wrap.
+    try testing.expectEqual(@as(?u8, null), extractNonceTarget("[\"nonce\",\"1\",\"999\"]"));
+    try testing.expectEqual(@as(?u8, null), extractNonceTarget(""));
+}
+
+test getCommittedDifficulty {
+    try testing.expectEqual(@as(?u8, 16), getCommittedDifficulty(
+        "{\"tags\":[[\"nonce\",\"9999\",\"16\"]],\"content\":\"x\"}",
+    ));
+    try testing.expectEqual(@as(?u8, null), getCommittedDifficulty(
+        "{\"tags\":[[\"p\",\"abc\"]]}",
+    ));
+    try testing.expectEqual(@as(?u8, null), getCommittedDifficulty("{\"tags\":[]}"));
+    try testing.expectEqual(@as(?u8, null), getCommittedDifficulty("{\"content\":\"x\"}"));
+    // Truncated tags array must not over-read.
+    try testing.expectEqual(@as(?u8, null), getCommittedDifficulty("{\"tags\":[[\"nonce\""));
+    // A nonce string inside content must not be mistaken for a tag.
+    try testing.expectEqual(@as(?u8, null), getCommittedDifficulty("{\"content\":\"nonce\"}"));
+}
+
+test "validateMessageStructure" {
+    try testing.expect(Handler.validateMessageStructure("[\"REQ\",\"s\",{}]"));
+    try testing.expect(Handler.validateMessageStructure("[\"REQ\"]\n  "));
+    try testing.expect(!Handler.validateMessageStructure("[]"));
+    try testing.expect(!Handler.validateMessageStructure("not json"));
+    try testing.expect(!Handler.validateMessageStructure("{\"a\":1}"));
+    // Starts with '[' but is not closed: the trailing-']' check must reject it.
+    try testing.expect(!Handler.validateMessageStructure("[\"REQ\""));
+    // Embedded control byte is rejected.
+    try testing.expect(!Handler.validateMessageStructure("[\"a\x01\"]"));
+}
+
+fn fuzzGetCommittedDifficulty(_: void, smith: *std.testing.Smith) anyerror!void {
+    var buf: [2048]u8 = undefined;
+    const n = smith.slice(&buf);
+    _ = getCommittedDifficulty(buf[0..n]);
+}
+
+test "fuzz getCommittedDifficulty" {
+    try std.testing.fuzz({}, fuzzGetCommittedDifficulty, .{});
+}
+
+fn fuzzExtractNonceTarget(_: void, smith: *std.testing.Smith) anyerror!void {
+    var buf: [512]u8 = undefined;
+    const n = smith.slice(&buf);
+    _ = extractNonceTarget(buf[0..n]);
+}
+
+test "fuzz extractNonceTarget" {
+    try std.testing.fuzz({}, fuzzExtractNonceTarget, .{});
+}
+
+fn fuzzValidateMessageStructure(_: void, smith: *std.testing.Smith) anyerror!void {
+    var buf: [2048]u8 = undefined;
+    const n = smith.slice(&buf);
+    _ = Handler.validateMessageStructure(buf[0..n]);
+}
+
+test "fuzz validateMessageStructure" {
+    try std.testing.fuzz({}, fuzzValidateMessageStructure, .{});
+}
+
+// Deterministic randomized stress over the hand-rolled scanners. `zig build
+// test --fuzz` is the real fuzzer, but Zig 0.16.0's test runner mis-types the
+// fuzz error path (writeStackTrace), so it can't build in fuzz mode. This pumps
+// random and JSON-mutated inputs through the scanners under a normal test run,
+// relying on Debug safety checks to catch any out-of-bounds read or overflow.
+test "scanner stress" {
+    var prng = std.Random.DefaultPrng.init(0x515c0); // fixed seed: reproducible
+    const rand = prng.random();
+
+    const seeds = [_][]const u8{
+        "{\"tags\":[[\"nonce\",\"9999\",\"16\"]],\"content\":\"hi\"}",
+        "{\"tags\":[[\"p\",\"abc\"],[\"nonce\",\"1\",\"8\"]]}",
+        "[\"REQ\",\"s\",{\"kinds\":[1]}]",
+        "[\"nonce\",\"123\",\"20\"]",
+        "{\"tags\":[]}",
+    };
+
+    var buf: [256]u8 = undefined;
+    var i: usize = 0;
+    while (i < 100_000) : (i += 1) {
+        const len = rand.intRangeAtMost(usize, 0, buf.len);
+        const input = buf[0..len];
+
+        if (rand.boolean()) {
+            rand.bytes(input);
+        } else {
+            const seed = seeds[rand.intRangeLessThan(usize, 0, seeds.len)];
+            const copy_len = @min(seed.len, len);
+            @memcpy(buf[0..copy_len], seed[0..copy_len]);
+            // Corrupt a handful of bytes to reach malformed-JSON states.
+            const muts = rand.intRangeAtMost(usize, 0, 4);
+            var m: usize = 0;
+            while (m < muts and copy_len > 0) : (m += 1) {
+                buf[rand.intRangeLessThan(usize, 0, copy_len)] = rand.int(u8);
+            }
+        }
+
+        _ = getCommittedDifficulty(input);
+        _ = extractNonceTarget(input);
+        _ = Handler.validateMessageStructure(input);
+    }
+}
