@@ -38,7 +38,7 @@ query_limit_max = 5000
 # min_pow_difficulty = 0
 
 [rate_limits]
-events_per_minute = 60
+events_per_minute = 120
 # Per-IP limit on expensive query messages (REQ/COUNT/NEG_OPEN). 0 disables.
 queries_per_minute = 300
 
