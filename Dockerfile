@@ -5,8 +5,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     liblmdb-dev libsecp256k1-dev libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-RUN curl -fsSL https://ziglang.org/download/0.15.2/zig-$(uname -m)-linux-0.15.2.tar.xz | \
-    tar -xJ -C /opt && ln -s /opt/zig-$(uname -m)-linux-0.15.2/zig /usr/local/bin/zig
+RUN curl -fsSL https://ziglang.org/download/0.16.0/zig-$(uname -m)-linux-0.16.0.tar.xz | \
+    tar -xJ -C /opt && ln -s /opt/zig-$(uname -m)-linux-0.16.0/zig /usr/local/bin/zig
 
 WORKDIR /src
 COPY . .
