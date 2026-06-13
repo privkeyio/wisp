@@ -7,7 +7,7 @@
 #   pow       -> WISP_MIN_POW_DIFFICULTY=8
 #
 # Usage: tests/integration_restrict.sh <relay-url> <auth|protected|pow>
-# Requires: nak on PATH. Exits non-zero if any assertion fails.
+# Requires: noz on PATH. Exits non-zero if any assertion fails.
 set -u
 R="${1:?relay url required}"
 MODE="${2:?mode required (auth|protected|pow)}"
@@ -26,8 +26,8 @@ chk() { # desc expected actual
 }
 
 # publish and report ok|reject based on whether the relay accepted the event
-pubres() { # nak-args...
-  if timeout 10 nak event "$@" "$R" 2>&1 | grep -q 'success'; then echo ok; else echo reject; fi
+pubres() { # noz-args...
+  if timeout 10 noz event "$@" "$R" 2>&1 | grep -q 'success'; then echo ok; else echo reject; fi
 }
 
 case "$MODE" in

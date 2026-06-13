@@ -4,13 +4,13 @@
 # same <http-url> passed here (NIP-98 auth checks the URL).
 #
 # Usage: tests/integration_management.sh <http-url>   e.g. http://127.0.0.1:7781
-# Requires: nak, curl, sha256sum on PATH. Exits non-zero if any assertion fails.
+# Requires: noz, curl, sha256sum on PATH. Exits non-zero if any assertion fails.
 set -u
 HTTP="${1:?http url required}"
 WS="${HTTP/http:/ws:}"
 SEC1=0000000000000000000000000000000000000000000000000000000000000001
 SEC2=0000000000000000000000000000000000000000000000000000000000000002
-PK2=$(nak key public $SEC2)
+PK2=$(noz key public $SEC2)
 pass=0
 fail=0
 
@@ -24,14 +24,14 @@ chk() { # desc expected actual
   fi
 }
 has() { case "$1" in *"$2"*) echo 1 ;; *) echo 0 ;; esac; }
-published() { timeout 10 nak event --sec "$1" -c "$2" "$WS" 2>&1 | grep -c success; }
+published() { timeout 10 noz event --sec "$1" -c "$2" "$WS" 2>&1 | grep -c success; }
 
 # A NIP-86 call authorized with a NIP-98 (kind 27235) event signed by <sec>,
 # including the required payload (sha256 of the body) tag.
 call() { # sec body
   local sec=$1 body=$2 payload ev b64
   payload=$(printf '%s' "$body" | sha256sum | cut -d' ' -f1)
-  ev=$(timeout 10 nak event --sec "$sec" -k 27235 -t u="$HTTP" -t method=POST -t payload="$payload" -c "" 2>/dev/null)
+  ev=$(timeout 10 noz event --sec "$sec" -k 27235 -t u="$HTTP" -t method=POST -t payload="$payload" -c "" 2>/dev/null)
   b64=$(printf '%s' "$ev" | base64 -w0)
   curl -s --connect-timeout 5 --max-time 10 -X POST -H "Content-Type: application/nostr+json+rpc" \
     -H "Authorization: Nostr $b64" -d "$body" "$HTTP"

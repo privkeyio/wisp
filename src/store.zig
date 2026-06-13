@@ -517,7 +517,7 @@ pub const QueryIterator = struct {
                     iter.index_type = .pubkey;
                     @memcpy(iter.prefix[0..32], &authors[0]);
                     iter.prefix_len = 32;
-                    iter.skip_filter = (f.kinds() == null and f.ids() == null and !f.hasTagFilters() and f.search() == null);
+                    iter.skip_filter = (f.kinds() == null and f.ids() == null and !f.hasTagFilters() and f.search() == null and f.since() == 0 and f.until() == 0);
                     return iter;
                 }
             }
@@ -529,7 +529,7 @@ pub const QueryIterator = struct {
                         const kind_be = @byteSwap(@as(u32, @bitCast(kinds[0])));
                         @memcpy(iter.prefix[0..4], std.mem.asBytes(&kind_be));
                         iter.prefix_len = 4;
-                        iter.skip_filter = (f.search() == null);
+                        iter.skip_filter = (f.search() == null and f.since() == 0 and f.until() == 0);
                         return iter;
                     }
                 }
@@ -546,7 +546,7 @@ pub const QueryIterator = struct {
                                 iter.prefix[0] = tag_filter.letter;
                                 @memcpy(iter.prefix[1..33], &bytes);
                                 iter.prefix_len = 33;
-                                iter.skip_filter = (f.kinds() == null and f.authors() == null and f.ids() == null and f.search() == null);
+                                iter.skip_filter = (f.kinds() == null and f.authors() == null and f.ids() == null and f.search() == null and f.since() == 0 and f.until() == 0);
                             },
                             .string => {},
                         }
@@ -576,10 +576,19 @@ pub const QueryIterator = struct {
             self.started = true;
 
             const first_entry = switch (self.index_type) {
-                .kind, .pubkey => blk: {
-                    var seek_key: [72]u8 = undefined;
+                .kind, .pubkey, .tag => blk: {
+                    var seek_key: [73]u8 = undefined;
                     @memcpy(seek_key[0..self.prefix_len], self.prefix[0..self.prefix_len]);
-                    @memset(seek_key[self.prefix_len..][0..8], 0xFF);
+                    // Seek to the newest key at or below `until` for this prefix
+                    // so bounded queries don't scan the whole partition; with no
+                    // until, target the prefix max (all-0xFF timestamp).
+                    const until = self.filters[0].until();
+                    if (until > 0) {
+                        const until_be = @byteSwap(@as(u64, @bitCast(until)));
+                        @memcpy(seek_key[self.prefix_len..][0..8], std.mem.asBytes(&until_be));
+                    } else {
+                        @memset(seek_key[self.prefix_len..][0..8], 0xFF);
+                    }
                     @memset(seek_key[self.prefix_len + 8 ..][0..32], 0xFF);
                     const key_len = self.prefix_len + 40;
 
@@ -593,6 +602,16 @@ pub const QueryIterator = struct {
             };
 
             if (first_entry) |entry| {
+                // For the seeked indexes (kind/pubkey/tag) the first entry is the
+                // greatest key <= the seek target; if its prefix differs, there
+                // are no entries for this prefix (e.g. an empty kind whose seek
+                // fell back to .last on another kind), so we must stop rather
+                // than leak a wrong-prefix event when skip_filter is set.
+                if (self.prefix_len > 0 and (entry.key.len < self.prefix_len or
+                    !std.mem.eql(u8, entry.key[0..self.prefix_len], self.prefix[0..self.prefix_len])))
+                {
+                    return null;
+                }
                 if (try self.processEntry(entry)) |json| {
                     return json;
                 }
