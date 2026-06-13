@@ -272,31 +272,44 @@ const PoolConfig = struct { workers: u16, pool: u16 };
 // the budget when it divides evenly (1/2/4 workers) and just under it otherwise
 // (30 on a 3-CPU host). The pool floor of 4 keeps each pool usable should the
 // worker cap ever exceed the budget; at the current cap of 4 it never binds.
-fn computePoolConfig(cpu_count: usize) PoolConfig {
+//
+// configured_workers comes from config.workers: 0 keeps the CPU-derived default,
+// any positive value overrides it (a personal or memory-constrained relay can set
+// 1 to shed the extra per-worker buffer pools and threads).
+fn computePoolConfig(cpu_count: usize, configured_workers: u16) PoolConfig {
     const total_handler_budget: usize = 32;
-    const worker_count = @max(@as(usize, 1), @min(cpu_count, 4));
+    const worker_count = if (configured_workers > 0)
+        @as(usize, configured_workers)
+    else
+        @max(@as(usize, 1), @min(cpu_count, 4));
     const pool_count = @max(@as(usize, 4), @divTrunc(total_handler_budget, worker_count));
     return .{ .workers = @intCast(worker_count), .pool = @intCast(pool_count) };
 }
 
 test computePoolConfig {
     // 1 worker gets the full budget.
-    try std.testing.expectEqual(PoolConfig{ .workers = 1, .pool = 32 }, computePoolConfig(1));
+    try std.testing.expectEqual(PoolConfig{ .workers = 1, .pool = 32 }, computePoolConfig(1, 0));
     // Budget splits evenly across 2 and 4 workers, holding the total at 32.
-    try std.testing.expectEqual(PoolConfig{ .workers = 2, .pool = 16 }, computePoolConfig(2));
-    try std.testing.expectEqual(PoolConfig{ .workers = 4, .pool = 8 }, computePoolConfig(4));
+    try std.testing.expectEqual(PoolConfig{ .workers = 2, .pool = 16 }, computePoolConfig(2, 0));
+    try std.testing.expectEqual(PoolConfig{ .workers = 4, .pool = 8 }, computePoolConfig(4, 0));
     // 3 workers: floor division leaves the total just under budget (3 * 10 = 30).
-    try std.testing.expectEqual(PoolConfig{ .workers = 3, .pool = 10 }, computePoolConfig(3));
+    try std.testing.expectEqual(PoolConfig{ .workers = 3, .pool = 10 }, computePoolConfig(3, 0));
     // Worker count is capped at 4, so more CPUs do not shrink the pool further.
-    try std.testing.expectEqual(PoolConfig{ .workers = 4, .pool = 8 }, computePoolConfig(8));
-    try std.testing.expectEqual(PoolConfig{ .workers = 4, .pool = 8 }, computePoolConfig(64));
+    try std.testing.expectEqual(PoolConfig{ .workers = 4, .pool = 8 }, computePoolConfig(8, 0));
+    try std.testing.expectEqual(PoolConfig{ .workers = 4, .pool = 8 }, computePoolConfig(64, 0));
     // Degenerate cpu_count of 0 (e.g. getCpuCount failure fallback) still yields one worker.
-    try std.testing.expectEqual(PoolConfig{ .workers = 1, .pool = 32 }, computePoolConfig(0));
+    try std.testing.expectEqual(PoolConfig{ .workers = 1, .pool = 32 }, computePoolConfig(0, 0));
 
-    // Total handler concurrency never exceeds the budget for any reachable cpu_count.
+    // A configured worker count overrides the CPU-derived default regardless of cpu_count.
+    try std.testing.expectEqual(PoolConfig{ .workers = 1, .pool = 32 }, computePoolConfig(16, 1));
+    try std.testing.expectEqual(PoolConfig{ .workers = 2, .pool = 16 }, computePoolConfig(16, 2));
+    // The budget still splits across configured workers, with the pool floor of 4.
+    try std.testing.expectEqual(PoolConfig{ .workers = 16, .pool = 4 }, computePoolConfig(16, 16));
+
+    // Total handler concurrency never exceeds the budget on the auto path.
     var cpu: usize = 0;
     while (cpu <= 128) : (cpu += 1) {
-        const cfg = computePoolConfig(cpu);
+        const cfg = computePoolConfig(cpu, 0);
         try std.testing.expect(@as(usize, cfg.workers) >= 1);
         try std.testing.expect(@as(usize, cfg.workers) * @as(usize, cfg.pool) <= 32);
     }
@@ -352,12 +365,22 @@ pub const Server = struct {
         // syscalls, while the handler thread pool is split from a fixed budget so
         // total handler concurrency does not multiply thread/buffer memory per worker.
         const cpu_count = std.Thread.getCpuCount() catch 1;
-        const pool_config = computePoolConfig(cpu_count);
+        const pool_config = computePoolConfig(cpu_count, config.workers);
 
+        // HTTP requests to a relay are small: a WS upgrade (GET /), a NIP-11 doc
+        // (GET /), or a NIP-86 management call (POST /). Events arrive over the
+        // WebSocket, bounded separately by max_message_size. So the httpz worker
+        // buffers are sized for small HTTP bodies, not for event payloads: the
+        // per-worker large-buffer pool (large_buffer_count * max_body_size) and
+        // the connection preallocation (min_conn) are the main idle-memory draws.
         self.httpz_server = try httpz.Server(App).init(io, allocator, .{
             .address = address,
-            .request = .{ .max_body_size = 131072 },
-            .workers = .{ .count = pool_config.workers },
+            .request = .{ .max_body_size = 65536 },
+            .workers = .{
+                .count = pool_config.workers,
+                .large_buffer_count = 4,
+                .min_conn = 8,
+            },
             .thread_pool = .{ .count = pool_config.pool },
             .websocket = .{ .max_message_size = config.max_message_size },
         }, app);
