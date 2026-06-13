@@ -501,7 +501,9 @@ pub const Handler = struct {
     fn handleClose(self: *Handler, conn: *Connection, msg: *nostr.ClientMsg) void {
         const sub_id = msg.subscriptionId();
         self.subs.unsubscribe(conn, sub_id);
-        self.sendClosed(conn, sub_id, "");
+        // Per NIP-01, CLOSED is only sent when the relay ends a subscription on
+        // its own initiative; a client CLOSE is acknowledged by silently
+        // dropping the subscription.
     }
 
     fn handleCount(self: *Handler, conn: *Connection, msg: *nostr.ClientMsg) void {
