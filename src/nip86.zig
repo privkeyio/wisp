@@ -377,6 +377,13 @@ test "nip86 dispatch routing, param guards, and store round-trip" {
     var handler = Nip86Handler.init(testing.allocator, &config, &mgmt);
     defer handler.deinit();
 
+    // handle() gates every request behind NIP-98 auth before dispatch. A
+    // missing header and an invalid scheme are both rejected with 401, so the
+    // store is never reached without authentication.
+    const ban_req = "{\"method\":\"banpubkey\",\"params\":[\"00000000000000000000000000000000000000000000000000000000000000bb\"]}";
+    try testing.expectEqual(@as(u16, 401), handler.handle(ban_req, null, "https://relay/").status);
+    try testing.expectEqual(@as(u16, 401), handler.handle(ban_req, "Bearer xyz", "https://relay/").status);
+
     // The static method list responds 200.
     try testing.expectEqual(@as(u16, 200), handler.dispatch("supportedmethods", "[]").status);
 

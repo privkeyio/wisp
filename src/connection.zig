@@ -57,6 +57,8 @@ pub const Connection = struct {
         self.last_activity = .init(now);
         self.events_received = 0;
         self.events_sent = .init(0);
+        self.event_ts_head = 0;
+        self.event_ts_count = 0;
         self.write_guard = .init(0);
         self.client_ip = undefined;
         self.client_ip_len = 0;
@@ -245,6 +247,11 @@ test "checkEventRateLimit ring buffer" {
     var conn: Connection = undefined;
     conn.init(testing.allocator, 1);
     defer conn.deinit();
+
+    // init() must zero the ring state; production allocates via create(),
+    // which does not apply field defaults.
+    try testing.expectEqual(@as(u8, 0), conn.event_ts_count);
+    try testing.expectEqual(@as(u8, 0), conn.event_ts_head);
 
     // A zero limit disables rate limiting entirely.
     try testing.expect(conn.checkEventRateLimit(0));
