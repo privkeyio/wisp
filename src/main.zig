@@ -408,6 +408,7 @@ fn runExport(allocator: std.mem.Allocator, db_path: []const u8) !void {
 }
 
 test {
+    _ = @import("handler.zig");
     _ = @import("rate_limiter.zig");
     _ = @import("server.zig");
     _ = @import("relay_metrics.zig");
