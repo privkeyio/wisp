@@ -11,6 +11,7 @@ var events_rejected = std.atomic.Value(u64).init(0);
 var events_broadcast = std.atomic.Value(u64).init(0);
 var reqs_total = std.atomic.Value(u64).init(0);
 var rate_limited = std.atomic.Value(u64).init(0);
+var query_rate_limited = std.atomic.Value(u64).init(0);
 
 pub fn connectionOpened() void {
     _ = connections_total.fetchAdd(1, .monotonic);
@@ -36,6 +37,10 @@ pub fn rateLimited() void {
     _ = rate_limited.fetchAdd(1, .monotonic);
 }
 
+pub fn queryRateLimited() void {
+    _ = query_rate_limited.fetchAdd(1, .monotonic);
+}
+
 fn metric(w: anytype, name: []const u8, help: []const u8, kind: []const u8, value: u64) !void {
     try w.print("# HELP {s} {s}\n# TYPE {s} {s}\n{s} {d}\n", .{ name, help, name, kind, name, value });
 }
@@ -50,6 +55,7 @@ pub fn write(w: anytype, active_connections: u64) !void {
     try metric(w, "wisp_events_broadcast_total", "Events delivered to matching subscriptions", "counter", events_broadcast.load(.monotonic));
     try metric(w, "wisp_req_total", "REQ subscription messages received", "counter", reqs_total.load(.monotonic));
     try metric(w, "wisp_rate_limited_total", "Connections/events rejected by rate or connection limits", "counter", rate_limited.load(.monotonic));
+    try metric(w, "wisp_query_rate_limited_total", "Query messages (REQ/COUNT/NEG_OPEN) rejected by the query rate limit", "counter", query_rate_limited.load(.monotonic));
 }
 
 test write {

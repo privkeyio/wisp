@@ -151,6 +151,7 @@ jobs:
             kill -9 "$1" 2>/dev/null || true
           }
           nohup env WISP_HOST=127.0.0.1 WISP_PORT=7782 WISP_EVENTS_PER_MINUTE=100000 \
+            WISP_QUERIES_PER_MINUTE=100000 \
             WISP_STORAGE_PATH="$RUNNER_TEMP/wisp-cc" \
             ./zig-out/bin/wisp relay > relay-cc.log 2>&1 &
           pid=$!
@@ -170,6 +171,7 @@ jobs:
           }
           admin=79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
           nohup env WISP_HOST=127.0.0.1 WISP_PORT=7783 WISP_EVENTS_PER_MINUTE=100000 \
+            WISP_QUERIES_PER_MINUTE=100000 \
             WISP_STORAGE_PATH="$RUNNER_TEMP/wisp-src" \
             ./zig-out/bin/wisp relay > relay-src.log 2>&1 &
           src=$!

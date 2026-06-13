@@ -152,6 +152,7 @@ pub const Handler = struct {
     subs: *Subscriptions,
     broadcaster: *Broadcaster,
     event_limiter: *rate_limiter.EventRateLimiter,
+    query_limiter: *rate_limiter.EventRateLimiter,
     shutdown: *std.atomic.Value(bool),
     mgmt_store: *ManagementStore,
 
@@ -162,6 +163,7 @@ pub const Handler = struct {
         subs: *Subscriptions,
         broadcaster: *Broadcaster,
         event_limiter: *rate_limiter.EventRateLimiter,
+        query_limiter: *rate_limiter.EventRateLimiter,
         shutdown: *std.atomic.Value(bool),
         mgmt_store: *ManagementStore,
     ) Handler {
@@ -172,6 +174,7 @@ pub const Handler = struct {
             .subs = subs,
             .broadcaster = broadcaster,
             .event_limiter = event_limiter,
+            .query_limiter = query_limiter,
             .shutdown = shutdown,
             .mgmt_store = mgmt_store,
         };
@@ -415,6 +418,12 @@ pub const Handler = struct {
         @memcpy(sub_id_buf[0..sub_id_raw.len], sub_id_raw);
         const sub_id = sub_id_buf[0..sub_id_raw.len];
 
+        if (!self.query_limiter.checkAndRecord(conn.getClientIp())) {
+            metrics.queryRateLimited();
+            self.sendClosed(conn, sub_id, "rate-limited: too many queries");
+            return;
+        }
+
         if (self.config.auth_required) {
             if (!conn.isAuthenticated()) {
                 self.sendClosed(conn, sub_id, "auth-required: authentication required to subscribe");
@@ -500,6 +509,12 @@ pub const Handler = struct {
 
         if (sub_id.len == 0 or sub_id.len > 64) {
             self.sendClosed(conn, sub_id, "error: invalid subscription ID");
+            return;
+        }
+
+        if (!self.query_limiter.checkAndRecord(conn.getClientIp())) {
+            metrics.queryRateLimited();
+            self.sendClosed(conn, sub_id, "rate-limited: too many queries");
             return;
         }
 
@@ -611,6 +626,29 @@ pub const Handler = struct {
 
         if (sub_id.len == 0 or sub_id.len > 64) {
             self.sendNegErr(conn, sub_id, "error: invalid subscription ID");
+            return;
+        }
+
+        if (!self.query_limiter.checkAndRecord(conn.getClientIp())) {
+            metrics.queryRateLimited();
+            self.sendNegErr(conn, sub_id, "rate-limited: too many queries");
+            return;
+        }
+
+        // Reconciliation reveals which event IDs the relay holds, so it must
+        // honor the same auth gate as REQ/COUNT.
+        if (self.config.auth_required and !conn.isAuthenticated()) {
+            self.sendNegErr(conn, sub_id, "auth-required: authentication required");
+            return;
+        }
+
+        // Each session buffers up to negentropy_max_sync_events in memory; cap the
+        // number of concurrent sessions so a connection cannot exhaust memory by
+        // opening many distinct sub_ids. Re-opening an existing sub_id is allowed.
+        if (conn.getNegSession(sub_id) == null and
+            conn.neg_sessions.count() >= self.config.max_neg_sessions)
+        {
+            self.sendNegErr(conn, sub_id, "blocked: too many negentropy sessions");
             return;
         }
 
