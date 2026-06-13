@@ -11,8 +11,8 @@
             .hash = "websocket-0.1.0-ZPISdV_aBACU9pGuvrTQ2z8uxz_Sp8JnJgQaiGKQIx1l",
         },
         .nostr = .{
-            .url = "https://github.com/privkeyio/libnostr-z/archive/refs/tags/v0.3.0.tar.gz",
-            .hash = "nostr-0.3.0-JY6OcJJ0DwDrcooJo6viPaiDg6ohNPie0wV10XykgQPE",
+            .url = "https://github.com/privkeyio/libnostr-z/archive/refs/tags/v0.3.2.tar.gz",
+            .hash = "nostr-0.3.2-JY6OcPiYDwCqpbCqr3dTI3IlRd2055ALPPUUmV0n3eCs",
         },
         // http.zig: HTTP routing (NIP-11/NIP-86) + WebSocket upgrade onto
         // websocket.zig's epoll worker pool. Pins the same websocket.zig commit.
