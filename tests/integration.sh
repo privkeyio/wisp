@@ -3,15 +3,15 @@
 # wisp instance and asserts the responses, covering the NIPs wisp advertises.
 #
 # Usage: tests/integration.sh [relay-url]   (default ws://127.0.0.1:7777)
-# Requires: nak (https://github.com/fiatjaf/nak) on PATH.
+# Requires: noz (https://github.com/privkeyio/noz) on PATH.
 #
 # Exits non-zero if any assertion fails, so it can gate CI.
 set -u
 R="${1:-ws://127.0.0.1:7777}"
 SEC1=0000000000000000000000000000000000000000000000000000000000000001
 SEC2=0000000000000000000000000000000000000000000000000000000000000002
-PK1=$(nak key public $SEC1)
-PK2=$(nak key public $SEC2)
+PK1=$(noz key public $SEC1)
+PK2=$(noz key public $SEC2)
 pass=0
 fail=0
 
@@ -25,9 +25,9 @@ chk() { # desc expected actual
   fi
 }
 # count events returned by a REQ
-req() { timeout 10 nak req "$@" "$R" 2>/dev/null | grep -c '"kind"'; }
-pub() { nak event "$@" "$R" >/dev/null 2>&1; }
-idof() { nak event "$@" "$R" 2>/dev/null | grep -oE '"id":"[a-f0-9]{64}"' | head -1 | cut -d'"' -f4; }
+req() { timeout 10 noz req "$@" "$R" 2>/dev/null | grep -c '"kind"'; }
+pub() { noz event "$@" "$R" >/dev/null 2>&1; }
+idof() { noz event "$@" "$R" 2>/dev/null | grep -oE '"id":"[a-f0-9]{64}"' | head -1 | cut -d'"' -f4; }
 
 # --- NIP-01: publish + EVENT delivery on REQ (the core round-trip) ---
 ID=$(idof --sec $SEC1 -c "hello world")
@@ -59,7 +59,7 @@ pub --sec $SEC2 -k 0 --ts $((rbase + 1)) -c '{"name":"v2"}'
 sleep 0.5
 chk "NIP-16 replaceable kept single" 1 "$(req -k 0 -a "$PK2")"
 chk "NIP-16 replaceable keeps latest" "v2" \
-  "$(timeout 10 nak req -k 0 -a "$PK2" "$R" 2>/dev/null | grep -o 'v[12]' | head -1)"
+  "$(timeout 10 noz req -k 0 -a "$PK2" "$R" 2>/dev/null | grep -o 'v[12]' | head -1)"
 
 # --- NIP-16 ephemeral (kind 20000) not stored ---
 pub --sec $SEC1 -k 20000 -c "ephemeral"
@@ -90,12 +90,12 @@ pub --sec $SEC1 -k 1 -p "$PK2" -c "veggie wrap"
 sleep 0.5
 chk "NIP-50 search via tag index" 1 "$(req -k 1 -p "$PK2" --search tuna)"
 
-# --- NIP-45 COUNT (nak writes "<relay>: <n>" to stderr) ---
+# --- NIP-45 COUNT (noz prints the count to stdout) ---
 chk "NIP-45 COUNT returns a count" 1 \
-  "$(timeout 10 nak count -k 1 -t t=wisptag "$R" 2>&1 | awk '/: [0-9]+$/{print $NF}')"
+  "$(timeout 10 noz count -k 1 -t t=wisptag "$R" 2>/dev/null)"
 
 # --- NIP-11 relay information document ---
-INFO=$(timeout 10 nak relay "$R" 2>/dev/null)
+INFO=$(timeout 10 noz relay "$R" 2>/dev/null)
 present() { echo "$INFO" | grep -qE "\"$1\"[[:space:]]*:" && echo 1 || echo 0; }
 chk "NIP-11 info has name" 1 "$(present name)"
 chk "NIP-11 info has software" 1 "$(present software)"
@@ -116,7 +116,7 @@ chk "CORS preflight (OPTIONS) answered" 1 \
 # Explicit, distinct created_at values so ordering is deterministic (no
 # second-granularity ties that would otherwise break by event id).
 SEC3=0000000000000000000000000000000000000000000000000000000000000003
-PK3=$(nak key public $SEC3)
+PK3=$(noz key public $SEC3)
 base=$(($(date +%s) - 10))
 pub --sec $SEC3 --ts $base -c "lim1"
 pub --sec $SEC3 --ts $((base + 1)) -c "lim2"
@@ -124,7 +124,7 @@ pub --sec $SEC3 --ts $((base + 2)) -c "lim3"
 sleep 0.3
 chk "NIP-01 limit caps to N" 2 "$(req -k 1 -a "$PK3" -l 2)"
 chk "NIP-01 limit returns newest first" "lim3" \
-  "$(timeout 10 nak req -k 1 -a "$PK3" -l 2 "$R" 2>/dev/null | grep -o 'lim[0-9]' | head -1)"
+  "$(timeout 10 noz req -k 1 -a "$PK3" -l 2 "$R" 2>/dev/null | grep -o 'lim[0-9]' | head -1)"
 
 # --- NIP-40 expiration: expired rejected at publish, future-expiry kept ---
 now=$(date +%s)
@@ -148,7 +148,7 @@ sleep 0.3
 chk "created_at far-future event rejected" 0 "$(req -k 1 --search tslimitfuture -a "$PK1")"
 
 # --- NIP-70 protected events: rejected by default (no auth available) ---
-prot=$(nak event --sec $SEC1 -t '-' -c protected70 "$R" 2>&1 | grep -q success && echo ok || echo reject)
+prot=$(noz event --sec $SEC1 -t '-' -c protected70 "$R" 2>&1 | grep -q success && echo ok || echo reject)
 chk "NIP-70 protected event rejected without auth" reject "$prot"
 sleep 0.3
 chk "NIP-70 protected event not stored" 0 "$(req -k 1 --search protected70 -a "$PK1")"

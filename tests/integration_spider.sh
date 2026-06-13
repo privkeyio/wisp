@@ -9,13 +9,13 @@
 #   WISP_SPIDER_RELAYS=<source ws url>
 #
 # Usage: tests/integration_spider.sh <source-ws-url> <spider-ws-url>
-# Requires: nak on PATH. Exits non-zero if any assertion fails.
+# Requires: noz on PATH. Exits non-zero if any assertion fails.
 set -u
 SRC="${1:?source relay url required}"
 SPD="${2:?spider relay url required}"
 SEC1=0000000000000000000000000000000000000000000000000000000000000001
 SEC2=0000000000000000000000000000000000000000000000000000000000000002
-PK2=$(nak key public $SEC2)
+PK2=$(noz key public $SEC2)
 N=5
 pass=0
 fail=0
@@ -29,12 +29,12 @@ chk() { # desc expected actual
     fail=$((fail + 1))
   fi
 }
-count() { timeout 8 nak req -k 1 -a "$PK2" -l 50 "$1" 2>/dev/null | grep -c '"kind"'; }
+count() { timeout 8 noz req -k 1 -a "$PK2" -l 50 "$1" 2>/dev/null | grep -c '"kind"'; }
 
 # Admin (SEC1) follows SEC2 via a kind-3 contact list; SEC2 publishes notes.
-nak event --sec $SEC1 -k 3 -p "$PK2" -c "" "$SRC" >/dev/null 2>&1
+noz event --sec $SEC1 -k 3 -p "$PK2" -c "" "$SRC" >/dev/null 2>&1
 for i in $(seq 1 $N); do
-  nak event --sec $SEC2 -c "spider note $i" "$SRC" >/dev/null 2>&1
+  noz event --sec $SEC2 -c "spider note $i" "$SRC" >/dev/null 2>&1
 done
 sleep 1
 chk "source relay seeded with followed-author notes" "$N" "$(count "$SRC")"
@@ -51,7 +51,7 @@ done
 chk "spider synced followed-author notes via NIP-77" "$N" "$synced"
 
 # Live sync: a new note on the source should reach the spider.
-nak event --sec $SEC2 -c "spider live note" "$SRC" >/dev/null 2>&1
+noz event --sec $SEC2 -c "spider live note" "$SRC" >/dev/null 2>&1
 live=0
 start=$SECONDS
 until [ $((SECONDS - start)) -ge 30 ]; do

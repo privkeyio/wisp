@@ -50,10 +50,13 @@ jobs:
           curl -L https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz | tar -xJ
           echo "$PWD/zig-x86_64-linux-0.16.0" >> $GITHUB_PATH
 
-      - name: Install nak (nostr test client)
+      - name: Build noz (nostr test client)
+        env:
+          NOZ_VERSION: v0.2.0
         run: |
-          go install github.com/fiatjaf/nak@v0.19.12
-          echo "$HOME/go/bin" >> $GITHUB_PATH
+          git clone --depth 1 --branch "$NOZ_VERSION" https://github.com/privkeyio/noz "$RUNNER_TEMP/noz"
+          (cd "$RUNNER_TEMP/noz" && zig build -Doptimize=ReleaseFast)
+          echo "$RUNNER_TEMP/noz/zig-out/bin" >> $GITHUB_PATH
 
       - name: Build relay
         run: zig build
@@ -203,9 +206,9 @@ jobs:
             return 1
           }
           # grep -c exits 1 on zero matches; keep it from tripping `set -e`
-          count() { timeout 8 nak req -k 1 -l 50 ws://127.0.0.1:7785 2>/dev/null | grep -c '"kind"' || true; }
+          count() { timeout 8 noz req -k 1 -l 50 ws://127.0.0.1:7785 2>/dev/null | grep -c '"kind"' || true; }
           launch || { echo "crash relay not ready"; cat relay-crash.log 2>/dev/null; kill "$PID" 2>/dev/null; exit 1; }
-          for i in $(seq 1 10); do nak event --sec $sec -c "crash$i" ws://127.0.0.1:7785 >/dev/null 2>&1; done
+          for i in $(seq 1 10); do noz event --sec $sec -c "crash$i" ws://127.0.0.1:7785 >/dev/null 2>&1; done
           sleep 1
           before=$(count)
           # unclean kill, before the periodic 60s sync
