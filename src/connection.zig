@@ -57,6 +57,8 @@ pub const Connection = struct {
         self.last_activity = .init(now);
         self.events_received = 0;
         self.events_sent = .init(0);
+        self.event_ts_head = 0;
+        self.event_ts_count = 0;
         self.write_guard = .init(0);
         self.client_ip = undefined;
         self.client_ip_len = 0;
@@ -125,13 +127,15 @@ pub const Connection = struct {
     }
 
     pub fn addSubscription(self: *Connection, sub_id: []const u8, filters: []const nostr.Filter, max_subs: u32) !void {
+        // Drop any existing subscription with this id first so replacing one at
+        // capacity is allowed; only genuinely new ids are subject to the limit.
+        self.removeSubscription(sub_id);
+
         if (self.subscriptions.count() >= max_subs) {
             return error.TooManySubscriptions;
         }
 
         const alloc = self.allocator();
-
-        self.removeSubscription(sub_id);
 
         const sub_id_copy = try alloc.dupe(u8, sub_id);
         const filters_copy = try alloc.alloc(nostr.Filter, filters.len);
@@ -227,3 +231,104 @@ pub const Subscription = struct {
     filters: []const nostr.Filter,
     created_at: i64,
 };
+
+const testing = std.testing;
+
+// 64- and 128-hex-char fields so Event.parse accepts the structure.
+const HID = "0" ** 63 ++ "1";
+const HPK = "0" ** 63 ++ "2";
+const HSIG = "0" ** 127 ++ "3";
+
+fn eventJson(comptime kind: []const u8) []const u8 {
+    return "[\"EVENT\",{\"id\":\"" ++ HID ++ "\",\"pubkey\":\"" ++ HPK ++
+        "\",\"created_at\":1700000000,\"kind\":" ++ kind ++
+        ",\"tags\":[],\"content\":\"hi\",\"sig\":\"" ++ HSIG ++ "\"}]";
+}
+
+test "checkEventRateLimit ring buffer" {
+    var conn: Connection = undefined;
+    conn.init(testing.allocator, 1);
+    defer conn.deinit();
+
+    // init() must zero the ring state; production allocates via create(),
+    // which does not apply field defaults.
+    try testing.expectEqual(@as(u8, 0), conn.event_ts_count);
+    try testing.expectEqual(@as(u8, 0), conn.event_ts_head);
+
+    // A zero limit disables rate limiting entirely.
+    try testing.expect(conn.checkEventRateLimit(0));
+    // An empty window is under any positive limit.
+    try testing.expect(conn.checkEventRateLimit(5));
+
+    var n: usize = 0;
+    while (n < 4) : (n += 1) conn.recordEvent();
+    try testing.expect(conn.checkEventRateLimit(5)); // 4 < 5
+    conn.recordEvent(); // 5th in the same window
+    try testing.expect(!conn.checkEventRateLimit(5)); // 5 is not < 5
+
+    // The 256-slot ring caps its in-window count at 255 no matter how many
+    // more arrive, so a limit above 255 can never be reached.
+    n = 0;
+    while (n < 300) : (n += 1) conn.recordEvent();
+    try testing.expect(!conn.checkEventRateLimit(255));
+    try testing.expect(conn.checkEventRateLimit(256));
+}
+
+test "addSubscription enforces max_subs" {
+    var conn: Connection = undefined;
+    conn.init(testing.allocator, 1);
+    defer conn.deinit();
+
+    var req = try nostr.ClientMsg.parse("[\"REQ\",\"s\",{\"kinds\":[1]}]");
+    defer req.deinit();
+    const filters = try req.getFilters(conn.allocator());
+
+    try conn.addSubscription("a", filters, 2);
+    try conn.addSubscription("b", filters, 2);
+    try testing.expectError(error.TooManySubscriptions, conn.addSubscription("c", filters, 2));
+    try testing.expectEqual(@as(usize, 2), conn.subscriptions.count());
+}
+
+test "addSubscription replaces an existing id in place" {
+    var conn: Connection = undefined;
+    conn.init(testing.allocator, 1);
+    defer conn.deinit();
+
+    var req = try nostr.ClientMsg.parse("[\"REQ\",\"s\",{\"kinds\":[1]}]");
+    defer req.deinit();
+    const filters = try req.getFilters(conn.allocator());
+
+    try conn.addSubscription("a", filters, 5);
+    try conn.addSubscription("a", filters, 5);
+    try testing.expectEqual(@as(usize, 1), conn.subscriptions.count());
+
+    // Replacing an existing id is allowed even at capacity; only new ids are
+    // rejected once max_subs is reached.
+    try conn.addSubscription("b", filters, 2);
+    try testing.expectEqual(@as(usize, 2), conn.subscriptions.count());
+    try conn.addSubscription("a", filters, 2);
+    try testing.expectEqual(@as(usize, 2), conn.subscriptions.count());
+    try testing.expect(conn.subscriptions.contains("a"));
+    try testing.expectError(error.TooManySubscriptions, conn.addSubscription("c", filters, 2));
+}
+
+test "matchesEvent returns the matching sub id or null" {
+    var conn: Connection = undefined;
+    conn.init(testing.allocator, 1);
+    defer conn.deinit();
+
+    var req = try nostr.ClientMsg.parse("[\"REQ\",\"kind1\",{\"kinds\":[1]}]");
+    defer req.deinit();
+    const filters = try req.getFilters(conn.allocator());
+    try conn.addSubscription("kind1", filters, 5);
+
+    var ev1 = try nostr.ClientMsg.parse(eventJson("1"));
+    defer ev1.deinit();
+    const event1 = try ev1.getEvent();
+    try testing.expectEqualStrings("kind1", conn.matchesEvent(&event1).?);
+
+    var ev7 = try nostr.ClientMsg.parse(eventJson("7"));
+    defer ev7.deinit();
+    const event7 = try ev7.getEvent();
+    try testing.expect(conn.matchesEvent(&event7) == null);
+}
