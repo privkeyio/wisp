@@ -61,50 +61,47 @@ pub const Store = struct {
     }
 
     pub fn store(self: *Store, event: *const nostr.Event, json: []const u8) !StoreResult {
+        var txn = try self.lmdb.beginTxn(false);
+        errdefer txn.abort();
+        const result = try self.storeInTxn(&txn, event, json);
+        try txn.commit();
+        if (result.stored) self.query_cache.invalidate();
+        return result;
+    }
+
+    // Store an event within a caller-provided write transaction. Never aborts the
+    // txn: every rejection is decided before any write, so a rejected event leaves
+    // the shared (batched) transaction untouched. The caller commits and, when any
+    // event in the batch was stored, invalidates the query cache.
+    pub fn storeInTxn(self: *Store, txn: *Txn, event: *const nostr.Event, json: []const u8) !StoreResult {
         const kind_type = nostr.kindType(event.kind());
 
         if (kind_type == .ephemeral) {
             return .{ .stored = false, .message = "ephemeral: not stored" };
         }
 
-        var txn = try self.lmdb.beginTxn(false);
-        errdefer txn.abort();
-
         const id = event.id();
 
         if (try txn.get(self.deleted, id) != null) {
-            txn.abort();
             return .{ .stored = false, .message = "deleted: event was deleted" };
         }
 
-        var replaced_id: ?[32]u8 = null;
+        if (try txn.get(self.events, id) != null) {
+            return .{ .stored = false, .message = "duplicate: already have this event" };
+        }
 
+        var replaced_id: ?[32]u8 = null;
         if (kind_type == .replaceable or kind_type == .addressable) {
-            const result = try self.handleReplaceable(&txn, event, kind_type);
+            const result = try self.handleReplaceable(txn, event, kind_type);
             switch (result) {
-                .rejected => {
-                    txn.abort();
-                    return .{ .stored = false, .message = "replaced: have newer event" };
-                },
-                .replaced => |rid| {
-                    replaced_id = rid;
-                },
+                .rejected => return .{ .stored = false, .message = "replaced: have newer event" },
+                .replaced => |rid| replaced_id = rid,
                 .new_entry => {},
             }
         }
 
-        txn.putNoOverwrite(self.events, id, json) catch |err| {
-            if (err == error.KeyExists) {
-                txn.abort();
-                return .{ .stored = false, .message = "duplicate: already have this event" };
-            }
-            return err;
-        };
-
-        try self.indexEvent(&txn, event);
-        try txn.commit();
-
-        self.query_cache.invalidate();
+        try txn.put(self.events, id, json);
+        try self.indexEvent(txn, event);
 
         return .{ .stored = true, .replaced_id = replaced_id };
     }
@@ -250,25 +247,27 @@ pub const Store = struct {
     pub fn delete(self: *Store, event_id: *const [32]u8, requester_pubkey: *const [32]u8) !bool {
         var txn = try self.lmdb.beginTxn(false);
         errdefer txn.abort();
+        const ok = try self.deleteInTxn(&txn, event_id, requester_pubkey);
+        try txn.commit();
+        if (ok) self.query_cache.invalidate();
+        return ok;
+    }
 
-        const json = try txn.get(self.events, event_id) orelse {
-            txn.abort();
-            return false;
-        };
+    // Delete within a caller-provided write transaction (no abort, no commit). The
+    // requester must own the event. Returns false if the event is absent or not
+    // owned, leaving the shared transaction untouched.
+    pub fn deleteInTxn(self: *Store, txn: *Txn, event_id: *const [32]u8, requester_pubkey: *const [32]u8) !bool {
+        const json = try txn.get(self.events, event_id) orelse return false;
 
         var event = try nostr.Event.parse(json);
         defer event.deinit();
 
-        if (!std.mem.eql(u8, event.pubkey(), requester_pubkey)) {
-            txn.abort();
-            return false;
-        }
+        if (!std.mem.eql(u8, event.pubkey(), requester_pubkey)) return false;
 
-        try self.deleteEventInternal(&txn, &event);
+        try self.deleteEventInternal(txn, &event);
         const now = nostr.io.timestamp();
         const now_bytes = std.mem.asBytes(&now);
         try txn.put(self.deleted, event_id, now_bytes);
-        try txn.commit();
         return true;
     }
 
