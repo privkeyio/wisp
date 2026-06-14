@@ -287,7 +287,7 @@ fn runImport(allocator: std.mem.Allocator, db_path: []const u8) !void {
     try nostr.init();
     defer nostr.cleanup();
 
-    var lmdb = try Lmdb.init(allocator, db_path, 10240, .none);
+    var lmdb = try Lmdb.init(allocator, db_path, 10240, .full);
     defer lmdb.deinit();
 
     var store = try Store.init(allocator, &lmdb);
@@ -385,7 +385,7 @@ fn printStatus(file: std.Io.File, comptime fmt: []const u8, args: anytype) void 
 }
 
 fn runExport(allocator: std.mem.Allocator, db_path: []const u8) !void {
-    var lmdb = try Lmdb.init(allocator, db_path, 10240, .none);
+    var lmdb = try Lmdb.init(allocator, db_path, 10240, .full);
     defer lmdb.deinit();
 
     var store = try Store.init(allocator, &lmdb);

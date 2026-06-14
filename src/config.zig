@@ -354,3 +354,18 @@ pub const Config = struct {
         }
     }
 };
+
+const testing = std.testing;
+
+test "storage sync key parses into storage_sync" {
+    var config = Config.defaults();
+    config._allocator = testing.allocator;
+    config._allocated = .empty;
+    defer config.deinit();
+
+    try config.setValue("storage", "sync", "full");
+    try testing.expectEqualStrings("full", config.storage_sync);
+
+    try config.setValue("storage", "sync", "meta");
+    try testing.expectEqualStrings("meta", config.storage_sync);
+}

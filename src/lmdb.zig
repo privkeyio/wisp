@@ -108,12 +108,14 @@ pub const Lmdb = struct {
     }
 
     pub fn deinit(self: *Lmdb) void {
-        _ = c.mdb_env_sync(self.env, 1);
+        const rc = c.mdb_env_sync(self.env, 1);
+        if (rc != 0) std.log.warn("LMDB sync on shutdown failed: {}", .{rc});
         c.mdb_env_close(self.env);
     }
 
     pub fn sync(self: *Lmdb) void {
-        _ = c.mdb_env_sync(self.env, 1);
+        const rc = c.mdb_env_sync(self.env, 1);
+        if (rc != 0) std.log.warn("LMDB sync failed: {}", .{rc});
     }
 
     pub fn beginTxn(self: *Lmdb, readonly: bool) !Txn {
