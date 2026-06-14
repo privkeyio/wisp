@@ -78,6 +78,21 @@ pub const Subscriptions = struct {
         return true;
     }
 
+    // Write a message to one connection by id, bumping its write_guard under the
+    // registry lock so the connection cannot be freed mid-write. Used by the
+    // writer thread to deliver OK replies after a batch commits.
+    pub fn sendTo(self: *Subscriptions, conn_id: u64, data: []const u8) void {
+        const io = nostr.io.io();
+        self.rwlock.lockSharedUncancelable(io);
+        const conn = self.connections.get(conn_id);
+        if (conn) |c| _ = c.write_guard.fetchAdd(1, .acquire);
+        self.rwlock.unlockShared(io);
+
+        const c = conn orelse return;
+        defer _ = c.write_guard.fetchSub(1, .release);
+        c.write(data) catch {};
+    }
+
     pub fn connectionCount(self: *Subscriptions) usize {
         const io = nostr.io.io();
         self.rwlock.lockSharedUncancelable(io);

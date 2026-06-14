@@ -79,18 +79,14 @@ crash safety:
 | `meta` | Flush data on every commit, defer only the metapage fsync. | The last transaction may roll back, but the database stays consistent. |
 | `full` | Fsync on every commit. Durable. | No acknowledged write is lost. |
 
-Indicative throughput on the same NVMe host (peak write, single session):
+In the durable modes (`meta`/`full`) writes go through a group-commit writer
+thread: events that arrive close together are committed in one transaction, so a
+batch pays a single fsync rather than one per event. Throughput therefore scales
+with how many clients publish concurrently. The default `none` mode keeps the
+faster synchronous write path, since there is no fsync to amortize.
 
-| Mode | Events/sec | p99 |
-|------|-----------:|----:|
-| `none` | ~15,700 | 0.5 ms |
-| `meta` | ~2,300 | 3.1 ms |
-| `full` | ~1,300 | 8.9 ms |
-
-The durable modes are this much slower because Wisp commits one LMDB transaction per event,
-so `full` does one fsync per event with no batching. The default stays `none` to preserve
-current behavior; use `meta` for a good safety/throughput balance or `full` when no
-acknowledged write may ever be lost.
+The default stays `none` to preserve current behavior; use `meta` for a good
+safety/throughput balance, or `full` when no acknowledged write may ever be lost.
 
 ### `[limits]`
 

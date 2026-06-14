@@ -18,6 +18,7 @@ const nostr = @import("nostr.zig");
 const rate_limiter = @import("rate_limiter.zig");
 const ManagementStore = @import("management_store.zig").ManagementStore;
 const Nip86Handler = @import("nip86.zig").Nip86Handler;
+const Writer = @import("writer.zig").Writer;
 
 var g_shutdown: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
@@ -182,7 +183,17 @@ pub fn main(init: std.process.Init) !void {
     var query_limiter = rate_limiter.EventRateLimiter.init(allocator, config.queries_per_minute);
     defer query_limiter.deinit();
 
-    var handler = Handler.init(allocator, &config, &store, &subs, &broadcaster, &event_limiter, &query_limiter, &g_shutdown, &mgmt_store);
+    // The group-commit writer exists only for durable sync modes, where batching
+    // amortizes the fsync. In the default non-durable mode events are stored
+    // synchronously, which is faster with nothing to flush.
+    var writer = Writer.init(allocator, &store, &broadcaster, &subs);
+    const writer_ptr: ?*Writer = if (sync_mode == .none) null else blk: {
+        try writer.start();
+        break :blk &writer;
+    };
+    defer if (writer_ptr) |w| w.deinit();
+
+    var handler = Handler.init(allocator, &config, &store, &subs, &broadcaster, &event_limiter, &query_limiter, &g_shutdown, &mgmt_store, writer_ptr);
 
     var server: Server = undefined;
     try server.init(allocator, init.io, &config, &handler, &subs, &g_shutdown, &nip86_handler);

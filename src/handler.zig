@@ -9,6 +9,7 @@ const NegSession = connection.NegSession;
 const nostr = @import("nostr.zig");
 const rate_limiter = @import("rate_limiter.zig");
 const ManagementStore = @import("management_store.zig").ManagementStore;
+const Writer = @import("writer.zig").Writer;
 const metrics = @import("relay_metrics.zig");
 
 fn isKindOnlyQuery(f: *const nostr.Filter) bool {
@@ -155,6 +156,10 @@ pub const Handler = struct {
     query_limiter: *rate_limiter.EventRateLimiter,
     shutdown: *std.atomic.Value(bool),
     mgmt_store: *ManagementStore,
+    // Group-commit writer, present only for durable sync modes (meta/full). When
+    // null (the default, non-durable `none` mode) events are stored synchronously
+    // on the worker thread, which is faster when there is no fsync to amortize.
+    writer: ?*Writer,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -166,6 +171,7 @@ pub const Handler = struct {
         query_limiter: *rate_limiter.EventRateLimiter,
         shutdown: *std.atomic.Value(bool),
         mgmt_store: *ManagementStore,
+        writer: ?*Writer,
     ) Handler {
         return .{
             .allocator = allocator,
@@ -177,6 +183,7 @@ pub const Handler = struct {
             .query_limiter = query_limiter,
             .shutdown = shutdown,
             .mgmt_store = mgmt_store,
+            .writer = writer,
         };
     }
 
@@ -345,6 +352,16 @@ pub const Handler = struct {
             };
         };
 
+        // Durable modes: hand off to the group-commit writer, which stores the
+        // event in a batched transaction and sends OK + broadcasts only after the
+        // commit, so an acknowledged write is on disk. Validation stays synchronous.
+        if (self.writer) |writer| {
+            if (!writer.submit(.event, conn.id, json)) {
+                self.sendOk(conn, id, false, "error: relay overloaded");
+            }
+            return;
+        }
+
         const result = self.store.store(&event, json) catch {
             self.sendOk(conn, id, false, "error: storage failed");
             return;
@@ -358,7 +375,6 @@ pub const Handler = struct {
         }
 
         self.sendOk(conn, id, true, "");
-
         self.broadcaster.broadcast(&event);
     }
 
@@ -372,15 +388,29 @@ pub const Handler = struct {
         };
         defer self.allocator.free(ids_to_delete);
 
+        const json = if (event.raw_json.len > 0)
+            event.raw_json
+        else blk: {
+            var json_buf: [65536]u8 = undefined;
+            break :blk event.serialize(&json_buf) catch {
+                self.sendOk(conn, id, false, "error: serialization failed");
+                return;
+            };
+        };
+
+        // Durable modes: the writer applies the deletions and stores the deletion
+        // event in the same batched, ordered transaction as regular events, which
+        // preserves same-connection publish/delete ordering.
+        if (self.writer) |writer| {
+            if (!writer.submit(.deletion, conn.id, json)) {
+                self.sendOk(conn, id, false, "error: relay overloaded");
+            }
+            return;
+        }
+
         for (ids_to_delete) |target_id| {
             _ = self.store.delete(&target_id, pubkey) catch {};
         }
-
-        var json_buf: [65536]u8 = undefined;
-        const json = event.serialize(&json_buf) catch {
-            self.sendOk(conn, id, false, "error: serialization failed");
-            return;
-        };
 
         const stored = if (self.store.store(event, json)) |r| r.stored else |_| false;
 
