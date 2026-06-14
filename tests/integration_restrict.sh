@@ -30,8 +30,10 @@ chk() { # desc expected actual
 # TCP connection per attempt) should not fail the suite, while a real rejection
 # or a deterministic bug still reports reject after all attempts.
 pubres() { # noz-args...
-  for _ in 1 2 3; do
+  for attempt in 1 2 3; do
     if timeout 10 noz event "$@" "$R" 2>&1 | grep -q 'success'; then echo ok; return; fi
+    [ -n "${NOZ_DEBUG_RETRIES:-}" ] && echo "pubres: attempt $attempt failed [noz event $*]" >&2
+    [ "$attempt" -lt 3 ] && sleep 1
   done
   echo reject
 }
