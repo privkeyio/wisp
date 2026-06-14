@@ -11,17 +11,17 @@
             .hash = "websocket-0.1.0-ZPISdV_aBACU9pGuvrTQ2z8uxz_Sp8JnJgQaiGKQIx1l",
         },
         .nostr = .{
-            .url = "https://github.com/privkeyio/libnostr-z/archive/refs/tags/v0.3.3.tar.gz",
-            .hash = "nostr-0.3.3-JY6OcOSaDwCoLI1RJOisJcxXrdzzP3Z57GyVBoC0wx2-",
+            .url = "https://github.com/privkeyio/libnostr-z/archive/refs/tags/v0.3.6.tar.gz",
+            .hash = "nostr-0.3.6-JY6OcLPKDwAP8UJz5qRAVc4LKg3AB2zE7Eok-gky9o4d",
         },
         // http.zig: HTTP routing (NIP-11/NIP-86) + WebSocket upgrade onto
         // websocket.zig's epoll worker pool. Pinned to privkeyio fork commit
-        // 061104c (upstream karlseguin 5f60277 + a fix for a lost websocket read
-        // event that leaked connections under load, CLOSE_WAIT); upstream PR
-        // karlseguin/http.zig#212.
+        // 4c98859 (branch fix/websocket-nonblocking-lost-read-event), upstream PR
+        // karlseguin/http.zig#212: fixes lost EPOLLONESHOT websocket read events
+        // that leak connections (CLOSE_WAIT) and hang clients under load.
         .httpz = .{
-            .url = "https://github.com/privkeyio/http.zig/archive/061104c8e5a67dd22941da2d5f38f011550f5bc0.tar.gz",
-            .hash = "httpz-0.0.0-PNVzrJLlCAClBJ52r0KravlJNK8UVNOSxnb4ppTlC_WG",
+            .url = "https://github.com/privkeyio/http.zig/archive/4c98859d4c04ce6a9c19330644bfa0f86f069b4f.tar.gz",
+            .hash = "httpz-0.0.0-PNVzrPruCABsma9t2qIEL1R2DNPg9Zu8DjN6xhTZ2Rh0",
         },
     },
     .paths = .{
