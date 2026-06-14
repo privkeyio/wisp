@@ -52,7 +52,7 @@ jobs:
 
       - name: Build noz (nostr test client)
         env:
-          NOZ_VERSION: v0.2.0
+          NOZ_VERSION: v0.2.1
         run: |
           git clone --depth 1 --branch "$NOZ_VERSION" https://github.com/privkeyio/noz "$RUNNER_TEMP/noz"
           (cd "$RUNNER_TEMP/noz" && zig build -Doptimize=ReleaseFast)
