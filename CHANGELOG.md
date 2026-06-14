@@ -10,11 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Default storage `sync` mode is now `meta` (durable, never corrupts) instead of `none`; use `sync = none` for maximum throughput on disposable data
-- Updated libnostr-z to v0.3.3
+- Updated libnostr-z to v0.3.6
 - Updated libnostr-z to v0.1.6
 
 ### Fixed
 
+- Fixed lost WebSocket read events under load that could leak connections (CLOSE_WAIT) and hang clients, e.g. an authed publish whose NIP-42 challenge arrived in the same packet as the upgrade response (http.zig and libnostr-z websocket fixes)
 - No longer send `CLOSED` in reply to a client `CLOSE` (NIP-01)
 - Fixed config file argument parsing and inline comment handling
 - Fixed spider connection handling
