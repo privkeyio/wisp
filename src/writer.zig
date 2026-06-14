@@ -12,6 +12,9 @@ const metrics = @import("relay_metrics.zig");
 // happen only after the batch commits, so an acknowledged write is on disk.
 const MAX_BATCH = 1000;
 const MAX_QUEUE = 200_000;
+// Cap total bytes of queued JSON so a flood (or a slow fsync in a durable sync
+// mode) can't grow the queue into an OOM regardless of max_message_size.
+const MAX_QUEUE_BYTES = 256 * 1024 * 1024;
 
 const JobKind = enum { event, deletion };
 
@@ -38,6 +41,7 @@ pub const Writer = struct {
     mutex: std.Io.Mutex = .init,
     cond: std.Io.Condition = .init,
     queue: std.ArrayListUnmanaged(Job) = .empty,
+    queued_bytes: usize = 0,
     shutdown: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
 
@@ -60,8 +64,14 @@ pub const Writer = struct {
     }
 
     pub fn deinit(self: *Writer) void {
+        const io = nostr.io.io();
+        // Set shutdown under the mutex so it can't slip between the writer
+        // thread's predicate check and its wait, which would be a lost wakeup
+        // and deadlock the join below.
+        self.mutex.lockUncancelable(io);
         self.shutdown.store(true, .release);
-        self.cond.broadcast(nostr.io.io());
+        self.mutex.unlock(io);
+        self.cond.broadcast(io);
         if (self.thread) |t| t.join();
         for (self.queue.items) |job| self.allocator.free(job.json);
         self.queue.deinit(self.allocator);
@@ -72,7 +82,7 @@ pub const Writer = struct {
         const io = nostr.io.io();
         const copy = self.allocator.dupe(u8, json) catch return false;
         self.mutex.lockUncancelable(io);
-        if (self.queue.items.len >= MAX_QUEUE) {
+        if (self.queue.items.len >= MAX_QUEUE or self.queued_bytes + copy.len > MAX_QUEUE_BYTES) {
             self.mutex.unlock(io);
             self.allocator.free(copy);
             return false;
@@ -82,6 +92,7 @@ pub const Writer = struct {
             self.allocator.free(copy);
             return false;
         };
+        self.queued_bytes += copy.len;
         self.mutex.unlock(io);
         self.cond.signal(io);
         return true;
@@ -103,6 +114,7 @@ pub const Writer = struct {
             // load batches are small but commits are cheap anyway.
             var pending = self.queue;
             self.queue = .empty;
+            self.queued_bytes = 0;
             self.mutex.unlock(io);
 
             var i: usize = 0;
@@ -134,7 +146,10 @@ pub const Writer = struct {
         var fatal = false;
 
         for (jobs) |job| {
-            var event = nostr.Event.parse(job.json) catch continue;
+            var event = nostr.Event.parse(job.json) catch {
+                std.log.warn("writer: dropping job, failed to re-parse queued event", .{});
+                continue;
+            };
             const p = self.applyJob(&txn, job, &event) catch {
                 event.deinit();
                 fatal = true;
@@ -163,7 +178,7 @@ pub const Writer = struct {
         if (stored_any) self.store.query_cache.invalidate();
 
         for (processed[0..n]) |*p| {
-            if (p.success) metrics.eventStored() else metrics.eventRejected();
+            if (p.broadcast) metrics.eventStored() else if (!p.success) metrics.eventRejected();
             self.reply(p.conn_id, p.event.id(), p.success, p.message);
             if (p.broadcast) self.broadcaster.broadcast(&p.event);
             p.event.deinit();
@@ -178,10 +193,9 @@ pub const Writer = struct {
         if (job.kind == .deletion) {
             const ids = nostr.getDeletionIds(self.allocator, event) catch null;
             defer if (ids) |slice| self.allocator.free(slice);
-            if (ids) |slice| {
-                for (slice) |target| {
-                    _ = try self.store.deleteInTxn(txn, &target, event.pubkey());
-                }
+            const slice = ids orelse return .{ .conn_id = job.conn_id, .event = event.*, .success = false, .message = "error: failed to parse deletion", .broadcast = false };
+            for (slice) |target| {
+                _ = try self.store.deleteInTxn(txn, &target, event.pubkey());
             }
             _ = try self.store.storeInTxn(txn, event, job.json);
             return .{ .conn_id = job.conn_id, .event = event.*, .success = true, .message = "", .broadcast = true };
