@@ -62,10 +62,35 @@ default. Settings with no environment variable are configurable only via the TOM
 |------|-----|------|---------|-------------|
 | `path` | `WISP_STORAGE_PATH` | string | `./data` | LMDB data directory. Point at `/dev/shm/wisp/data` (tmpfs) for lowest latency; data is then lost on reboot (see warning). |
 | `map_size_mb` | — | u32 | `10240` | LMDB maximum map size in MB. The hard upper bound on database size. |
+| `sync` | `WISP_STORAGE_SYNC` | enum | `none` | Write durability: `none`, `meta`, or `full`. See [Durability](#durability). |
 
 > **Warning:** `/dev/shm` is volatile tmpfs — all data is lost on reboot. Use it only for
 > benchmarks or disposable caches. For production, point `path` at persistent storage and/or
 > configure backups.
+
+#### Durability
+
+`sync` controls how aggressively LMDB flushes to disk on each commit, trading throughput for
+crash safety:
+
+| Mode | Behavior | On crash / power loss |
+|------|----------|-----------------------|
+| `none` (default) | `MDB_NOSYNC` + `MDB_NOMETASYNC`: no flush on commit. Fastest. | Recent commits can be lost, and the database can be corrupted. |
+| `meta` | Flush data on every commit, defer only the metapage fsync. | The last transaction may roll back, but the database stays consistent. |
+| `full` | Fsync on every commit. Durable. | No acknowledged write is lost. |
+
+Indicative throughput on the same NVMe host (peak write, single session):
+
+| Mode | Events/sec | p99 |
+|------|-----------:|----:|
+| `none` | ~15,700 | 0.5 ms |
+| `meta` | ~2,300 | 3.1 ms |
+| `full` | ~1,300 | 8.9 ms |
+
+The durable modes are this much slower because Wisp commits one LMDB transaction per event,
+so `full` does one fsync per event with no batching. The default stays `none` to preserve
+current behavior; use `meta` for a good safety/throughput balance or `full` when no
+acknowledged write may ever be lost.
 
 ### `[limits]`
 

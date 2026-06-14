@@ -369,7 +369,7 @@ test "nip86 dispatch routing, param guards, and store round-trip" {
         cwd.deleteFile(io, db_path ++ "-lock") catch {};
     }
 
-    var lmdb = try Lmdb.init(testing.allocator, db_path, 10);
+    var lmdb = try Lmdb.init(testing.allocator, db_path, 10, .none);
     defer lmdb.deinit();
     var mgmt = try ManagementStore.init(testing.allocator, &lmdb);
 

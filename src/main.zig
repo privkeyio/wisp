@@ -150,11 +150,16 @@ pub fn main(init: std.process.Init) !void {
     try nostr.init();
     defer nostr.cleanup();
 
-    std.log.info("Wisp v0.4.1 starting", .{});
-    std.log.info("Listening on {s}:{d}", .{ config.host, config.port });
-    std.log.info("Storage: {s}", .{config.storage_path});
+    const sync_mode = Lmdb.SyncMode.fromString(config.storage_sync) orelse {
+        std.log.err("Invalid storage sync mode '{s}', valid options are: none, meta, full", .{config.storage_sync});
+        return error.InvalidSyncMode;
+    };
 
-    var lmdb = try Lmdb.init(allocator, config.storage_path, config.storage_map_size_mb);
+    std.log.info("Wisp v0.4.2 starting", .{});
+    std.log.info("Listening on {s}:{d}", .{ config.host, config.port });
+    std.log.info("Storage: {s} (sync={s})", .{ config.storage_path, @tagName(sync_mode) });
+
+    var lmdb = try Lmdb.init(allocator, config.storage_path, config.storage_map_size_mb, sync_mode);
     defer lmdb.deinit();
 
     var store = try Store.init(allocator, &lmdb);
@@ -282,7 +287,7 @@ fn runImport(allocator: std.mem.Allocator, db_path: []const u8) !void {
     try nostr.init();
     defer nostr.cleanup();
 
-    var lmdb = try Lmdb.init(allocator, db_path, 10240);
+    var lmdb = try Lmdb.init(allocator, db_path, 10240, .none);
     defer lmdb.deinit();
 
     var store = try Store.init(allocator, &lmdb);
@@ -380,7 +385,7 @@ fn printStatus(file: std.Io.File, comptime fmt: []const u8, args: anytype) void 
 }
 
 fn runExport(allocator: std.mem.Allocator, db_path: []const u8) !void {
-    var lmdb = try Lmdb.init(allocator, db_path, 10240);
+    var lmdb = try Lmdb.init(allocator, db_path, 10240, .none);
     defer lmdb.deinit();
 
     var store = try Store.init(allocator, &lmdb);

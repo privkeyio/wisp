@@ -29,6 +29,10 @@ pub const Config = struct {
     max_future_seconds: i64,
     storage_path: []const u8,
     storage_map_size_mb: u32,
+    // LMDB durability: "none" (MDB_NOSYNC, fastest, can lose recent writes on
+    // crash), "meta" (flush data each commit, defer metapage fsync), or "full"
+    // (durable fsync each commit).
+    storage_sync: []const u8,
     idle_seconds: u32,
     events_per_minute: u32,
     // Per-IP limit on expensive query messages (REQ/COUNT/NEG_OPEN). 0 disables.
@@ -90,6 +94,7 @@ pub const Config = struct {
             .max_future_seconds = 900,
             .storage_path = "./data",
             .storage_map_size_mb = 10240,
+            .storage_sync = "none",
             .idle_seconds = 300,
             .events_per_minute = 120,
             .queries_per_minute = 300,
@@ -208,6 +213,8 @@ pub const Config = struct {
                 self.storage_path = try self.allocString(value);
             } else if (std.mem.eql(u8, key, "map_size_mb")) {
                 self.storage_map_size_mb = try std.fmt.parseInt(u32, value, 10);
+            } else if (std.mem.eql(u8, key, "sync")) {
+                self.storage_sync = try self.allocString(value);
             }
         } else if (std.mem.eql(u8, section, "timeouts")) {
             if (std.mem.eql(u8, key, "idle_seconds")) {
@@ -282,6 +289,7 @@ pub const Config = struct {
         }
         if (getenv("WISP_RELAY_NAME")) |v| self.name = v;
         if (getenv("WISP_STORAGE_PATH")) |v| self.storage_path = v;
+        if (getenv("WISP_STORAGE_SYNC")) |v| self.storage_sync = v;
         if (getenv("WISP_MAX_CONNECTIONS")) |v| {
             self.max_connections = std.fmt.parseInt(u32, v, 10) catch self.max_connections;
         }
