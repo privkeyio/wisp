@@ -15,10 +15,11 @@ description = "A lightweight Nostr relay"
 [storage]
 path = "./data"
 # map_size_mb = 10240
-# Write durability: "none" (fastest, can lose recent writes on crash), "meta"
-# (flush data each commit, defer metapage fsync), or "full" (durable fsync each
-# commit). Use "meta" or "full" for production data you cannot lose.
-# sync = "none"
+# Write durability: "meta" (default; flush data each commit, defer metapage
+# fsync, never corrupts), "full" (durable fsync each commit), or "none" (fastest
+# but a crash can lose recent writes and corrupt the db; use only for disposable
+# data).
+# sync = "meta"
 
 # Performance tip: For maximum throughput, use RAM-backed storage (tmpfs):
 #   path = "/dev/shm/wisp/data"

@@ -62,7 +62,7 @@ default. Settings with no environment variable are configurable only via the TOM
 |------|-----|------|---------|-------------|
 | `path` | `WISP_STORAGE_PATH` | string | `./data` | LMDB data directory. Point at `/dev/shm/wisp/data` (tmpfs) for lowest latency; data is then lost on reboot (see warning). |
 | `map_size_mb` | — | u32 | `10240` | LMDB maximum map size in MB. The hard upper bound on database size. |
-| `sync` | `WISP_STORAGE_SYNC` | enum | `none` | Write durability: `none`, `meta`, or `full`. See [Durability](#durability). |
+| `sync` | `WISP_STORAGE_SYNC` | enum | `meta` | Write durability: `none`, `meta`, or `full`. See [Durability](#durability). |
 
 > **Warning:** `/dev/shm` is volatile tmpfs — all data is lost on reboot. Use it only for
 > benchmarks or disposable caches. For production, point `path` at persistent storage and/or
@@ -75,18 +75,20 @@ crash safety:
 
 | Mode | Behavior | On crash / power loss |
 |------|----------|-----------------------|
-| `none` (default) | `MDB_NOSYNC` + `MDB_NOMETASYNC`: no flush on commit. Fastest. | Recent commits can be lost, and the database can be corrupted. |
-| `meta` | Flush data on every commit, defer only the metapage fsync. | The last transaction may roll back, but the database stays consistent. |
+| `none` | `MDB_NOSYNC` + `MDB_NOMETASYNC`: no flush on commit. Fastest. | Recent commits can be lost, and the database can be corrupted. |
+| `meta` (default) | Flush data on every commit, defer only the metapage fsync. | The last transaction may roll back, but the database stays consistent. |
 | `full` | Fsync on every commit. Durable. | No acknowledged write is lost. |
 
 In the durable modes (`meta`/`full`) writes go through a group-commit writer
 thread: events that arrive close together are committed in one transaction, so a
 batch pays a single fsync rather than one per event. Throughput therefore scales
-with how many clients publish concurrently. The default `none` mode keeps the
-faster synchronous write path, since there is no fsync to amortize.
+with how many clients publish concurrently.
 
-The default stays `none` to preserve current behavior; use `meta` for a good
-safety/throughput balance, or `full` when no acknowledged write may ever be lost.
+The default is `meta`: it never corrupts the database and at worst loses the last
+transaction on a crash. Use `full` when no acknowledged write may ever be lost, or
+`none` for maximum throughput on a relay where the data is disposable (a cache or
+benchmark) and a crash may corrupt the database. `none` uses a faster synchronous
+write path, since there is no fsync to amortize.
 
 ### `[limits]`
 
