@@ -29,9 +29,9 @@ pub const Config = struct {
     max_future_seconds: i64,
     storage_path: []const u8,
     storage_map_size_mb: u32,
-    // LMDB durability: "none" (MDB_NOSYNC, fastest, can lose recent writes on
-    // crash), "meta" (flush data each commit, defer metapage fsync), or "full"
-    // (durable fsync each commit).
+    // LMDB durability: "none" (MDB_NOSYNC, fastest, can lose recent writes and
+    // corrupt the db on crash), "meta" (default; flush data each commit, defer
+    // metapage fsync), or "full" (durable fsync each commit).
     storage_sync: []const u8,
     idle_seconds: u32,
     events_per_minute: u32,
@@ -94,7 +94,7 @@ pub const Config = struct {
             .max_future_seconds = 900,
             .storage_path = "./data",
             .storage_map_size_mb = 10240,
-            .storage_sync = "none",
+            .storage_sync = "meta",
             .idle_seconds = 300,
             .events_per_minute = 120,
             .queries_per_minute = 300,

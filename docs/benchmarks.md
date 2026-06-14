@@ -9,10 +9,13 @@ Peak write throughput, all relays at 100% delivery:
 | strfry | 2,800 | 2.9 ms | 3 MB |
 
 Measured with [nostr-bench](https://github.com/privkeyio/nostr-bench): 5,000 events x 4
-workers at peak rate (`--rate 0`), native release builds on a 16-core Linux host, default
-configs with the event-rate limit raised. `RssAnon` sampled during the run; figures are
-representative of three stable iterations.
+workers at peak rate (`--rate 0`), native release builds on a 16-core Linux host, with the
+event-rate limit raised. `RssAnon` sampled during the run; figures are representative of three
+stable iterations.
 
-Wisp leads on throughput (~9x strfry, ~5x nostr-rs-relay) and p99 latency; strfry stays
-smallest in memory. Wisp defaults to LMDB `MDB_NOSYNC` (fast, less crash-durable) while
-strfry writes durably, so part of the write-throughput gap reflects that tradeoff.
+This is peak write capability with Wisp in `sync = none` (non-durable). Wisp's **default is
+`sync = meta`** (durable, never corrupts), which trades raw throughput for crash safety; in
+the durable modes throughput scales with publisher concurrency because writes are
+group-committed (see [Configuration](configuration.md#durability)). strfry and nostr-rs-relay
+write durably by default, so a fair durable-vs-durable comparison runs Wisp in `meta`/`full`.
+On throughput and p99 latency Wisp leads; strfry stays smallest in memory.
