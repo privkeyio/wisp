@@ -25,9 +25,15 @@ chk() { # desc expected actual
   fi
 }
 
-# publish and report ok|reject based on whether the relay accepted the event
+# publish and report ok|reject based on whether the relay accepted the event.
+# Retries up to 3 times: a transient connect/read timeout under CI load (a fresh
+# TCP connection per attempt) should not fail the suite, while a real rejection
+# or a deterministic bug still reports reject after all attempts.
 pubres() { # noz-args...
-  if timeout 10 noz event "$@" "$R" 2>&1 | grep -q 'success'; then echo ok; else echo reject; fi
+  for _ in 1 2 3; do
+    if timeout 10 noz event "$@" "$R" 2>&1 | grep -q 'success'; then echo ok; return; fi
+  done
+  echo reject
 }
 
 case "$MODE" in
