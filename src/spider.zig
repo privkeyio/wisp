@@ -15,8 +15,9 @@ fn milliTimestamp() i64 {
 const BATCH_SIZE: usize = 20;
 const BATCH_CREATION_DELAY_MS: u64 = 500;
 const RECONNECT_DELAY_MS: u64 = 10_000;
-const MAX_RECONNECT_DELAY_MS: u64 = 3600_000;
-const BLACKOUT_MS: u64 = 24 * 3600_000;
+const HEALTHY_RECONNECT_DELAY_MS: u64 = 5_000;
+const MAX_RECONNECT_DELAY_MS: u64 = 300_000;
+const BLACKOUT_MS: u64 = 30 * 60_000;
 const QUICK_DISCONNECT_MS: i64 = 30_000;
 const RATE_LIMIT_BACKOFF_MS: u64 = 60_000;
 const MAX_RATE_LIMIT_BACKOFF_MS: u64 = 1800_000;
@@ -325,14 +326,22 @@ pub const Spider = struct {
             if (!self.shouldRun()) break;
 
             if (success) {
-                if (connection_duration < QUICK_DISCONNECT_MS) {
-                    log.warn("{s}: Quick disconnect after {d}ms, waiting {d}ms", .{ relay_url, connection_duration, conn.reconnect_delay_ms });
+                if (conn.last_session_events > 0) {
+                    // A relay that delivered events is healthy even if it closed
+                    // quickly, which upstreams routinely do after serving a batch.
+                    // Keep the reconnect delay low so the feed stays current instead
+                    // of escalating the backoff toward a blackout.
+                    log.info("{s}: Synced {d} events in {d}ms", .{ relay_url, conn.last_session_events, connection_duration });
+                    conn.reconnect_delay_ms = RECONNECT_DELAY_MS;
+                    self.interruptibleSleep(HEALTHY_RECONNECT_DELAY_MS);
+                } else if (connection_duration < QUICK_DISCONNECT_MS) {
+                    log.warn("{s}: Quick disconnect after {d}ms (no events), waiting {d}ms", .{ relay_url, connection_duration, conn.reconnect_delay_ms });
                     self.interruptibleSleep(conn.reconnect_delay_ms);
                     conn.reconnect_delay_ms = @min(conn.reconnect_delay_ms * 2, MAX_RECONNECT_DELAY_MS);
                 } else {
                     log.info("{s}: Disconnected after {d}ms uptime", .{ relay_url, connection_duration });
                     conn.reconnect_delay_ms = RECONNECT_DELAY_MS;
-                    self.interruptibleSleep(5000);
+                    self.interruptibleSleep(HEALTHY_RECONNECT_DELAY_MS);
                 }
             } else {
                 log.warn("{s}: Connection failed, waiting {d}ms", .{ relay_url, conn.reconnect_delay_ms });
@@ -343,7 +352,7 @@ pub const Spider = struct {
             if (conn.reconnect_delay_ms >= MAX_RECONNECT_DELAY_MS) {
                 conn.blackout_until = milliTimestamp() + @as(i64, @intCast(BLACKOUT_MS));
                 conn.reconnect_delay_ms = RECONNECT_DELAY_MS;
-                log.warn("{s}: Entering 24h blackout", .{relay_url});
+                log.warn("{s}: Entering blackout after repeated failures", .{relay_url});
             }
         }
 
@@ -351,6 +360,7 @@ pub const Spider = struct {
     }
 
     fn connectAndSubscribe(self: *Spider, conn: *RelayConn, relay_url: []const u8) bool {
+        conn.last_session_events = 0;
         if (conn.isRateLimited()) {
             const wait_ms: u64 = @intCast(@max(0, conn.rate_limit_until - milliTimestamp()));
             log.info("{s}: Rate limited, waiting {d}ms", .{ relay_url, wait_ms });
@@ -425,7 +435,7 @@ pub const Spider = struct {
             return false;
         };
 
-        self.readLoop(&client, relay_url, subscribed_hash);
+        conn.last_session_events += self.readLoop(&client, relay_url, subscribed_hash);
 
         conn.last_disconnect = milliTimestamp();
         conn.state = .disconnected;
@@ -456,7 +466,6 @@ pub const Spider = struct {
             return false;
         };
 
-        var catchup_events: u64 = 0;
         const catchup_start = milliTimestamp();
         const catchup_timeout_ms: i64 = 30_000;
         var read_error = false;
@@ -470,11 +479,11 @@ pub const Spider = struct {
                 defer client.done(msg_data);
                 if (msg_data.data.len > 0) {
                     if (std.mem.startsWith(u8, msg_data.data, "[\"EOSE\"")) {
-                        log.info("{s}: Catch-up complete, received {d} events", .{ relay_url, catchup_events });
+                        log.info("{s}: Catch-up complete, received {d} events", .{ relay_url, conn.last_session_events });
                         break;
                     }
                     if (std.mem.startsWith(u8, msg_data.data, "[\"EVENT\"")) {
-                        self.handleRelayMessage(msg_data.data, relay_url, &catchup_events);
+                        self.handleRelayMessage(msg_data.data, relay_url, &conn.last_session_events);
                     }
                     if (std.mem.startsWith(u8, msg_data.data, "[\"NOTICE\"")) {
                         self.handleNotice(msg_data.data, relay_url);
@@ -488,18 +497,18 @@ pub const Spider = struct {
         }
 
         if (read_error) {
-            log.info("{s}: Catch-up finished with {d} events (connection lost)", .{ relay_url, catchup_events });
+            log.info("{s}: Catch-up finished with {d} events (connection lost)", .{ relay_url, conn.last_session_events });
             return false;
         }
 
         var close_buf: [64]u8 = undefined;
         const close_msg = std.fmt.bufPrint(&close_buf, "[\"CLOSE\",\"catchup\"]", .{}) catch {
-            log.info("{s}: Catch-up finished with {d} events", .{ relay_url, catchup_events });
+            log.info("{s}: Catch-up finished with {d} events", .{ relay_url, conn.last_session_events });
             return true;
         };
         client.writeText(@constCast(close_msg)) catch {};
 
-        log.info("{s}: Catch-up finished with {d} events", .{ relay_url, catchup_events });
+        log.info("{s}: Catch-up finished with {d} events", .{ relay_url, conn.last_session_events });
         return true;
     }
 
@@ -669,7 +678,7 @@ pub const Spider = struct {
         log.info("{s}: Need {d} events, have {d} events to skip", .{ relay_url, need_ids.items.len, have_ids.items.len });
 
         if (need_ids.items.len > 0) {
-            if (!self.fetchEventsByIds(client, relay_url, need_ids.items)) {
+            if (!self.fetchEventsByIds(client, relay_url, need_ids.items, conn)) {
                 return false;
             }
         }
@@ -677,9 +686,8 @@ pub const Spider = struct {
         return true;
     }
 
-    fn fetchEventsByIds(self: *Spider, client: *websocket.Client, relay_url: []const u8, ids: [][32]u8) bool {
+    fn fetchEventsByIds(self: *Spider, client: *websocket.Client, relay_url: []const u8, ids: [][32]u8, conn: *RelayConn) bool {
         const batch_size: usize = 100;
-        var fetched: u64 = 0;
         var i: usize = 0;
 
         while (i < ids.len) {
@@ -705,7 +713,7 @@ pub const Spider = struct {
 
             if (req_msg) |msg| {
                 client.writeText(@constCast(msg)) catch {
-                    log.info("{s}: Fetched {d} events via negentropy sync (connection lost)", .{ relay_url, fetched });
+                    log.info("{s}: Fetched {d} events via negentropy sync (connection lost)", .{ relay_url, conn.last_session_events });
                     return false;
                 };
             } else {
@@ -725,13 +733,13 @@ pub const Spider = struct {
                     defer client.done(msg);
                     if (std.mem.startsWith(u8, msg.data, "[\"EOSE\"")) break;
                     if (std.mem.startsWith(u8, msg.data, "[\"EVENT\"")) {
-                        self.handleRelayMessage(msg.data, relay_url, &fetched);
+                        self.handleRelayMessage(msg.data, relay_url, &conn.last_session_events);
                     }
                 }
             }
 
             if (read_error) {
-                log.info("{s}: Fetched {d} events via negentropy sync (connection lost)", .{ relay_url, fetched });
+                log.info("{s}: Fetched {d} events via negentropy sync (connection lost)", .{ relay_url, conn.last_session_events });
                 return false;
             }
 
@@ -745,7 +753,7 @@ pub const Spider = struct {
             i = end;
         }
 
-        log.info("{s}: Fetched {d} events via negentropy sync", .{ relay_url, fetched });
+        log.info("{s}: Fetched {d} events via negentropy sync", .{ relay_url, conn.last_session_events });
         return true;
     }
 
@@ -791,7 +799,7 @@ pub const Spider = struct {
         log.info("{s}: Sent {d} subscription batches", .{ relay_url, batch_idx });
     }
 
-    fn readLoop(self: *Spider, client: *websocket.Client, relay_url: []const u8, subscribed_hash: u64) void {
+    fn readLoop(self: *Spider, client: *websocket.Client, relay_url: []const u8, subscribed_hash: u64) u64 {
         var events_received: u64 = 0;
 
         client.readTimeout(1000) catch {};
@@ -819,7 +827,7 @@ pub const Spider = struct {
                 } else {
                     log.err("{s}: Read error: {}", .{ relay_url, err });
                 }
-                return;
+                return events_received;
             };
 
             if (message) |msg| {
@@ -831,6 +839,7 @@ pub const Spider = struct {
         }
 
         log.info("{s}: Read loop exiting, received {d} events", .{ relay_url, events_received });
+        return events_received;
     }
 
     fn handleRelayMessage(self: *Spider, data: []const u8, relay_url: []const u8, events_received: *u64) void {
@@ -966,6 +975,12 @@ const RelayConn = struct {
     rate_limit_backoff_ms: u64 = RATE_LIMIT_BACKOFF_MS,
     negentropy_supported: bool = true,
     active_client: ?*websocket.Client = null,
+    // Newly-stored events across the entire most recent session (negentropy
+    // first-sync, catch-up, and the live read loop combined). A session that
+    // delivered events counts as productive even if it was short, so the
+    // reconnect backoff is not escalated for a relay that is healthy but closes
+    // after each batch.
+    last_session_events: u64 = 0,
 
     const State = enum { disconnected, connecting, connected };
 
