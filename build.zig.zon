@@ -16,12 +16,13 @@
         },
         // http.zig: HTTP routing (NIP-11/NIP-86) + WebSocket upgrade onto
         // websocket.zig's epoll worker pool. Pinned to privkeyio fork commit
-        // 4c98859 (branch fix/websocket-nonblocking-lost-read-event), upstream PR
-        // karlseguin/http.zig#212: fixes lost EPOLLONESHOT websocket read events
-        // that leak connections (CLOSE_WAIT) and hang clients under load.
+        // 0694500 (branch fix/websocket-nonblocking-lost-read-event), upstream PR
+        // karlseguin/http.zig#212: fixes a lost EPOLLONESHOT websocket read that
+        // leaks connections (CLOSE_WAIT) and hangs clients under load, by releasing
+        // `processing` before re-arming the fd.
         .httpz = .{
-            .url = "https://github.com/privkeyio/http.zig/archive/4c98859d4c04ce6a9c19330644bfa0f86f069b4f.tar.gz",
-            .hash = "httpz-0.0.0-PNVzrPruCABsma9t2qIEL1R2DNPg9Zu8DjN6xhTZ2Rh0",
+            .url = "https://github.com/privkeyio/http.zig/archive/06945003d534e048f8f3a16413685c07eb8872a7.tar.gz",
+            .hash = "httpz-0.0.0-PNVzrIDeCAAPK5gkCAuTcCmqRfn0u65AYxxojzjsy-Pn",
         },
     },
     .paths = .{
