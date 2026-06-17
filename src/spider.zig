@@ -15,8 +15,8 @@ fn milliTimestamp() i64 {
 const BATCH_SIZE: usize = 20;
 const BATCH_CREATION_DELAY_MS: u64 = 500;
 const RECONNECT_DELAY_MS: u64 = 10_000;
-const MAX_RECONNECT_DELAY_MS: u64 = 3600_000;
-const BLACKOUT_MS: u64 = 24 * 3600_000;
+const MAX_RECONNECT_DELAY_MS: u64 = 300_000;
+const BLACKOUT_MS: u64 = 30 * 60_000;
 const QUICK_DISCONNECT_MS: i64 = 30_000;
 const RATE_LIMIT_BACKOFF_MS: u64 = 60_000;
 const MAX_RATE_LIMIT_BACKOFF_MS: u64 = 1800_000;
@@ -325,8 +325,16 @@ pub const Spider = struct {
             if (!self.shouldRun()) break;
 
             if (success) {
-                if (connection_duration < QUICK_DISCONNECT_MS) {
-                    log.warn("{s}: Quick disconnect after {d}ms, waiting {d}ms", .{ relay_url, connection_duration, conn.reconnect_delay_ms });
+                if (conn.last_session_events > 0) {
+                    // A relay that delivered events is healthy even if it closed
+                    // quickly, which upstreams routinely do after serving a batch.
+                    // Keep the reconnect delay low so the feed stays current instead
+                    // of escalating the backoff toward a blackout.
+                    log.info("{s}: Synced {d} events in {d}ms", .{ relay_url, conn.last_session_events, connection_duration });
+                    conn.reconnect_delay_ms = RECONNECT_DELAY_MS;
+                    self.interruptibleSleep(5000);
+                } else if (connection_duration < QUICK_DISCONNECT_MS) {
+                    log.warn("{s}: Quick disconnect after {d}ms (no events), waiting {d}ms", .{ relay_url, connection_duration, conn.reconnect_delay_ms });
                     self.interruptibleSleep(conn.reconnect_delay_ms);
                     conn.reconnect_delay_ms = @min(conn.reconnect_delay_ms * 2, MAX_RECONNECT_DELAY_MS);
                 } else {
@@ -343,7 +351,7 @@ pub const Spider = struct {
             if (conn.reconnect_delay_ms >= MAX_RECONNECT_DELAY_MS) {
                 conn.blackout_until = milliTimestamp() + @as(i64, @intCast(BLACKOUT_MS));
                 conn.reconnect_delay_ms = RECONNECT_DELAY_MS;
-                log.warn("{s}: Entering 24h blackout", .{relay_url});
+                log.warn("{s}: Entering blackout after repeated failures", .{relay_url});
             }
         }
 
@@ -351,6 +359,7 @@ pub const Spider = struct {
     }
 
     fn connectAndSubscribe(self: *Spider, conn: *RelayConn, relay_url: []const u8) bool {
+        conn.last_session_events = 0;
         if (conn.isRateLimited()) {
             const wait_ms: u64 = @intCast(@max(0, conn.rate_limit_until - milliTimestamp()));
             log.info("{s}: Rate limited, waiting {d}ms", .{ relay_url, wait_ms });
@@ -425,7 +434,7 @@ pub const Spider = struct {
             return false;
         };
 
-        self.readLoop(&client, relay_url, subscribed_hash);
+        conn.last_session_events = self.readLoop(&client, relay_url, subscribed_hash);
 
         conn.last_disconnect = milliTimestamp();
         conn.state = .disconnected;
@@ -791,7 +800,7 @@ pub const Spider = struct {
         log.info("{s}: Sent {d} subscription batches", .{ relay_url, batch_idx });
     }
 
-    fn readLoop(self: *Spider, client: *websocket.Client, relay_url: []const u8, subscribed_hash: u64) void {
+    fn readLoop(self: *Spider, client: *websocket.Client, relay_url: []const u8, subscribed_hash: u64) u64 {
         var events_received: u64 = 0;
 
         client.readTimeout(1000) catch {};
@@ -819,7 +828,7 @@ pub const Spider = struct {
                 } else {
                     log.err("{s}: Read error: {}", .{ relay_url, err });
                 }
-                return;
+                return events_received;
             };
 
             if (message) |msg| {
@@ -831,6 +840,7 @@ pub const Spider = struct {
         }
 
         log.info("{s}: Read loop exiting, received {d} events", .{ relay_url, events_received });
+        return events_received;
     }
 
     fn handleRelayMessage(self: *Spider, data: []const u8, relay_url: []const u8, events_received: *u64) void {
@@ -966,6 +976,10 @@ const RelayConn = struct {
     rate_limit_backoff_ms: u64 = RATE_LIMIT_BACKOFF_MS,
     negentropy_supported: bool = true,
     active_client: ?*websocket.Client = null,
+    // Events synced during the most recent connection. A session that delivered
+    // events counts as productive even if it was short, so the reconnect backoff
+    // is not escalated for a relay that is healthy but closes after each batch.
+    last_session_events: u64 = 0,
 
     const State = enum { disconnected, connecting, connected };
 
