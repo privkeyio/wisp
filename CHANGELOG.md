@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-06-18
+
+### Fixed
+
+- Spider no longer panics (debug builds) or churns through reconnects (release builds) on `wss://` upstream relays. The websocket client now polls for read readiness instead of using `SO_RCVTIMEO`, which on TLS connections surfaced a socket `EAGAIN` that crashed in debug and tore down connections in release. Upstream connections now stay open across quiet periods
+
 ## [0.5.1] - 2026-06-17
 
 ### Fixed
