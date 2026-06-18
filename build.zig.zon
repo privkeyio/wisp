@@ -4,24 +4,29 @@
     .fingerprint = 0xc4bdec9fe6401a8d,
     .dependencies = .{
         // websocket.zig: client for spider outbound connections and the
-        // epoll worker-pool server. Pinned to a fixed commit for reproducible
-        // builds.
+        // epoll worker-pool server. Pinned to privkeyio fork commit ae78dce
+        // (branch fix/tls-read-timeout-poll): polls the socket for read readiness
+        // instead of SO_RCVTIMEO, so a read timeout on a wss/TLS connection
+        // surfaces as WouldBlock instead of an EAGAIN that std.crypto.tls's reader
+        // turns into a debug-build panic (programmer-bug syscall AGAIN). Upstream
+        // PR pending; repoint to karlseguin once merged.
         .websocket = .{
-            .url = "https://github.com/karlseguin/websocket.zig/archive/6d309f7a9790030f2fc070323b5defc64a15c13b.tar.gz",
-            .hash = "websocket-0.1.0-ZPISdV_aBACU9pGuvrTQ2z8uxz_Sp8JnJgQaiGKQIx1l",
+            .url = "https://github.com/privkeyio/websocket.zig/archive/ae78dced086d70f6f09496e1b0f08ff7e201885f.tar.gz",
+            .hash = "websocket-0.1.0-ZPISdabeBACg8O0rJ-ZIWbkoyY17EDn_9nGP1Yn7MZ3V",
         },
         .nostr = .{
             .url = "https://github.com/privkeyio/libnostr-z/archive/refs/tags/v0.3.6.tar.gz",
             .hash = "nostr-0.3.6-JY6OcLPKDwAP8UJz5qRAVc4LKg3AB2zE7Eok-gky9o4d",
         },
         // http.zig: HTTP routing (NIP-11/NIP-86) + WebSocket upgrade onto
-        // websocket.zig's epoll worker pool. Pinned to upstream commit 80a76dd,
-        // the merge of karlseguin/http.zig#212: fixes a lost EPOLLONESHOT websocket
-        // read that leaks connections (CLOSE_WAIT) and hangs clients under load, by
-        // releasing `processing` before re-arming the fd.
+        // websocket.zig's epoll worker pool. Pinned to privkeyio fork commit
+        // ff5345d = upstream 80a76dd (merge of karlseguin/http.zig#212) with its
+        // websocket pin bumped to the same fork wisp uses, so the two websocket
+        // deps dedupe. Repoint to upstream once the websocket TLS-read fix lands
+        // upstream and http.zig bumps its websocket pin.
         .httpz = .{
-            .url = "https://github.com/karlseguin/http.zig/archive/80a76ddee50e348f0c6ce5ccb6ac860dbb510f20.tar.gz",
-            .hash = "httpz-0.0.0-PNVzrIDeCAAPK5gkCAuTcCmqRfn0u65AYxxojzjsy-Pn",
+            .url = "https://github.com/privkeyio/http.zig/archive/ff5345d0927cf31b13b5c509531244d44485e6f3.tar.gz",
+            .hash = "httpz-0.0.0-PNVzrMnfCAAzJ0XfcFMPFDFHDXTHXVzzDeBJ3c12V4Fa",
         },
     },
     .paths = .{
