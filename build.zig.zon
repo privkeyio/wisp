@@ -4,15 +4,16 @@
     .fingerprint = 0xc4bdec9fe6401a8d,
     .dependencies = .{
         // websocket.zig: client for spider outbound connections and the
-        // epoll worker-pool server. Pinned to privkeyio fork commit ae78dce
+        // epoll worker-pool server. Pinned to privkeyio fork commit 443c38c
         // (branch fix/tls-read-timeout-poll): polls the socket for read readiness
         // instead of SO_RCVTIMEO, so a read timeout on a wss/TLS connection
         // surfaces as WouldBlock instead of an EAGAIN that std.crypto.tls's reader
-        // turns into a debug-build panic (programmer-bug syscall AGAIN). Upstream
-        // PR pending; repoint to karlseguin once merged.
+        // turns into a debug-build panic (programmer-bug syscall AGAIN). Skips the
+        // poll when the TLS client has buffered plaintext so it is not starved.
+        // Upstream PR karlseguin/websocket.zig#103; repoint once merged (#107).
         .websocket = .{
-            .url = "https://github.com/privkeyio/websocket.zig/archive/ae78dced086d70f6f09496e1b0f08ff7e201885f.tar.gz",
-            .hash = "websocket-0.1.0-ZPISdabeBACg8O0rJ-ZIWbkoyY17EDn_9nGP1Yn7MZ3V",
+            .url = "https://github.com/privkeyio/websocket.zig/archive/443c38ca4777548fb5dd97e6c5b6a760c2c74a36.tar.gz",
+            .hash = "websocket-0.1.0-ZPISdajgBADGk1vZ5KUJFgUurdtROt2FlXcJG4fBlNR9",
         },
         .nostr = .{
             .url = "https://github.com/privkeyio/libnostr-z/archive/refs/tags/v0.3.6.tar.gz",
@@ -25,8 +26,8 @@
         // deps dedupe. Repoint to upstream once the websocket TLS-read fix lands
         // upstream and http.zig bumps its websocket pin.
         .httpz = .{
-            .url = "https://github.com/privkeyio/http.zig/archive/ff5345d0927cf31b13b5c509531244d44485e6f3.tar.gz",
-            .hash = "httpz-0.0.0-PNVzrMnfCAAzJ0XfcFMPFDFHDXTHXVzzDeBJ3c12V4Fa",
+            .url = "https://github.com/privkeyio/http.zig/archive/9397b20f49f1058076a6817afbd9d9465a705474.tar.gz",
+            .hash = "httpz-0.0.0-PNVzrMnfCAB4O_z19rqsi-29ELjMwZ_ydvu4NM2P_XEA",
         },
     },
     .paths = .{
