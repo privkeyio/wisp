@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-06-18
+
+### Fixed
+
+- Spider keeps `wss://` upstream connections open and streaming instead of cycling. The websocket read path was polling only the socket while `std.crypto.tls` held decrypted plaintext in its own buffer, so a poll could time out (returning a spurious "no data") while data was available in-process. The read now checks the TLS client's buffered length before polling, eliminating the reconnect churn (one upstream connection now streams thousands of events without reconnecting)
+
 ## [0.5.2] - 2026-06-18
 
 ### Fixed
