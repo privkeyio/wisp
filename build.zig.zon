@@ -21,7 +21,7 @@
         },
         // http.zig: HTTP routing (NIP-11/NIP-86) + WebSocket upgrade onto
         // websocket.zig's epoll worker pool. Pinned to privkeyio fork commit
-        // ff5345d = upstream 80a76dd (merge of karlseguin/http.zig#212) with its
+        // 9397b20 = upstream 80a76dd (merge of karlseguin/http.zig#212) with its
         // websocket pin bumped to the same fork wisp uses, so the two websocket
         // deps dedupe. Repoint to upstream once the websocket TLS-read fix lands
         // upstream and http.zig bumps its websocket pin.
