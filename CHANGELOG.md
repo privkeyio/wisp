@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-06-20
+
+### Fixed
+
+- Relay no longer crashes (SIGSEGV) a few hours into sustained inbound traffic. http.zig's epoll worker could process a `.signal` and a `.recv` for the same connection in one event batch; the signal freed the connection and the recv then dereferenced freed memory in `getState()`. The pinned http.zig fork now defers signal handling until the event batch is drained, so a freed connection is never touched. Confirmed in production: ran 13+ hours under load with no crash, versus crashing every ~3 hours before
+
 ## [0.5.3] - 2026-06-18
 
 ### Fixed
