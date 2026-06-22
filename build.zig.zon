@@ -3,31 +3,25 @@
     .version = "0.5.4",
     .fingerprint = 0xc4bdec9fe6401a8d,
     .dependencies = .{
-        // websocket.zig: client for spider outbound connections and the
-        // epoll worker-pool server. Pinned to privkeyio fork commit 443c38c
-        // (branch fix/tls-read-timeout-poll): polls the socket for read readiness
-        // instead of SO_RCVTIMEO, so a read timeout on a wss/TLS connection
-        // surfaces as WouldBlock instead of an EAGAIN that std.crypto.tls's reader
-        // turns into a debug-build panic (programmer-bug syscall AGAIN). Skips the
-        // poll when the TLS client has buffered plaintext so it is not starved.
-        // Upstream PR karlseguin/websocket.zig#103; repoint once merged (#107).
+        // websocket.zig: client for spider outbound connections and the epoll
+        // worker-pool server. Upstream, includes the TLS read-readiness poll fix
+        // (karlseguin/websocket.zig#103). Must match http.zig's websocket pin so
+        // the two resolve to one package.
         .websocket = .{
-            .url = "https://github.com/privkeyio/websocket.zig/archive/443c38ca4777548fb5dd97e6c5b6a760c2c74a36.tar.gz",
-            .hash = "websocket-0.1.0-ZPISdajgBADGk1vZ5KUJFgUurdtROt2FlXcJG4fBlNR9",
+            .url = "https://github.com/karlseguin/websocket.zig/archive/99df0d3533a41cbcd5ff59b9af68bbfe6169cc62.tar.gz",
+            .hash = "websocket-0.1.0-ZPISdangBAAgWPap_MVU6Nk4rj3GT3xuJuF0IIv8HN6G",
         },
         .nostr = .{
             .url = "https://github.com/privkeyio/libnostr-z/archive/refs/tags/v0.3.6.tar.gz",
             .hash = "nostr-0.3.6-JY6OcLPKDwAP8UJz5qRAVc4LKg3AB2zE7Eok-gky9o4d",
         },
         // http.zig: HTTP routing (NIP-11/NIP-86) + WebSocket upgrade onto
-        // websocket.zig's epoll worker pool. Pinned to privkeyio fork commit
-        // 5a19b35 = upstream 80a76dd (merge of karlseguin/http.zig#212) plus the
-        // websocket pin bumped to the same fork wisp uses (dedup) and a worker fix
-        // for a recv/disown use-after-free (defer signal handling to batch end).
-        // Repoint to upstream once both land upstream (#107).
+        // websocket.zig's epoll worker pool. Upstream, includes the recv/disown
+        // use-after-free worker fix (karlseguin/http.zig#214) and the websocket
+        // pin bump (#213). Pins the same websocket commit as above so they dedup.
         .httpz = .{
-            .url = "https://github.com/privkeyio/http.zig/archive/5a19b35f458831a2bb961c7b4a531b208d135d35.tar.gz",
-            .hash = "httpz-0.0.0-PNVzrEHjCACfZgQRiw4O7xPSV78YW-bMKKOmiZSRs36_",
+            .url = "https://github.com/karlseguin/http.zig/archive/5d1b4e2e3e5a30aa489bdb33321dae83897f2426.tar.gz",
+            .hash = "httpz-0.0.0-PNVzrPjhCAAawzE3mV0uI1Hob-DYPBOZy_2Y0V_5ZbtY",
         },
     },
     .paths = .{
