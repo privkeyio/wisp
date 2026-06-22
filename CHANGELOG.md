@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-06-21
+
+### Changed
+
+- Build against upstream `karlseguin/http.zig` and `karlseguin/websocket.zig` instead of the temporary privkeyio forks. All three fixes the forks carried (the TLS read-readiness poll, the websocket pin bump, and the recv/disown use-after-free worker fix) have merged upstream, so the pinned commits are byte-identical to the forks. No functional change from 0.5.4
+
 ## [0.5.4] - 2026-06-20
 
 ### Fixed
