@@ -52,17 +52,18 @@ pub const App = struct {
             // written, so a connection-limit rejection surfaces here as an error.
             // Reply with a proper status (and log the source IP) instead of letting
             // httpz treat it as an unhandled exception and return 500.
+            var log_ip_buf: [64]u8 = undefined;
             const upgraded = httpz.upgradeWebsocket(WsConn, req, res, &ctx) catch |err| switch (err) {
                 error.TooManyConnectionsPerIp => {
                     res.status = 429;
                     res.body = "too many connections from your address";
-                    log.warn("connection rejected (per-IP limit): {s}", .{client_ip});
+                    log.warn("connection rejected (per-IP limit): {s}", .{safeIp(client_ip, &log_ip_buf)});
                     return;
                 },
                 error.TooManyConnections => {
                     res.status = 503;
                     res.body = "server connection limit reached";
-                    log.warn("connection rejected (global limit): {s}", .{client_ip});
+                    log.warn("connection rejected (global limit): {s}", .{safeIp(client_ip, &log_ip_buf)});
                     return;
                 },
                 else => return err,
@@ -170,6 +171,20 @@ pub const App = struct {
         const xff = req.header("x-forwarded-for");
         const xrip = req.header("x-real-ip");
         return rate_limiter.extractClientIp(xff, xrip, socket_ip, true);
+    }
+
+    // Forwarded-header IPs are never validated as addresses (they key per-IP
+    // limits, not parsing), so scrub anything outside the IP character set before
+    // logging to avoid terminal-escape injection from a forged X-Forwarded-For.
+    fn safeIp(ip: []const u8, buf: *[64]u8) []const u8 {
+        const len = @min(ip.len, buf.len);
+        for (ip[0..len], buf[0..len]) |c, *out| {
+            out.* = switch (c) {
+                '0'...'9', 'a'...'f', 'A'...'F', '.', ':' => c,
+                else => '?',
+            };
+        }
+        return buf[0..len];
     }
 };
 
