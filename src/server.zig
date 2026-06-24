@@ -48,7 +48,26 @@ pub const App = struct {
         if (req.header("upgrade")) |_| {
             var ctx = WsContext{ .app = app, .client_ip_len = 0, .client_ip = undefined };
             ctx.setIp(client_ip);
-            if (try httpz.upgradeWebsocket(WsConn, req, res, &ctx) == false) {
+            // WsConn.init runs inside the upgrade handshake, before any 101 reply is
+            // written, so a connection-limit rejection surfaces here as an error.
+            // Reply with a proper status (and log the source IP) instead of letting
+            // httpz treat it as an unhandled exception and return 500.
+            const upgraded = httpz.upgradeWebsocket(WsConn, req, res, &ctx) catch |err| switch (err) {
+                error.TooManyConnectionsPerIp => {
+                    res.status = 429;
+                    res.body = "too many connections from your address";
+                    log.warn("connection rejected (per-IP limit): {s}", .{client_ip});
+                    return;
+                },
+                error.TooManyConnections => {
+                    res.status = 503;
+                    res.body = "server connection limit reached";
+                    log.warn("connection rejected (global limit): {s}", .{client_ip});
+                    return;
+                },
+                else => return err,
+            };
+            if (upgraded == false) {
                 res.status = 400;
                 res.body = "invalid websocket upgrade";
             }
