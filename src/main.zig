@@ -156,7 +156,7 @@ pub fn main(init: std.process.Init) !void {
         return error.InvalidSyncMode;
     };
 
-    std.log.info("Wisp v0.5.5 starting", .{});
+    std.log.info("Wisp v0.5.6 starting", .{});
     std.log.info("Listening on {s}:{d}", .{ config.host, config.port });
     std.log.info("Storage: {s} (sync={s})", .{ config.storage_path, @tagName(sync_mode) });
 

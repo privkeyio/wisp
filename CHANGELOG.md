@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-06-25
+
+### Fixed
+
+- WebSocket upgrades rejected by the connection limiter now return HTTP 429 (per-IP cap) or 503 (global pool exhausted) instead of surfacing as an "unhandled exception" and HTTP 500. External monitors no longer report the relay DOWN when only the WS upgrade is rejected (NIP-11 `GET /` keeps returning 200). The rejected client's source IP is logged, sanitized against terminal-escape injection from a forged `X-Forwarded-For` (#116)
+
 ## [0.5.5] - 2026-06-21
 
 ### Changed
