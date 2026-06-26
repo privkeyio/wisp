@@ -48,8 +48,31 @@ pub const App = struct {
         if (req.header("upgrade")) |_| {
             var ctx = WsContext{ .app = app, .client_ip_len = 0, .client_ip = undefined };
             ctx.setIp(client_ip);
-            if (try httpz.upgradeWebsocket(WsConn, req, res, &ctx) == false) {
+            // WsConn.init runs inside the upgrade handshake, before any 101 reply is
+            // written, so a connection-limit rejection surfaces here as an error.
+            // Reply with a proper status (and log the source IP) instead of letting
+            // httpz treat it as an unhandled exception and return 500.
+            var log_ip_buf: [64]u8 = undefined;
+            const upgraded = httpz.upgradeWebsocket(WsConn, req, res, &ctx) catch |err| switch (err) {
+                error.TooManyConnectionsPerIp => {
+                    res.status = 429;
+                    res.content_type = .TEXT;
+                    res.body = "too many connections from your address";
+                    log.warn("connection rejected (per-IP limit): {s}", .{safeIp(client_ip, &log_ip_buf)});
+                    return;
+                },
+                error.TooManyConnections => {
+                    res.status = 503;
+                    res.content_type = .TEXT;
+                    res.body = "server connection limit reached";
+                    log.warn("connection rejected (global limit): {s}", .{safeIp(client_ip, &log_ip_buf)});
+                    return;
+                },
+                else => return err,
+            };
+            if (upgraded == false) {
                 res.status = 400;
+                res.content_type = .TEXT;
                 res.body = "invalid websocket upgrade";
             }
             return;
@@ -151,6 +174,20 @@ pub const App = struct {
         const xff = req.header("x-forwarded-for");
         const xrip = req.header("x-real-ip");
         return rate_limiter.extractClientIp(xff, xrip, socket_ip, true);
+    }
+
+    // Forwarded-header IPs are never validated as addresses (they key per-IP
+    // limits, not parsing), so scrub anything outside the IP character set before
+    // logging to avoid terminal-escape injection from a forged X-Forwarded-For.
+    fn safeIp(ip: []const u8, buf: *[64]u8) []const u8 {
+        const len = @min(ip.len, buf.len);
+        for (ip[0..len], buf[0..len]) |c, *out| {
+            out.* = switch (c) {
+                '0'...'9', 'a'...'f', 'A'...'F', '.', ':' => c,
+                else => '?',
+            };
+        }
+        return buf[0..len];
     }
 };
 
@@ -293,6 +330,21 @@ fn computePoolConfig(cpu_count: usize, configured_workers: u16) PoolConfig {
         @max(@as(usize, 1), @min(cpu_count, 4));
     const pool_count = @max(@as(usize, 4), @divTrunc(total_handler_budget, worker_count));
     return .{ .workers = @intCast(worker_count), .pool = @intCast(pool_count) };
+}
+
+test "safeIp" {
+    var buf: [64]u8 = undefined;
+    // IPv4 and IPv6 addresses pass through unchanged.
+    try std.testing.expectEqualStrings("192.168.1.1", App.safeIp("192.168.1.1", &buf));
+    try std.testing.expectEqualStrings("2001:db8::ff00", App.safeIp("2001:db8::ff00", &buf));
+    // Terminal-escape / control bytes from a forged X-Forwarded-For become '?'.
+    try std.testing.expectEqualStrings("1.2??31?.3", App.safeIp("1.2\x1b[31m.3", &buf));
+    try std.testing.expectEqualStrings("10.0?.0?.1", App.safeIp("10.0\n.0\r.1", &buf));
+    // Non-hex letters are scrubbed; hex digits (a-f/A-F) are allowed.
+    try std.testing.expectEqualStrings("?eef??", App.safeIp("xeefgz", &buf));
+    // Over-length input is truncated to the 64-byte buffer, no overflow.
+    const long = "1" ** 100;
+    try std.testing.expectEqual(@as(usize, 64), App.safeIp(long, &buf).len);
 }
 
 test computePoolConfig {
