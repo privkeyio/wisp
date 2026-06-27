@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-06-27
+
+### Fixed
+
+- Relay no longer crashes (SIGSEGV) on shutdown when a query result stream is still in flight. http.zig's non-blocking worker freed its thread-pool arena without joining handler threads, so a SIGTERM landing mid-query (e.g. during a backup) let the handler keep iterating the store while LMDB was torn down underneath it. The pinned http.zig now joins in-flight handlers before teardown (karlseguin/http.zig#215). LMDB meta-sync meant no data was at risk, but the unclean abort is gone (#115)
+
 ## [0.5.6] - 2026-06-25
 
 ### Fixed
