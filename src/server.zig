@@ -68,6 +68,7 @@ pub const App = struct {
                     log.warn("connection rejected (global limit): {s}", .{safeIp(client_ip, &log_ip_buf)});
                     return;
                 },
+                error.WriteFailed => return, // client disconnected during the upgrade handshake; nothing to send
                 else => return err,
             };
             if (upgraded == false) {
