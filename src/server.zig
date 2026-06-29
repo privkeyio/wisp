@@ -84,7 +84,17 @@ pub const App = struct {
                 res.header("Access-Control-Allow-Origin", "*");
                 res.header("Content-Type", "application/nostr+json");
                 const w = res.writer();
-                try nip11.write(app.config, app.nip86_handler, w);
+                // The writer buffers in memory (httpz flushes to the socket after
+                // this returns), so the only failure here is allocation failure
+                // while serializing the document. Reset the partial body and
+                // return 500 instead of serving a truncated 200 or letting it
+                // surface as an httpz "unhandled exception".
+                nip11.write(app.config, app.nip86_handler, w) catch |err| switch (err) {
+                    error.WriteFailed => {
+                        res.clearWriter();
+                        res.status = 500;
+                    },
+                };
                 return;
             }
         }
