@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.9] - 2026-06-29
+
+### Fixed
+
+- Relay no longer crashes (SIGSEGV) on shutdown when a query (REQ) was still being served as the relay stopped. The v0.5.7 shutdown fix joined the worker pool too late: http.zig freed the per-connection read buffers (in websocket.deinit) before joining in-flight handlers, and a REQ filter holds zero-copy slices into those buffers, so a handler still matching events read freed memory. The pinned http.zig now joins the worker pool before any connection buffers are freed. Completes the v0.5.7 fix (#115, upstream PR karlseguin/http.zig#217)
+
 ## [0.5.8] - 2026-06-29
 
 ### Fixed
