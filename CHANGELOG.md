@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.8] - 2026-06-29
+
+### Fixed
+
+- Relay no longer crashes (SIGSEGV) during normal operation under connection churn. http.zig's epoll worker closed a finished connection's socket on a worker thread to drop it from epoll, then recycled the connection object later; that close raced epoll_wait, so the fd could stay armed past the recycle and a later event batch delivered a read for freed memory (getState on a null/recycled connection). The pinned http.zig now removes the fd from epoll and closes it on the loop thread before the connection is recycled. Pinned to a temporary privkeyio http.zig fork; upstream PR karlseguin/http.zig#216, will repoint once merged (#120)
+
 ## [0.5.7] - 2026-06-27
 
 ### Fixed
