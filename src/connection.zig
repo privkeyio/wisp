@@ -101,11 +101,17 @@ pub const Connection = struct {
     /// another thread.
     pub fn closeWs(self: *Connection) void {
         if (self.ws_conn) |conn| {
+            // Bail if the worker already closed this connection. The fd may have
+            // been closed (and its number reused for another connection) by the
+            // worker's EOF path, which runs independently of write_guard; without
+            // this check the shutdown below could land on an unrelated fd. This
+            // mirrors the isClosed() guard the library's own conn.close() uses.
+            if (conn.isClosed()) return;
             // Don't close the fd off-thread: that bypasses the epoll worker's
             // cleanupConn/WsConn.close path and permanently leaks the connection
             // slot. Shutting down the read half keeps the fd in epoll but makes it
             // report EOF, so the worker wakes, reads 0 bytes, and runs its normal
-            // cleanup. This mirrors what the vendored library does internally.
+            // cleanup.
             _ = std.posix.system.shutdown(conn.stream.socket.handle, std.posix.SHUT.RD);
         }
     }
