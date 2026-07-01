@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.10] - 2026-07-01
+
+### Changed
+
+- Build against upstream `karlseguin/http.zig` instead of the temporary privkeyio fork. The two fixes the fork carried have merged upstream (the epoll recv-on-freed-Conn fix #216, and the shutdown-buffer join-order fix #217), so the pinned commit is byte-identical to the fork. No functional change from 0.5.9
+
 ## [0.5.9] - 2026-06-29
 
 ### Fixed
