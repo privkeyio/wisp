@@ -1,6 +1,6 @@
 .{
     .name = .wisp,
-    .version = "0.5.9",
+    .version = "0.5.10",
     .fingerprint = 0xc4bdec9fe6401a8d,
     .dependencies = .{
         // websocket.zig: client for spider outbound connections and the epoll
@@ -16,16 +16,13 @@
             .hash = "nostr-0.3.6-JY6OcLPKDwAP8UJz5qRAVc4LKg3AB2zE7Eok-gky9o4d",
         },
         // http.zig: HTTP routing (NIP-11/NIP-86) + WebSocket upgrade onto
-        // websocket.zig's epoll worker pool. Temporary privkeyio fork of upstream
-        // 8dc6441 with two extra commits: (1) remove a connection's fd from epoll
-        // on the loop thread before recycling the Conn, fixing a recv-on-freed-Conn
-        // segfault under churn (#120, upstream PR #216); (2) join the thread pool
-        // before websocket.deinit frees the connection read buffers, fixing a
-        // shutdown use-after-free in in-flight REQ filters (#115, completes #215,
-        // upstream PR #217). Carries the prior upstream fixes (#214, #213). Repoint
-        // once both merge. Pins the same websocket commit as above so they dedup.
+        // websocket.zig's epoll worker pool. Upstream, includes the epoll
+        // recv-on-freed-Conn fix (#216) and the shutdown-buffer join-order fix
+        // (#217), alongside the prior fixes (#215, #214, #213). Byte-identical to
+        // the temporary privkeyio fork it replaces. Pins the same websocket commit
+        // as above so they dedup.
         .httpz = .{
-            .url = "https://github.com/privkeyio/http.zig/archive/edad9246b7ca4df4a7da1cf41d19113fccb1c111.tar.gz",
+            .url = "https://github.com/karlseguin/http.zig/archive/86a44b63bda353338f2dbddc35eeb260f0f5c299.tar.gz",
             .hash = "httpz-0.0.0-PNVzrEnoCADpf8B42EMPO2WmIlvsQJ0dJ8oCWjnl6CIX",
         },
     },
