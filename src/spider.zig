@@ -23,6 +23,11 @@ const RATE_LIMIT_BACKOFF_MS: u64 = 60_000;
 const MAX_RATE_LIMIT_BACKOFF_MS: u64 = 1800_000;
 const CATCHUP_WINDOW_MS: i64 = 1800_000;
 const STALE_TIMEOUT_MS: i64 = 600_000;
+const STALE_PING_MS: i64 = 300_000;
+
+fn isStale(last_data: i64, now: i64) bool {
+    return now - last_data > STALE_TIMEOUT_MS;
+}
 
 pub const Spider = struct {
     allocator: std.mem.Allocator,
@@ -803,6 +808,7 @@ pub const Spider = struct {
     fn readLoop(self: *Spider, client: *websocket.Client, relay_url: []const u8, subscribed_hash: u64) u64 {
         var events_received: u64 = 0;
         var last_data = milliTimestamp();
+        var last_ping: i64 = last_data;
 
         client.readTimeout(1000) catch {};
 
@@ -839,10 +845,23 @@ pub const Spider = struct {
                     self.handleRelayMessage(msg.data, relay_url, &events_received);
                 }
             } else {
-                const idle = milliTimestamp() - last_data;
-                if (idle > STALE_TIMEOUT_MS) {
-                    log.warn("{s}: No data for {d}s, forcing reconnect", .{ relay_url, @divTrunc(idle, 1000) });
+                const now = milliTimestamp();
+                if (isStale(last_data, now)) {
+                    log.warn("{s}: No data for {d}s, forcing reconnect", .{ relay_url, @divTrunc(now - last_data, 1000) });
                     break;
+                }
+                // Probe a quiet connection before giving up on it: a healthy
+                // relay's pong resets last_data, while a half-open socket stays
+                // silent until the stale timeout above fires. One probe per
+                // silence window (last_ping <= last_data means a frame has
+                // arrived since the last probe).
+                if (now - last_data > STALE_PING_MS and last_ping <= last_data) {
+                    var empty: [0]u8 = .{};
+                    client.writePing(&empty) catch |err| {
+                        log.info("{s}: Keepalive ping failed ({}), reconnecting", .{ relay_url, err });
+                        break;
+                    };
+                    last_ping = now;
                 }
             }
         }
@@ -1155,4 +1174,17 @@ fn decodeHexPayload(hex: []const u8, allocator: std.mem.Allocator) ![]u8 {
         return error.InvalidHex;
     };
     return out;
+}
+
+test isStale {
+    const testing = std.testing;
+    // Fresh and within the window: not stale.
+    try testing.expect(!isStale(1000, 1000));
+    try testing.expect(!isStale(1000, 1000 + STALE_PING_MS));
+    // Exactly at the timeout is still alive (strict >).
+    try testing.expect(!isStale(1000, 1000 + STALE_TIMEOUT_MS));
+    // One millisecond past the timeout is stale.
+    try testing.expect(isStale(1000, 1000 + STALE_TIMEOUT_MS + 1));
+    // A backward clock step must never report stale.
+    try testing.expect(!isStale(5000, 1000));
 }
