@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const httpz = @import("httpz");
 const websocket = httpz.websocket;
 const nostr = @import("nostr.zig");
@@ -258,16 +259,20 @@ pub const WsConn = struct {
         // Kernel-level backstop for dead/half-open peers. In the production topology
         // every client shares one internal IP behind the tunnel/reverse proxy, so
         // per-IP limits can't shed a stuck peer; keepalive lets the kernel reap it
-        // independently of the app-level idle reaper. ~2min to detect: 60s idle,
-        // then 4 probes 15s apart. TCP_* aren't in std.posix (Linux socket option
-        // numbers), so define them locally like TCP_NODELAY above.
-        const TCP_KEEPIDLE = 4;
-        const TCP_KEEPINTVL = 5;
-        const TCP_KEEPCNT = 6;
+        // independently of the app-level idle reaper. SO_KEEPALIVE is portable; the
+        // TCP_KEEP* idle/interval/count tuning uses Linux socket option numbers that
+        // mean other things on macOS (option 4 is TCP_NOPUSH), so gate it to Linux.
         std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.KEEPALIVE, &std.mem.toBytes(@as(i32, 1))) catch {};
-        std.posix.setsockopt(fd, std.posix.IPPROTO.TCP, TCP_KEEPIDLE, &std.mem.toBytes(@as(i32, 60))) catch {};
-        std.posix.setsockopt(fd, std.posix.IPPROTO.TCP, TCP_KEEPINTVL, &std.mem.toBytes(@as(i32, 15))) catch {};
-        std.posix.setsockopt(fd, std.posix.IPPROTO.TCP, TCP_KEEPCNT, &std.mem.toBytes(@as(i32, 4))) catch {};
+        if (builtin.os.tag == .linux) {
+            // ~2min to detect: 60s idle, then 4 probes 15s apart. These aren't in
+            // std.posix, so define them locally like TCP_NODELAY above.
+            const TCP_KEEPIDLE = 4;
+            const TCP_KEEPINTVL = 5;
+            const TCP_KEEPCNT = 6;
+            std.posix.setsockopt(fd, std.posix.IPPROTO.TCP, TCP_KEEPIDLE, &std.mem.toBytes(@as(i32, 60))) catch {};
+            std.posix.setsockopt(fd, std.posix.IPPROTO.TCP, TCP_KEEPINTVL, &std.mem.toBytes(@as(i32, 15))) catch {};
+            std.posix.setsockopt(fd, std.posix.IPPROTO.TCP, TCP_KEEPCNT, &std.mem.toBytes(@as(i32, 4))) catch {};
+        }
         errdefer connection.deinit();
 
         // Global connection limit + registry.
