@@ -24,6 +24,7 @@ const MAX_RATE_LIMIT_BACKOFF_MS: u64 = 1800_000;
 const CATCHUP_WINDOW_MS: i64 = 1800_000;
 const STALE_TIMEOUT_MS: i64 = 600_000;
 const STALE_PING_MS: i64 = 300_000;
+const PING_WRITE_TIMEOUT_MS: u32 = 5_000;
 
 fn isStale(last_data: i64, now: i64) bool {
     return now - last_data > STALE_TIMEOUT_MS;
@@ -811,6 +812,10 @@ pub const Spider = struct {
         var last_ping: i64 = last_data;
 
         client.readTimeout(1000) catch {};
+        // Bound the keepalive ping send: the handshake resets the write timeout
+        // to infinite, so without this a probe on a half-open socket (full send
+        // buffer) would block indefinitely instead of erroring into reconnect.
+        client.writeTimeout(PING_WRITE_TIMEOUT_MS) catch {};
 
         while (self.shouldRun()) {
             // Re-subscribe when the follow list changes (added, removed, or
