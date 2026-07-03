@@ -7,7 +7,8 @@
 # reads the reclamation back from the /metrics gauge.
 #
 # The relay under test MUST be started with a short idle window and a per-IP
-# limit of 2, e.g. WISP_IDLE_SECONDS=1 WISP_MAX_CONNECTIONS_PER_IP=2.
+# limit of 2, e.g. WISP_IDLE_SECONDS=1 WISP_MAX_CONNECTIONS_PER_IP=2, and must be
+# dedicated to this test: the gauge assertions expect no other WebSocket clients.
 #
 # Usage: tests/integration_ws_idle_reclaim.sh [relay-url]   (default ws://127.0.0.1:7777)
 # Requires: bash (uses /dev/tcp) and curl on PATH. No noz needed — held-open idle
@@ -25,6 +26,13 @@ METRICS="http://$HOSTPORT/metrics"
 pass=0
 fail=0
 holders=()
+tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/wsidle.XXXXXX")"
+
+cleanup() {
+  for p in "${holders[@]:-}"; do kill "$p" 2>/dev/null; done
+  rm -rf "$tmpdir"
+}
+trap cleanup EXIT
 
 chk() { # desc expected actual
   if [ "$2" = "$3" ]; then
@@ -69,20 +77,21 @@ hold() { # statusfile
   holders+=($!)
 }
 
-cleanup() { for p in "${holders[@]:-}"; do kill "$p" 2>/dev/null; done; }
-trap cleanup EXIT
+# Wait (up to ~5s) for a backgrounded hold() to record its status line.
+statusof() { # statusfile
+  for _ in $(seq 1 50); do [ -s "$1" ] && break; sleep 0.1; done
+  cat "$1" 2>/dev/null
+}
 
 base=$(active)
 chk "metrics endpoint reports a numeric baseline" 1 "$([ -n "$base" ] && echo 1)"
 base=${base:-0}
 
 # Fill the per-IP bucket with LIMIT idle connections.
-for i in $(seq 1 $LIMIT); do hold "/tmp/wsidle.$$.$i"; done
-sleep 1
+for i in $(seq 1 $LIMIT); do hold "$tmpdir/a.$i"; done
 opened=0
 for i in $(seq 1 $LIMIT); do
-  s=$(cat "/tmp/wsidle.$$.$i" 2>/dev/null)
-  [ "$s" = "HTTP/1.1 101 Switching Protocols" ] && opened=$((opened + 1))
+  [ "$(statusof "$tmpdir/a.$i")" = "HTTP/1.1 101 Switching Protocols" ] && opened=$((opened + 1))
 done
 chk "$LIMIT idle WebSocket connections upgraded" "$LIMIT" "$opened"
 chk "active gauge rose by $LIMIT" "$((base + LIMIT))" "$(active)"
@@ -91,27 +100,26 @@ chk "active gauge rose by $LIMIT" "$((base + LIMIT))" "$(active)"
 chk "over-limit connection rejected (429)" "HTTP/1.1 429" "$(probe)"
 
 # Wait for the server's idle reaper to close the held connections. The reaper
-# ticks every 30s, so allow well past one tick.
-reclaimed=""
+# ticks every 30s, so allow well past one tick. Assert on the value the loop
+# confirmed, not a fresh query, so a transient metrics blip can't false-fail.
+now=""
 for _ in $(seq 1 60); do
-  [ "$(active)" = "$base" ] && { reclaimed=1; break; }
+  now=$(active)
+  [ "$now" = "$base" ] && break
   sleep 1
 done
 # PRIMARY: the leaked-slot regression left this gauge stuck above baseline.
-chk "connection slots reclaimed after idle close" "$base" "$(active)"
+chk "connection slots reclaimed after idle close" "$base" "$now"
 
 # SECONDARY: the same cleanup path frees the conn_limiter bucket, so LIMIT fresh
 # connections must be accepted again. A leaked bucket would still return 429.
 regained=0
-for i in $(seq 1 $LIMIT); do hold "/tmp/wsidle2.$$.$i"; done
-sleep 1
+for i in $(seq 1 $LIMIT); do hold "$tmpdir/b.$i"; done
 for i in $(seq 1 $LIMIT); do
-  s=$(cat "/tmp/wsidle2.$$.$i" 2>/dev/null)
-  [ "$s" = "HTTP/1.1 101 Switching Protocols" ] && regained=$((regained + 1))
+  [ "$(statusof "$tmpdir/b.$i")" = "HTTP/1.1 101 Switching Protocols" ] && regained=$((regained + 1))
 done
 chk "conn_limiter bucket reclaimed (reconnect up to limit)" "$LIMIT" "$regained"
 
-rm -f "/tmp/wsidle.$$".* "/tmp/wsidle2.$$".* 2>/dev/null
 echo "-----"
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
