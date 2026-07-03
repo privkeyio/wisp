@@ -22,6 +22,7 @@ const QUICK_DISCONNECT_MS: i64 = 30_000;
 const RATE_LIMIT_BACKOFF_MS: u64 = 60_000;
 const MAX_RATE_LIMIT_BACKOFF_MS: u64 = 1800_000;
 const CATCHUP_WINDOW_MS: i64 = 1800_000;
+const STALE_TIMEOUT_MS: i64 = 600_000;
 
 pub const Spider = struct {
     allocator: std.mem.Allocator,
@@ -801,6 +802,7 @@ pub const Spider = struct {
 
     fn readLoop(self: *Spider, client: *websocket.Client, relay_url: []const u8, subscribed_hash: u64) u64 {
         var events_received: u64 = 0;
+        var last_data = milliTimestamp();
 
         client.readTimeout(1000) catch {};
 
@@ -832,8 +834,15 @@ pub const Spider = struct {
 
             if (message) |msg| {
                 defer client.done(msg);
+                last_data = milliTimestamp();
                 if (msg.data.len > 0) {
                     self.handleRelayMessage(msg.data, relay_url, &events_received);
+                }
+            } else {
+                const idle = milliTimestamp() - last_data;
+                if (idle > STALE_TIMEOUT_MS) {
+                    log.warn("{s}: No data for {d}s, forcing reconnect", .{ relay_url, @divTrunc(idle, 1000) });
+                    break;
                 }
             }
         }
