@@ -22,6 +22,9 @@ HOSTPORT="${R#*://}"
 HOSTPORT="${HOSTPORT%%/*}"
 HOST="${HOSTPORT%%:*}"
 PORT="${HOSTPORT##*:}"
+case "$PORT" in
+  ''|*[!0-9]*) echo "error: relay URL must include an explicit numeric port (got '$R')" >&2; exit 2;;
+esac
 METRICS="http://$HOSTPORT/metrics"
 pass=0
 fail=0
@@ -71,7 +74,7 @@ probe() {
 hold() { # statusfile
   ( exec 3<>"/dev/tcp/$HOST/$PORT" || { echo "connect-failed" >"$1"; exit 1; }
     handshake 3
-    IFS= read -r line <&3
+    IFS= read -r line <&3 || line="closed"
     printf '%s' "${line%$'\r'}" >"$1"
     while :; do sleep 1; done ) &
   holders+=($!)
@@ -84,7 +87,7 @@ statusof() { # statusfile
 }
 
 base=$(active)
-chk "metrics endpoint reports a numeric baseline" 1 "$([ -n "$base" ] && echo 1)"
+chk "metrics endpoint reports a numeric baseline" 1 "$(case "$base" in ''|*[!0-9]*) echo 0;; *) echo 1;; esac)"
 base=${base:-0}
 
 # Fill the per-IP bucket with LIMIT idle connections.
