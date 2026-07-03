@@ -24,5 +24,9 @@ relay's URL (start a relay first, e.g. `./zig-out/bin/wisp`):
     bash tests/integration_negentropy.sh ws://A ws://B         # NIP-77 relay sync
     bash tests/integration_spider.sh ws://A ws://B             # spider NIP-77 client
     bash tests/integration_concurrency.sh ws://127.0.0.1:7777  # many concurrent conns
+    bash tests/integration_ws_idle_reclaim.sh ws://127.0.0.1:7777 # idle-close slot/bucket reclaim
+
+The idle-reclaim test needs the relay started with a short idle window and a
+per-IP limit of 2, e.g. `WISP_IDLE_SECONDS=1 WISP_MAX_CONNECTIONS_PER_IP=2`.
 
 These mirror the jobs in `.github/workflows/ci.yml`.
