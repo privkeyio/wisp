@@ -61,7 +61,7 @@ pub const Subscriptions = struct {
         _ = self.connections.remove(conn_id);
     }
 
-    pub fn closeIdleConnection(self: *Subscriptions, conn_id: u64, notice: []const u8) bool {
+    pub fn closeIdleConnection(self: *Subscriptions, conn_id: u64) bool {
         const io = nostr.io.io();
         self.rwlock.lockSharedUncancelable(io);
         const conn = self.connections.get(conn_id);
@@ -69,11 +69,13 @@ pub const Subscriptions = struct {
         self.rwlock.unlockShared(io);
 
         const c = conn orelse return false;
-        // Write the notice outside the lock: a non-reading idle client would
-        // otherwise stall every lock waiter for up to the send timeout. The
-        // write_guard keeps the connection alive until the write completes.
+        // No courtesy NOTICE here: the reaper runs on the single cleanup thread,
+        // and a synchronous write to a non-reading idle client would stall it for
+        // up to the send timeout (per client), starving the other periodic jobs.
+        // closeWs() shuts down the read half so the worker still runs its normal
+        // cleanup and frees the slot/bucket. The write_guard keeps the connection
+        // alive until closeWs completes.
         defer _ = c.write_guard.fetchSub(1, .release);
-        c.write(notice) catch {};
         c.closeWs();
         return true;
     }

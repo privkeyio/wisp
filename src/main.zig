@@ -262,9 +262,7 @@ fn storeCleanupThread(server: *Server, store: *Store, config: *const Config, sub
             const idle_ids = subs.getIdleConnections(config.idle_seconds);
             defer subs.allocator.free(idle_ids);
             for (idle_ids) |conn_id| {
-                var notice_buf: [128]u8 = undefined;
-                const notice = nostr.RelayMsg.notice("connection closed: idle timeout", &notice_buf) catch continue;
-                _ = subs.closeIdleConnection(conn_id, notice);
+                _ = subs.closeIdleConnection(conn_id);
             }
         }
 
