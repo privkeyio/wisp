@@ -40,6 +40,13 @@ in
     # A client REQ over WebSocket must draw a NIP-01 response back.
     relay.succeed("${pyClient}/bin/python3 ${probe}")
 
+    # NIP-11: the relay document must echo the name set via `settings`, proving the module's generated
+    # config.toml round-tripped through wisp's hand-rolled parser (not merely that the service booted).
+    relay.succeed(
+        "${pkgs.curl}/bin/curl -sf -H 'Accept: application/nostr+json' http://127.0.0.1:7777/ "
+        + "| grep -q '\"name\":\"test relay\"'"
+    )
+
     # The data dir is the managed StateDirectory, and the sandbox is in effect.
     relay.succeed("test -d /var/lib/wisp")
     relay.succeed("systemctl show wisp.service | grep -qx 'ProtectSystem=strict'")
