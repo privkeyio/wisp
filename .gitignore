@@ -11,3 +11,5 @@ wisp-db-test/
 benchmark/results.json
 book/
 zig-pkg/
+result
+result-*
