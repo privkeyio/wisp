@@ -312,6 +312,16 @@ pub const Spider = struct {
         var conn = self.relays.getPtr(relay_url) orelse return;
 
         while (self.shouldRun()) {
+            const follow_empty = blk: {
+                self.follow_mutex.lockUncancelable(nostr.io.io());
+                defer self.follow_mutex.unlock(nostr.io.io());
+                break :blk self.follow_pubkeys.items.len == 0;
+            };
+            if (follow_empty) {
+                self.interruptibleSleep(1000);
+                continue;
+            }
+
             if (conn.blackout_until > 0) {
                 const now = milliTimestamp();
                 if (now < conn.blackout_until) {
