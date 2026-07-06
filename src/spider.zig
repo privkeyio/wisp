@@ -96,16 +96,8 @@ pub const Spider = struct {
         }
 
         self.running.store(true, .release);
-        self.refreshFollowList();
 
-        if (self.follow_pubkeys.items.len == 0) {
-            log.warn("Spider enabled but no pubkeys to follow", .{});
-        }
-
-        log.info("Spider starting with {d} relays, {d} pubkeys", .{
-            self.relays.count(),
-            self.follow_pubkeys.items.len,
-        });
+        log.info("Spider starting with {d} relays", .{self.relays.count()});
 
         for (self.relays.keys()) |relay_url| {
             const thread = try std.Thread.spawn(.{}, relayLoop, .{ self, relay_url });
@@ -178,6 +170,7 @@ pub const Spider = struct {
         _ = std.fmt.hexToBytes(&owner_pubkey, self.config.spider_admin) catch return;
 
         for (self.relays.keys()) |relay_url| {
+            if (!self.shouldRun()) return;
             log.info("Bootstrapping admin events from {s}...", .{relay_url});
 
             const parsed = parseRelayUrl(relay_url) orelse continue;
@@ -201,12 +194,12 @@ pub const Spider = struct {
 
             client.writeText(@constCast(req_msg)) catch continue;
 
-            client.readTimeout(5000) catch {};
+            client.readTimeout(1000) catch {};
 
             var events_received: u64 = 0;
             var got_kind3 = false;
             const bootstrap_start = milliTimestamp();
-            while (milliTimestamp() - bootstrap_start < 10_000) {
+            while (self.shouldRun() and milliTimestamp() - bootstrap_start < 10_000) {
                 const message = client.read() catch {
                     break;
                 };
@@ -282,6 +275,17 @@ pub const Spider = struct {
 
     fn refreshLoop(self: *Spider) void {
         const interval_ms: u64 = @max(1000, @as(u64, self.config.spider_sync_interval) * 1000);
+
+        self.refreshFollowList();
+        const initial_empty = blk: {
+            self.follow_mutex.lockUncancelable(nostr.io.io());
+            defer self.follow_mutex.unlock(nostr.io.io());
+            break :blk self.follow_pubkeys.items.len == 0;
+        };
+        if (initial_empty) {
+            log.warn("Spider enabled but no pubkeys to follow", .{});
+        }
+
         while (self.shouldRun()) {
             self.interruptibleSleep(interval_ms);
 
@@ -313,6 +317,16 @@ pub const Spider = struct {
         var conn = self.relays.getPtr(relay_url) orelse return;
 
         while (self.shouldRun()) {
+            const follow_empty = blk: {
+                self.follow_mutex.lockUncancelable(nostr.io.io());
+                defer self.follow_mutex.unlock(nostr.io.io());
+                break :blk self.follow_pubkeys.items.len == 0;
+            };
+            if (follow_empty) {
+                self.interruptibleSleep(1000);
+                continue;
+            }
+
             if (conn.blackout_until > 0) {
                 const now = milliTimestamp();
                 if (now < conn.blackout_until) {
