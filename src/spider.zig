@@ -277,7 +277,12 @@ pub const Spider = struct {
         const interval_ms: u64 = @max(1000, @as(u64, self.config.spider_sync_interval) * 1000);
 
         self.refreshFollowList();
-        if (self.follow_pubkeys.items.len == 0) {
+        const initial_empty = blk: {
+            self.follow_mutex.lockUncancelable(nostr.io.io());
+            defer self.follow_mutex.unlock(nostr.io.io());
+            break :blk self.follow_pubkeys.items.len == 0;
+        };
+        if (initial_empty) {
             log.warn("Spider enabled but no pubkeys to follow", .{});
         }
 
