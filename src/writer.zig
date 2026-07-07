@@ -30,6 +30,9 @@ const Processed = struct {
     success: bool,
     message: []const u8,
     broadcast: bool,
+    // Persisted to disk. Distinct from `broadcast`: ephemeral events (NIP-16) broadcast
+    // but are never stored, so they must not count as stored or invalidate the query cache.
+    stored: bool = false,
 };
 
 pub const Writer = struct {
@@ -155,7 +158,7 @@ pub const Writer = struct {
                 fatal = true;
                 break;
             };
-            if (p.success and p.broadcast) stored_any = true;
+            if (p.stored) stored_any = true;
             processed[n] = p;
             n += 1;
         }
@@ -178,7 +181,7 @@ pub const Writer = struct {
         if (stored_any) self.store.query_cache.invalidate();
 
         for (processed[0..n]) |*p| {
-            if (p.broadcast) metrics.eventStored() else if (!p.success) metrics.eventRejected();
+            if (p.stored) metrics.eventStored() else if (!p.success) metrics.eventRejected();
             self.reply(p.conn_id, p.event.id(), p.success, p.message);
             if (p.broadcast) self.broadcaster.broadcast(&p.event);
             p.event.deinit();
@@ -198,13 +201,13 @@ pub const Writer = struct {
                 _ = try self.store.deleteInTxn(txn, &target, event.pubkey());
             }
             _ = try self.store.storeInTxn(txn, event, job.json);
-            return .{ .conn_id = job.conn_id, .event = event.*, .success = true, .message = "", .broadcast = true };
+            return .{ .conn_id = job.conn_id, .event = event.*, .success = true, .message = "", .broadcast = true, .stored = true };
         }
 
         const result = try self.store.storeInTxn(txn, event, job.json);
-        // Stored, OR ephemeral (relayed but not persisted, NIP-01): ack and broadcast to subscribers.
+        // Stored, OR ephemeral (relayed but not persisted, NIP-16): ack and broadcast to subscribers.
         if (result.stored or result.ephemeral) {
-            return .{ .conn_id = job.conn_id, .event = event.*, .success = true, .message = "", .broadcast = true };
+            return .{ .conn_id = job.conn_id, .event = event.*, .success = true, .message = "", .broadcast = true, .stored = result.stored };
         }
         const dup = std.mem.startsWith(u8, result.message, "duplicate");
         return .{ .conn_id = job.conn_id, .event = event.*, .success = dup, .message = result.message, .broadcast = false };

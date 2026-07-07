@@ -80,14 +80,26 @@ chk "NIP-16 ephemeral not stored" 0 "$(req -k 20000)"
 # --- NIP-16 ephemeral is RELAYED LIVE to an open subscription (broadcast, not persisted) ---
 # Regression for the fix that lets ephemerals (20000-29999) reach subscribers despite not being
 # stored -- required by clients that coordinate over ephemeral events (e.g. keep's FROST/OPRF, kind
-# 24242). Subscribe first, publish while subscribed, and assert the subscriber received it.
+# 24242). `noz req` exits at EOSE, so it cannot observe a post-EOSE live broadcast; instead hold a
+# raw WebSocket open (via /dev/tcp), REQ, publish on a separate connection, and read the pushed frame.
+EPHHOSTPORT="${R#*://}"; EPHHOSTPORT="${EPHHOSTPORT%%/*}"
+EPHHOST="${EPHHOSTPORT%%:*}"; EPHPORT="${EPHHOSTPORT##*:}"
 EPHOUT=$(mktemp)
-timeout 4 noz req -k 20001 "$R" >"$EPHOUT" 2>/dev/null &
-EPHPID=$!
-sleep 1
-pub --sec $SEC1 -k 20001 -c "live-ephemeral"
-wait $EPHPID
-chk "NIP-16 ephemeral delivered live to open subscription" 1 "$(grep -c '"kind"' "$EPHOUT")"
+if exec 3<>"/dev/tcp/$EPHHOST/$EPHPORT"; then
+  printf 'GET / HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n' "$EPHHOSTPORT" >&3
+  while IFS= read -r line <&3; do [ "$line" = $'\r' ] && break; done
+  # Zero-masked client text frame (mask bit set, all-zero key leaves the payload as-is).
+  EPHREQ='["REQ","eph",{"kinds":[20001]}]'
+  printf "\x81\x$(printf %02x $((0x80 | ${#EPHREQ})))\x00\x00\x00\x00%s" "$EPHREQ" >&3
+  ( timeout 4 cat <&3 >"$EPHOUT" ) &
+  EPHPID=$!
+  sleep 1                                   # let the REQ register (relay also sends EOSE)
+  pub --sec $SEC1 -k 20001 -c "live-ephemeral"
+  wait $EPHPID
+  exec 3>&- 3<&-
+fi
+# grep -a: the WebSocket frame headers are binary, so force a text scan of the payload.
+chk "NIP-16 ephemeral delivered live to open subscription" 1 "$(grep -ac '"EVENT"' "$EPHOUT")"
 chk "NIP-16 ephemeral still not stored after live delivery" 0 "$(req -k 20001)"
 rm -f "$EPHOUT"
 

@@ -24,7 +24,7 @@ pub const Store = struct {
         stored: bool,
         message: []const u8 = "",
         replaced_id: ?[32]u8 = null,
-        // NIP-01 ephemeral (20000-29999): relayed to subscribers but not persisted. The delivery
+        // NIP-16 ephemeral (20000-29999): relayed to subscribers but not persisted. The delivery
         // paths broadcast when `stored OR ephemeral`, so this reaches subscribers despite stored=false.
         ephemeral: bool = false,
     };
