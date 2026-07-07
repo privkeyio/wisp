@@ -367,14 +367,17 @@ pub const Handler = struct {
             return;
         };
 
-        if (!result.stored) {
+        if (!result.stored and !result.ephemeral) {
             const success = std.mem.startsWith(u8, result.message, "duplicate");
             if (!success) metrics.eventRejected();
             self.replyOk(conn, id, success, result.message);
             return;
         }
 
-        self.sendOk(conn, id, true, "");
+        // Stored, OR ephemeral (relayed but not persisted, NIP-16): ack and broadcast to subscribers.
+        // Ephemeral acks use replyOk so they are not miscounted as stored (sendOk records the stored
+        // metric); only genuinely persisted events go through sendOk.
+        if (result.ephemeral) self.replyOk(conn, id, true, "") else self.sendOk(conn, id, true, "");
         self.broadcaster.broadcast(&event);
     }
 

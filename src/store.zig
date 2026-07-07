@@ -24,6 +24,9 @@ pub const Store = struct {
         stored: bool,
         message: []const u8 = "",
         replaced_id: ?[32]u8 = null,
+        // NIP-16 ephemeral (20000-29999): relayed to subscribers but not persisted. The delivery
+        // paths broadcast when `stored OR ephemeral`, so this reaches subscribers despite stored=false.
+        ephemeral: bool = false,
     };
 
     pub fn init(allocator: std.mem.Allocator, lmdb: *Lmdb) !Store {
@@ -77,7 +80,7 @@ pub const Store = struct {
         const kind_type = nostr.kindType(event.kind());
 
         if (kind_type == .ephemeral) {
-            return .{ .stored = false, .message = "ephemeral: not stored" };
+            return .{ .stored = false, .ephemeral = true, .message = "ephemeral: not stored" };
         }
 
         const id = event.id();
