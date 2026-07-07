@@ -202,7 +202,8 @@ pub const Writer = struct {
         }
 
         const result = try self.store.storeInTxn(txn, event, job.json);
-        if (result.stored) {
+        // Stored, OR ephemeral (relayed but not persisted, NIP-01): ack and broadcast to subscribers.
+        if (result.stored or result.ephemeral) {
             return .{ .conn_id = job.conn_id, .event = event.*, .success = true, .message = "", .broadcast = true };
         }
         const dup = std.mem.startsWith(u8, result.message, "duplicate");

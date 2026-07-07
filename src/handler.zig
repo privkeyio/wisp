@@ -367,13 +367,14 @@ pub const Handler = struct {
             return;
         };
 
-        if (!result.stored) {
+        if (!result.stored and !result.ephemeral) {
             const success = std.mem.startsWith(u8, result.message, "duplicate");
             if (!success) metrics.eventRejected();
             self.replyOk(conn, id, success, result.message);
             return;
         }
 
+        // Stored, OR ephemeral (relayed but not persisted, NIP-01): ack and broadcast to subscribers.
         self.sendOk(conn, id, true, "");
         self.broadcaster.broadcast(&event);
     }

@@ -77,6 +77,20 @@ pub --sec $SEC1 -k 20000 -c "ephemeral"
 sleep 0.5
 chk "NIP-16 ephemeral not stored" 0 "$(req -k 20000)"
 
+# --- NIP-16 ephemeral is RELAYED LIVE to an open subscription (broadcast, not persisted) ---
+# Regression for the fix that lets ephemerals (20000-29999) reach subscribers despite not being
+# stored -- required by clients that coordinate over ephemeral events (e.g. keep's FROST/OPRF, kind
+# 24242). Subscribe first, publish while subscribed, and assert the subscriber received it.
+EPHOUT=$(mktemp)
+timeout 4 noz req -k 20001 "$R" >"$EPHOUT" 2>/dev/null &
+EPHPID=$!
+sleep 1
+pub --sec $SEC1 -k 20001 -c "live-ephemeral"
+wait $EPHPID
+chk "NIP-16 ephemeral delivered live to open subscription" 1 "$(grep -c '"kind"' "$EPHOUT")"
+chk "NIP-16 ephemeral still not stored after live delivery" 0 "$(req -k 20001)"
+rm -f "$EPHOUT"
+
 # --- NIP-33 addressable (kind 30023 + d tag) ---
 abase=$(($(date +%s) - 20))
 pub --sec $SEC2 -k 30023 -d slugA --ts $abase -c "A-v1"
