@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.11] - 2026-07-07
+
+### Added
+
+- Ephemeral events (NIP-16, kinds 20000-29999) are now relayed to matching subscribers in real time instead of being dropped. They are still not stored (#143)
+- Nix packaging: a flake with a `wisp` package and a `services.wisp` NixOS module (host option, `LimitNOFILE`, conditional spider sandboxing, effective-port firewall) (#139)
+
+### Fixed
+
+- Spider reconnects half-open upstream relay connections via a staleness watchdog: quiet relays are probed with a keepalive ping (bounded by a write timeout) before a stale-connection reconnect, so silently dropped upstreams recover instead of hanging (#132)
+- Spider bootstrap is shutdown-aware and off the accept path: relay connect is gated until the follow list is populated, and the follow list is read under its mutex during the refresh-loop startup (#137)
+- Connection reaping hardened with an `SO_KEEPALIVE` backstop and a non-blocking idle reaper, so half-open and idle client connections are reclaimed reliably; TCP keepalive tuning is gated to Linux to avoid macOS corking (#136)
+- Zig dependency fetch sets the fetchzip extension so GitHub codeload tarballs unpack correctly (#142)
+
 ## [0.5.10] - 2026-07-01
 
 ### Changed
