@@ -9,8 +9,8 @@
         // record can't busy-spin a core. Must match http.zig's websocket pin so
         // the two resolve to one package.
         .websocket = .{
-            .url = "https://github.com/privkeyio/websocket.zig/archive/0c4dcc0c98d44d733dcf56605a43ac07e8b714b0.tar.gz",
-            .hash = "websocket-0.1.0-ZPISdSzkBABfzRO9FT8LMxcqyqtPmTZG2HCSMi4aUHlY",
+            .url = "https://github.com/privkeyio/websocket.zig/archive/ca717bbb3c0b194a39247517f61ce7fd8fb221a8.tar.gz",
+            .hash = "websocket-0.1.0-ZPISdQXnBAB-klQMhNQdQ5plXawGfh9I3Qa2-FpAJFc_",
         },
         .nostr = .{
             .url = "https://github.com/privkeyio/libnostr-z/archive/refs/tags/v0.3.6.tar.gz",
@@ -22,8 +22,8 @@
         // #217, plus #215/#214/#213), re-pinned only to the websocket fork above
         // so both resolve to the same websocket package.
         .httpz = .{
-            .url = "https://github.com/privkeyio/http.zig/archive/7d821a6597332d9d56519dceb465be73a98581e6.tar.gz",
-            .hash = "httpz-0.0.0-PNVzrEjoCAApBRfs-NRdLMIaAKyo_83LHVjoc82el0kh",
+            .url = "https://github.com/privkeyio/http.zig/archive/17db5504dec91f1808804407f30343ce50d81617.tar.gz",
+            .hash = "httpz-0.0.0-PNVzrEjoCAD8hYp9Q0E8cSC-kuGT2wdmIcS01QYY2hBH",
         },
     },
     .paths = .{
