@@ -10,8 +10,8 @@
         // so a blackholed/stalling relay can't hang shutdown. Must match
         // http.zig's websocket pin so the two resolve to one package.
         .websocket = .{
-            .url = "https://github.com/privkeyio/websocket.zig/archive/6a28798afc98fd76cbb9ed33ebd8df1d20c8345e.tar.gz",
-            .hash = "websocket-0.1.0-ZPISda75BAAvTnubzaPHqgoknKvJOYZ6Z9lNJrdKxZ9r",
+            .url = "https://github.com/privkeyio/websocket.zig/archive/38bf52cd3da2a950058263533d95c6f999ecf417.tar.gz",
+            .hash = "websocket-0.1.0-ZPISdWL7BAAqB1NXF1seDaj72KvXQWhuTcDedyiIQET_",
         },
         .nostr = .{
             .url = "https://github.com/privkeyio/libnostr-z/archive/refs/tags/v0.3.6.tar.gz",
@@ -23,8 +23,8 @@
         // #217, plus #215/#214/#213), re-pinned only to the websocket fork above
         // so both resolve to the same websocket package.
         .httpz = .{
-            .url = "https://github.com/privkeyio/http.zig/archive/545eb1128dbfa72778f7976c7ec7704da610552b.tar.gz",
-            .hash = "httpz-0.0.0-PNVzrEjoCABBjQq22SYBYRENp0a2qdPLFB1fN6CUoqAG",
+            .url = "https://github.com/privkeyio/http.zig/archive/7c6c94cdd217c6c7350723795ec820f6f62692f2.tar.gz",
+            .hash = "httpz-0.0.0-PNVzrEjoCABy6WzvBH0H4p9PWDBO7LSOgF_-mbkYyuYz",
         },
     },
     .paths = .{
