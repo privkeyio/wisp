@@ -5,12 +5,13 @@
     .dependencies = .{
         // websocket.zig: client for spider outbound connections and the epoll
         // worker-pool server. privkeyio fork of karlseguin/websocket.zig#103
-        // that also polls inside the TLS read loop so a 0-plaintext control
-        // record can't busy-spin a core. Must match http.zig's websocket pin so
-        // the two resolve to one package.
+        // that polls inside the TLS read loop so a 0-plaintext control record
+        // can't busy-spin a core, and bounds the client connect + TLS handshake
+        // so a blackholed/stalling relay can't hang shutdown. Must match
+        // http.zig's websocket pin so the two resolve to one package.
         .websocket = .{
-            .url = "https://github.com/privkeyio/websocket.zig/archive/ca717bbb3c0b194a39247517f61ce7fd8fb221a8.tar.gz",
-            .hash = "websocket-0.1.0-ZPISdQXnBAB-klQMhNQdQ5plXawGfh9I3Qa2-FpAJFc_",
+            .url = "https://github.com/privkeyio/websocket.zig/archive/6a28798afc98fd76cbb9ed33ebd8df1d20c8345e.tar.gz",
+            .hash = "websocket-0.1.0-ZPISda75BAAvTnubzaPHqgoknKvJOYZ6Z9lNJrdKxZ9r",
         },
         .nostr = .{
             .url = "https://github.com/privkeyio/libnostr-z/archive/refs/tags/v0.3.6.tar.gz",
@@ -22,8 +23,8 @@
         // #217, plus #215/#214/#213), re-pinned only to the websocket fork above
         // so both resolve to the same websocket package.
         .httpz = .{
-            .url = "https://github.com/privkeyio/http.zig/archive/17db5504dec91f1808804407f30343ce50d81617.tar.gz",
-            .hash = "httpz-0.0.0-PNVzrEjoCAD8hYp9Q0E8cSC-kuGT2wdmIcS01QYY2hBH",
+            .url = "https://github.com/privkeyio/http.zig/archive/545eb1128dbfa72778f7976c7ec7704da610552b.tar.gz",
+            .hash = "httpz-0.0.0-PNVzrEjoCABBjQq22SYBYRENp0a2qdPLFB1fN6CUoqAG",
         },
     },
     .paths = .{
