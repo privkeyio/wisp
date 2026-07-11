@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.12] - 2026-07-09
+
+### Fixed
+
+- Spider no longer busy-spins a CPU core per quiet `wss://` upstream relay. The TLS read loop retried on 0-plaintext control records (post-handshake NewSessionTicket/KeyUpdate) without re-polling; the pinned websocket.zig now re-polls inside the loop so a quiet socket parks instead of spinning (#145)
+- Spider connect and TLS handshake are now bounded by a timeout (default 10s each), so a blackholed or stalling upstream relay can no longer hang the spider thread through shutdown and cause a SIGKILL past the service grace period. Bounds connect + handshake, not DNS resolution (#140 tracks the residual) (#148)
+
+### Changed
+
+- Both fixes land via upstream `karlseguin/websocket.zig` (#103, #108) and `karlseguin/http.zig`; wisp pins upstream, no fork
+
 ## [0.5.11] - 2026-07-07
 
 ### Added

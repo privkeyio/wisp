@@ -1,15 +1,17 @@
 .{
     .name = .wisp,
-    .version = "0.5.11",
+    .version = "0.5.12",
     .fingerprint = 0xc4bdec9fe6401a8d,
     .dependencies = .{
         // websocket.zig: client for spider outbound connections and the epoll
         // worker-pool server. Upstream, includes the TLS read-readiness poll fix
-        // (karlseguin/websocket.zig#103). Must match http.zig's websocket pin so
-        // the two resolve to one package.
+        // (#103), the in-loop re-poll that stops quiet wss connections busy-spinning
+        // a core (via #218/#219 pin bumps), and the bounded connect/TLS-handshake
+        // timeout (#108). Must match http.zig's websocket pin so the two resolve to
+        // one package.
         .websocket = .{
-            .url = "https://github.com/karlseguin/websocket.zig/archive/99df0d3533a41cbcd5ff59b9af68bbfe6169cc62.tar.gz",
-            .hash = "websocket-0.1.0-ZPISdangBAAgWPap_MVU6Nk4rj3GT3xuJuF0IIv8HN6G",
+            .url = "https://github.com/karlseguin/websocket.zig/archive/b70e733bc0d0ba0a98ff5fe5ef64d3017c85f369.tar.gz",
+            .hash = "websocket-0.1.0-ZPISdUoQBQC7zw1uSwbOEYdxZiTxNN4nf9RlWBsN0_Nd",
         },
         .nostr = .{
             .url = "https://github.com/privkeyio/libnostr-z/archive/refs/tags/v0.3.6.tar.gz",
@@ -18,12 +20,11 @@
         // http.zig: HTTP routing (NIP-11/NIP-86) + WebSocket upgrade onto
         // websocket.zig's epoll worker pool. Upstream, includes the epoll
         // recv-on-freed-Conn fix (#216) and the shutdown-buffer join-order fix
-        // (#217), alongside the prior fixes (#215, #214, #213). Byte-identical to
-        // the temporary privkeyio fork it replaces. Pins the same websocket commit
-        // as above so they dedup.
+        // (#217), alongside the prior fixes (#215, #214, #213). Pins the same
+        // websocket commit (b70e733) as above so they dedup.
         .httpz = .{
-            .url = "https://github.com/karlseguin/http.zig/archive/86a44b63bda353338f2dbddc35eeb260f0f5c299.tar.gz",
-            .hash = "httpz-0.0.0-PNVzrEnoCADpf8B42EMPO2WmIlvsQJ0dJ8oCWjnl6CIX",
+            .url = "https://github.com/karlseguin/http.zig/archive/01dc09453ae50b82cc74ac2f90e9cd57e0b38500.tar.gz",
+            .hash = "httpz-0.0.0-PNVzrEnoCAAwAtnht2430lpr-ynyNpLeTpoy_-lmWyhD",
         },
     },
     .paths = .{
