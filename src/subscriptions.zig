@@ -153,6 +153,28 @@ pub const Subscriptions = struct {
         sub_id: []const u8,
     };
 
+    // Reused per-broadcast scratch. forEachMatching runs on the single writer
+    // thread in durable sync modes but on multiple worker threads concurrently
+    // in sync=none, so the scratch is threadlocal (no shared-mutable state) and
+    // cleared per call rather than reallocated, avoiding per-event glibc arena
+    // churn in the fan-out hot path. Reusing one buffer per thread makes
+    // forEachMatching non-reentrant on a thread: callees (the post-unlock socket
+    // writes) must never re-enter it, or the inner clear would corrupt the outer
+    // drain and unbalance write_guard.
+    //
+    // These are struct-scoped threadlocals shared across every Subscriptions
+    // instance on a thread, and tl_seen is bound to whichever instance's
+    // allocator first initializes it. That is correct ONLY because there is
+    // exactly one Subscriptions instance, backed by one process-global allocator;
+    // a second instance with a different allocator would alias this state.
+    //
+    // The buffers are never freed or shrunk: each thread retains its peak
+    // fan-out capacity for the process lifetime. This is bounded and intentional,
+    // and it assumes the worker-pool threads live for the whole process. A
+    // respawned pool thread would orphan (leak) its buffers.
+    threadlocal var tl_pending: std.ArrayListUnmanaged(PendingWrite) = .empty;
+    threadlocal var tl_seen: ?std.AutoHashMap(u64, void) = null;
+
     pub fn forEachMatching(
         self: *Subscriptions,
         event: *const nostr.Event,
@@ -166,15 +188,16 @@ pub const Subscriptions = struct {
         // send timeout. Each snapshotted connection has its write_guard bumped
         // while still in the registry; removeConnection plus close() drain the
         // guard before freeing, so writing post-unlock is use-after-free safe.
-        var pending: std.ArrayListUnmanaged(PendingWrite) = .empty;
-        defer pending.deinit(self.allocator);
+        const pending = &tl_pending;
+        pending.clearRetainingCapacity();
+
+        if (tl_seen == null) tl_seen = std.AutoHashMap(u64, void).init(self.allocator);
+        const seen = &tl_seen.?;
+        seen.clearRetainingCapacity();
 
         {
             self.rwlock.lockSharedUncancelable(io);
             defer self.rwlock.unlockShared(io);
-
-            var seen = std.AutoHashMap(u64, void).init(self.allocator);
-            defer seen.deinit();
 
             // Kind-indexed candidates: only connections subscribed to this kind.
             if (self.kind_index.get(event.kind())) |conn_ids| {
@@ -182,7 +205,7 @@ pub const Subscriptions = struct {
                     if (seen.contains(conn_id)) continue;
                     seen.put(conn_id, {}) catch continue;
                     const conn = self.connections.get(conn_id) orelse continue;
-                    snapshotMatch(self, &pending, conn, event);
+                    snapshotMatch(self, pending, conn, event);
                 }
             }
 
@@ -194,7 +217,7 @@ pub const Subscriptions = struct {
                 if (seen.contains(conn.id)) continue;
                 if (!connHasWildcard(conn)) continue;
                 seen.put(conn.id, {}) catch continue;
-                snapshotMatch(self, &pending, conn, event);
+                snapshotMatch(self, pending, conn, event);
             }
         }
 
@@ -243,3 +266,71 @@ pub const Subscriptions = struct {
         };
     }
 };
+
+const testing = std.testing;
+
+// 64- and 128-hex-char fields so Event.parse accepts the structure.
+const HID = "0" ** 63 ++ "1";
+const HPK = "0" ** 63 ++ "2";
+const HSIG = "0" ** 127 ++ "3";
+
+fn eventJson(comptime kind: []const u8) []const u8 {
+    return "[\"EVENT\",{\"id\":\"" ++ HID ++ "\",\"pubkey\":\"" ++ HPK ++
+        "\",\"created_at\":1700000000,\"kind\":" ++ kind ++
+        ",\"tags\":[],\"content\":\"hi\",\"sig\":\"" ++ HSIG ++ "\"}]";
+}
+
+test "forEachMatching reuses threadlocal scratch cleanly across calls" {
+    // The Subscriptions instance owns the threadlocal scratch (tl_pending/tl_seen)
+    // which is intentionally never freed for the process lifetime, so back it with
+    // a non-leak-checking allocator. Connections use testing.allocator and are
+    // deinitialized normally.
+    var subs = Subscriptions.init(std.heap.page_allocator);
+    defer subs.deinit();
+
+    var conn1: Connection = undefined;
+    conn1.init(testing.allocator, 1);
+    defer conn1.deinit();
+    var conn7: Connection = undefined;
+    conn7.init(testing.allocator, 7);
+    defer conn7.deinit();
+
+    try subs.addConnection(&conn1);
+    try subs.addConnection(&conn7);
+
+    var req1 = try nostr.ClientMsg.parse("[\"REQ\",\"k1\",{\"kinds\":[1]}]");
+    defer req1.deinit();
+    try subs.subscribe(&conn1, "k1", try req1.getFilters(conn1.allocator()), 5);
+
+    var req7 = try nostr.ClientMsg.parse("[\"REQ\",\"k7\",{\"kinds\":[7]}]");
+    defer req7.deinit();
+    try subs.subscribe(&conn7, "k7", try req7.getFilters(conn7.allocator()), 5);
+
+    const msg_buf = try testing.allocator.create([65536]u8);
+    defer testing.allocator.destroy(msg_buf);
+
+    // First broadcast: a kind-1 event reaches only conn1.
+    var ev1 = try nostr.ClientMsg.parse(eventJson("1"));
+    defer ev1.deinit();
+    const event1 = try ev1.getEvent();
+    subs.forEachMatching(&event1, msg_buf);
+
+    try testing.expectEqual(@as(u64, 1), conn1.events_sent.load(.monotonic));
+    try testing.expectEqual(@as(u64, 0), conn7.events_sent.load(.monotonic));
+    // The post-unlock drain balances every guard it took.
+    try testing.expectEqual(@as(u32, 0), conn1.write_guard.load(.acquire));
+    try testing.expectEqual(@as(u32, 0), conn7.write_guard.load(.acquire));
+
+    // Second broadcast on the same thread: a kind-7 event reaches only conn7. If
+    // the threadlocal scratch carried stale entries from call 1, conn1 would be
+    // written again or its guard would leak.
+    var ev7 = try nostr.ClientMsg.parse(eventJson("7"));
+    defer ev7.deinit();
+    const event7 = try ev7.getEvent();
+    subs.forEachMatching(&event7, msg_buf);
+
+    try testing.expectEqual(@as(u64, 1), conn1.events_sent.load(.monotonic));
+    try testing.expectEqual(@as(u64, 1), conn7.events_sent.load(.monotonic));
+    try testing.expectEqual(@as(u32, 0), conn1.write_guard.load(.acquire));
+    try testing.expectEqual(@as(u32, 0), conn7.write_guard.load(.acquire));
+}
