@@ -1,10 +1,20 @@
 const std = @import("std");
 const nostr = @import("nostr.zig");
 
+// Per-IP limiter state is sharded across independent mutex+map buckets so
+// worker threads keying on different IPs do not serialize on one process-global
+// lock on every event/query/connection. The shard is chosen by hashing the
+// final bucket key, so a given IP always maps to the same shard and per-IP
+// semantics are preserved exactly.
+const SHARD_COUNT = 16;
+
+fn shardIndex(key: []const u8) usize {
+    return std.hash.Wyhash.hash(0, key) % SHARD_COUNT;
+}
+
 pub const ConnectionLimiter = struct {
     allocator: std.mem.Allocator,
-    mutex: std.Io.Mutex,
-    ip_buckets: std.StringHashMap(IpBucket),
+    shards: [SHARD_COUNT]Shard,
     max_connections_per_ip: u32,
     cleanup_interval_seconds: i64,
 
@@ -13,32 +23,44 @@ pub const ConnectionLimiter = struct {
         last_activity: i64,
     };
 
+    const Shard = struct {
+        mutex: std.Io.Mutex,
+        ip_buckets: std.StringHashMap(IpBucket),
+    };
+
     pub fn init(allocator: std.mem.Allocator, max_connections_per_ip: u32) ConnectionLimiter {
-        return .{
+        var self: ConnectionLimiter = .{
             .allocator = allocator,
-            .mutex = .init,
-            .ip_buckets = std.StringHashMap(IpBucket).init(allocator),
+            .shards = undefined,
             .max_connections_per_ip = max_connections_per_ip,
             .cleanup_interval_seconds = 300,
         };
+        for (&self.shards) |*shard| {
+            shard.* = .{ .mutex = .init, .ip_buckets = std.StringHashMap(IpBucket).init(allocator) };
+        }
+        return self;
     }
 
     pub fn deinit(self: *ConnectionLimiter) void {
-        var iter = self.ip_buckets.keyIterator();
-        while (iter.next()) |key| {
-            self.allocator.free(key.*);
+        for (&self.shards) |*shard| {
+            var iter = shard.ip_buckets.keyIterator();
+            while (iter.next()) |key| {
+                self.allocator.free(key.*);
+            }
+            shard.ip_buckets.deinit();
         }
-        self.ip_buckets.deinit();
     }
 
     pub fn canConnect(self: *ConnectionLimiter, raw_ip: []const u8) bool {
         const io = nostr.io.io();
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-
         var key_buf: [19]u8 = undefined;
         const ip = bucketKey(raw_ip, &key_buf);
-        if (self.ip_buckets.get(ip)) |bucket| {
+        const shard = &self.shards[shardIndex(ip)];
+
+        shard.mutex.lockUncancelable(io);
+        defer shard.mutex.unlock(io);
+
+        if (shard.ip_buckets.get(ip)) |bucket| {
             return bucket.connection_count < self.max_connections_per_ip;
         }
         return true;
@@ -49,14 +71,16 @@ pub const ConnectionLimiter = struct {
     /// closing the canConnect/addConnection check-then-act race.
     pub fn tryAcquireConnection(self: *ConnectionLimiter, raw_ip: []const u8) bool {
         const io = nostr.io.io();
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
+        var key_buf: [19]u8 = undefined;
+        const ip = bucketKey(raw_ip, &key_buf);
+        const shard = &self.shards[shardIndex(ip)];
+
+        shard.mutex.lockUncancelable(io);
+        defer shard.mutex.unlock(io);
 
         const now = nostr.io.timestamp();
 
-        var key_buf: [19]u8 = undefined;
-        const ip = bucketKey(raw_ip, &key_buf);
-        if (self.ip_buckets.getPtr(ip)) |bucket| {
+        if (shard.ip_buckets.getPtr(ip)) |bucket| {
             if (bucket.connection_count >= self.max_connections_per_ip) return false;
             bucket.connection_count += 1;
             bucket.last_activity = now;
@@ -64,7 +88,7 @@ pub const ConnectionLimiter = struct {
         }
 
         const ip_copy = self.allocator.dupe(u8, ip) catch return false;
-        self.ip_buckets.put(ip_copy, .{
+        shard.ip_buckets.put(ip_copy, .{
             .connection_count = 1,
             .last_activity = now,
         }) catch {
@@ -76,12 +100,14 @@ pub const ConnectionLimiter = struct {
 
     pub fn removeConnection(self: *ConnectionLimiter, raw_ip: []const u8) void {
         const io = nostr.io.io();
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-
         var key_buf: [19]u8 = undefined;
         const ip = bucketKey(raw_ip, &key_buf);
-        if (self.ip_buckets.getPtr(ip)) |bucket| {
+        const shard = &self.shards[shardIndex(ip)];
+
+        shard.mutex.lockUncancelable(io);
+        defer shard.mutex.unlock(io);
+
+        if (shard.ip_buckets.getPtr(ip)) |bucket| {
             if (bucket.connection_count > 0) {
                 bucket.connection_count -= 1;
             }
@@ -90,36 +116,40 @@ pub const ConnectionLimiter = struct {
 
     pub fn cleanup(self: *ConnectionLimiter) void {
         const io = nostr.io.io();
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-
         const now = nostr.io.timestamp();
-        var to_remove: std.ArrayListUnmanaged([]const u8) = .empty;
-        defer to_remove.deinit(self.allocator);
 
-        var iter = self.ip_buckets.iterator();
-        while (iter.next()) |entry| {
-            if (entry.value_ptr.connection_count == 0 and
-                now - entry.value_ptr.last_activity > self.cleanup_interval_seconds)
-            {
-                to_remove.append(self.allocator, entry.key_ptr.*) catch continue;
+        for (&self.shards) |*shard| {
+            shard.mutex.lockUncancelable(io);
+            defer shard.mutex.unlock(io);
+
+            var to_remove: std.ArrayListUnmanaged([]const u8) = .empty;
+            defer to_remove.deinit(self.allocator);
+
+            var iter = shard.ip_buckets.iterator();
+            while (iter.next()) |entry| {
+                if (entry.value_ptr.connection_count == 0 and
+                    now - entry.value_ptr.last_activity > self.cleanup_interval_seconds)
+                {
+                    to_remove.append(self.allocator, entry.key_ptr.*) catch continue;
+                }
             }
-        }
 
-        for (to_remove.items) |key| {
-            _ = self.ip_buckets.remove(key);
-            self.allocator.free(key);
+            for (to_remove.items) |key| {
+                _ = shard.ip_buckets.remove(key);
+                self.allocator.free(key);
+            }
         }
     }
 
     pub fn getStats(self: *ConnectionLimiter) Stats {
         const io = nostr.io.io();
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-
-        return .{
-            .tracked_ips = self.ip_buckets.count(),
-        };
+        var tracked: usize = 0;
+        for (&self.shards) |*shard| {
+            shard.mutex.lockUncancelable(io);
+            defer shard.mutex.unlock(io);
+            tracked += shard.ip_buckets.count();
+        }
+        return .{ .tracked_ips = tracked };
     }
 
     pub const Stats = struct {
@@ -375,8 +405,7 @@ test "normalizeIp" {
 
 pub const EventRateLimiter = struct {
     allocator: std.mem.Allocator,
-    mutex: std.Io.Mutex,
-    ip_buckets: std.StringHashMap(EventBucket),
+    shards: [SHARD_COUNT]Shard,
     events_per_minute: u32,
 
     // Idle buckets are reclaimed after this many seconds; a bucket idle for a
@@ -392,21 +421,31 @@ pub const EventRateLimiter = struct {
         last_refill: i64,
     };
 
+    const Shard = struct {
+        mutex: std.Io.Mutex,
+        ip_buckets: std.StringHashMap(EventBucket),
+    };
+
     pub fn init(allocator: std.mem.Allocator, events_per_minute: u32) EventRateLimiter {
-        return .{
+        var self: EventRateLimiter = .{
             .allocator = allocator,
-            .mutex = .init,
-            .ip_buckets = std.StringHashMap(EventBucket).init(allocator),
+            .shards = undefined,
             .events_per_minute = events_per_minute,
         };
+        for (&self.shards) |*shard| {
+            shard.* = .{ .mutex = .init, .ip_buckets = std.StringHashMap(EventBucket).init(allocator) };
+        }
+        return self;
     }
 
     pub fn deinit(self: *EventRateLimiter) void {
-        var iter = self.ip_buckets.keyIterator();
-        while (iter.next()) |key| {
-            self.allocator.free(key.*);
+        for (&self.shards) |*shard| {
+            var iter = shard.ip_buckets.keyIterator();
+            while (iter.next()) |key| {
+                self.allocator.free(key.*);
+            }
+            shard.ip_buckets.deinit();
         }
-        self.ip_buckets.deinit();
     }
 
     pub fn checkAndRecord(self: *EventRateLimiter, ip: []const u8) bool {
@@ -417,13 +456,14 @@ pub const EventRateLimiter = struct {
 
     fn checkAndRecordAt(self: *EventRateLimiter, ip: []const u8, now: i64) bool {
         const io = nostr.io.io();
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
+        const shard = &self.shards[shardIndex(ip)];
+        shard.mutex.lockUncancelable(io);
+        defer shard.mutex.unlock(io);
 
         const capacity: f64 = @floatFromInt(self.events_per_minute);
         const refill_per_sec: f64 = capacity / 60.0;
 
-        if (self.ip_buckets.getPtr(ip)) |bucket| {
+        if (shard.ip_buckets.getPtr(ip)) |bucket| {
             const elapsed: f64 = @floatFromInt(@max(@as(i64, 0), now - bucket.last_refill));
             bucket.tokens = @min(capacity, bucket.tokens + elapsed * refill_per_sec);
             bucket.last_refill = now;
@@ -436,7 +476,7 @@ pub const EventRateLimiter = struct {
 
         // First event from this IP: start with a full bucket, then consume one.
         const ip_copy = self.allocator.dupe(u8, ip) catch return false;
-        self.ip_buckets.put(ip_copy, .{
+        shard.ip_buckets.put(ip_copy, .{
             .tokens = capacity - 1.0,
             .last_refill = now,
         }) catch {
@@ -452,23 +492,38 @@ pub const EventRateLimiter = struct {
 
     fn cleanupAt(self: *EventRateLimiter, now: i64) void {
         const io = nostr.io.io();
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
 
-        var to_remove: std.ArrayListUnmanaged([]const u8) = .empty;
-        defer to_remove.deinit(self.allocator);
+        for (&self.shards) |*shard| {
+            shard.mutex.lockUncancelable(io);
+            defer shard.mutex.unlock(io);
 
-        var iter = self.ip_buckets.iterator();
-        while (iter.next()) |entry| {
-            if (now - entry.value_ptr.last_refill >= IDLE_SECONDS) {
-                to_remove.append(self.allocator, entry.key_ptr.*) catch continue;
+            var to_remove: std.ArrayListUnmanaged([]const u8) = .empty;
+            defer to_remove.deinit(self.allocator);
+
+            var iter = shard.ip_buckets.iterator();
+            while (iter.next()) |entry| {
+                if (now - entry.value_ptr.last_refill >= IDLE_SECONDS) {
+                    to_remove.append(self.allocator, entry.key_ptr.*) catch continue;
+                }
+            }
+
+            for (to_remove.items) |key| {
+                _ = shard.ip_buckets.remove(key);
+                self.allocator.free(key);
             }
         }
+    }
 
-        for (to_remove.items) |key| {
-            _ = self.ip_buckets.remove(key);
-            self.allocator.free(key);
-        }
+    // Total tracked IPs across all shards. Test-only helper; the sharded map has
+    // no single count() to assert against.
+    fn trackedCount(self: *EventRateLimiter) usize {
+        var total: usize = 0;
+        for (&self.shards) |*shard| total += shard.ip_buckets.count();
+        return total;
+    }
+
+    fn tracks(self: *EventRateLimiter, ip: []const u8) bool {
+        return self.shards[shardIndex(ip)].ip_buckets.contains(ip);
     }
 };
 
@@ -548,11 +603,11 @@ test "EventRateLimiter cleanup reclaims only idle buckets" {
 
     // At t=1059, the first bucket is idle for 59s (<60), so nothing is reclaimed.
     limiter.cleanupAt(1059);
-    try std.testing.expectEqual(@as(u32, 2), limiter.ip_buckets.count());
+    try std.testing.expectEqual(@as(usize, 2), limiter.trackedCount());
 
     // At t=1060, the first bucket hits IDLE_SECONDS and is removed; the second
     // (idle 10s) is retained.
     limiter.cleanupAt(1060);
-    try std.testing.expectEqual(@as(u32, 1), limiter.ip_buckets.count());
-    try std.testing.expect(limiter.ip_buckets.contains("2.2.2.2"));
+    try std.testing.expectEqual(@as(usize, 1), limiter.trackedCount());
+    try std.testing.expect(limiter.tracks("2.2.2.2"));
 }

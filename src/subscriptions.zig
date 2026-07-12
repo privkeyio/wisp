@@ -153,6 +153,14 @@ pub const Subscriptions = struct {
         sub_id: []const u8,
     };
 
+    // Reused per-broadcast scratch. forEachMatching runs on the single writer
+    // thread in durable sync modes but on multiple worker threads concurrently
+    // in sync=none, so the scratch is threadlocal (no shared-mutable state) and
+    // cleared per call rather than reallocated, avoiding per-event glibc arena
+    // churn in the fan-out hot path.
+    threadlocal var tl_pending: std.ArrayListUnmanaged(PendingWrite) = .empty;
+    threadlocal var tl_seen: ?std.AutoHashMap(u64, void) = null;
+
     pub fn forEachMatching(
         self: *Subscriptions,
         event: *const nostr.Event,
@@ -166,15 +174,16 @@ pub const Subscriptions = struct {
         // send timeout. Each snapshotted connection has its write_guard bumped
         // while still in the registry; removeConnection plus close() drain the
         // guard before freeing, so writing post-unlock is use-after-free safe.
-        var pending: std.ArrayListUnmanaged(PendingWrite) = .empty;
-        defer pending.deinit(self.allocator);
+        const pending = &tl_pending;
+        pending.clearRetainingCapacity();
+
+        if (tl_seen == null) tl_seen = std.AutoHashMap(u64, void).init(self.allocator);
+        const seen = &tl_seen.?;
+        seen.clearRetainingCapacity();
 
         {
             self.rwlock.lockSharedUncancelable(io);
             defer self.rwlock.unlockShared(io);
-
-            var seen = std.AutoHashMap(u64, void).init(self.allocator);
-            defer seen.deinit();
 
             // Kind-indexed candidates: only connections subscribed to this kind.
             if (self.kind_index.get(event.kind())) |conn_ids| {
@@ -182,7 +191,7 @@ pub const Subscriptions = struct {
                     if (seen.contains(conn_id)) continue;
                     seen.put(conn_id, {}) catch continue;
                     const conn = self.connections.get(conn_id) orelse continue;
-                    snapshotMatch(self, &pending, conn, event);
+                    snapshotMatch(self, pending, conn, event);
                 }
             }
 
@@ -194,7 +203,7 @@ pub const Subscriptions = struct {
                 if (seen.contains(conn.id)) continue;
                 if (!connHasWildcard(conn)) continue;
                 seen.put(conn.id, {}) catch continue;
-                snapshotMatch(self, &pending, conn, event);
+                snapshotMatch(self, pending, conn, event);
             }
         }
 
