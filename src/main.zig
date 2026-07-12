@@ -432,4 +432,5 @@ test {
     _ = @import("rate_limiter.zig");
     _ = @import("server.zig");
     _ = @import("relay_metrics.zig");
+    _ = @import("subscriptions.zig");
 }

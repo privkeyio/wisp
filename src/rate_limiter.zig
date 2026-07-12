@@ -8,13 +8,26 @@ const nostr = @import("nostr.zig");
 // semantics are preserved exactly.
 const SHARD_COUNT = 16;
 
-fn shardIndex(key: []const u8) usize {
-    return std.hash.Wyhash.hash(0, key) % SHARD_COUNT;
+// The hash is seeded with a per-process random value chosen at init. The seed is
+// public-input-independent, so an attacker who controls the bucket key (e.g. via
+// a spoofable X-Forwarded-For under trust_proxy) cannot craft keys that all fall
+// on one shard and collapse the 16-way split back to a single mutex. The seed
+// only needs to be stable for the process lifetime (per-IP -> same shard), not
+// across restarts.
+fn shardIndex(seed: u64, key: []const u8) usize {
+    return std.hash.Wyhash.hash(seed, key) % SHARD_COUNT;
+}
+
+fn randomSeed() u64 {
+    var buf: [8]u8 = undefined;
+    nostr.io.randomBytes(&buf);
+    return std.mem.readInt(u64, &buf, .little);
 }
 
 pub const ConnectionLimiter = struct {
     allocator: std.mem.Allocator,
     shards: [SHARD_COUNT]Shard,
+    shard_seed: u64,
     max_connections_per_ip: u32,
     cleanup_interval_seconds: i64,
 
@@ -32,6 +45,7 @@ pub const ConnectionLimiter = struct {
         var self: ConnectionLimiter = .{
             .allocator = allocator,
             .shards = undefined,
+            .shard_seed = randomSeed(),
             .max_connections_per_ip = max_connections_per_ip,
             .cleanup_interval_seconds = 300,
         };
@@ -55,7 +69,7 @@ pub const ConnectionLimiter = struct {
         const io = nostr.io.io();
         var key_buf: [19]u8 = undefined;
         const ip = bucketKey(raw_ip, &key_buf);
-        const shard = &self.shards[shardIndex(ip)];
+        const shard = &self.shards[shardIndex(self.shard_seed, ip)];
 
         shard.mutex.lockUncancelable(io);
         defer shard.mutex.unlock(io);
@@ -73,7 +87,7 @@ pub const ConnectionLimiter = struct {
         const io = nostr.io.io();
         var key_buf: [19]u8 = undefined;
         const ip = bucketKey(raw_ip, &key_buf);
-        const shard = &self.shards[shardIndex(ip)];
+        const shard = &self.shards[shardIndex(self.shard_seed, ip)];
 
         shard.mutex.lockUncancelable(io);
         defer shard.mutex.unlock(io);
@@ -102,7 +116,7 @@ pub const ConnectionLimiter = struct {
         const io = nostr.io.io();
         var key_buf: [19]u8 = undefined;
         const ip = bucketKey(raw_ip, &key_buf);
-        const shard = &self.shards[shardIndex(ip)];
+        const shard = &self.shards[shardIndex(self.shard_seed, ip)];
 
         shard.mutex.lockUncancelable(io);
         defer shard.mutex.unlock(io);
@@ -155,7 +169,50 @@ pub const ConnectionLimiter = struct {
     pub const Stats = struct {
         tracked_ips: usize,
     };
+
+    // Locate the bucket for an IP so a test can backdate last_activity. Mirrors
+    // EventRateLimiter.tracks: test-only, no lock (single-threaded tests).
+    fn bucketPtrForTest(self: *ConnectionLimiter, raw_ip: []const u8) ?*IpBucket {
+        var key_buf: [19]u8 = undefined;
+        const ip = bucketKey(raw_ip, &key_buf);
+        return self.shards[shardIndex(self.shard_seed, ip)].ip_buckets.getPtr(ip);
+    }
 };
+
+test "ConnectionLimiter cleanup reclaims only idle buckets across shards" {
+    var limiter = ConnectionLimiter.init(std.testing.allocator, 5);
+    defer limiter.deinit();
+
+    // Track four IPs. With a per-process seed they spread across shards, and
+    // cleanup() sweeps every shard, so the assertion holds regardless of layout.
+    try std.testing.expect(limiter.tryAcquireConnection("1.1.1.1"));
+    try std.testing.expect(limiter.tryAcquireConnection("2.2.2.2"));
+    try std.testing.expect(limiter.tryAcquireConnection("3.3.3.3"));
+    try std.testing.expect(limiter.tryAcquireConnection("4.4.4.4"));
+    try std.testing.expectEqual(@as(usize, 4), limiter.getStats().tracked_ips);
+
+    const now = nostr.io.timestamp();
+
+    // Two IPs go idle (count 0) and stale (last_activity older than the 300s
+    // cleanup interval): these must be reclaimed.
+    limiter.removeConnection("1.1.1.1");
+    limiter.removeConnection("2.2.2.2");
+    limiter.bucketPtrForTest("1.1.1.1").?.last_activity = now - 400;
+    limiter.bucketPtrForTest("2.2.2.2").?.last_activity = now - 400;
+
+    // 3.3.3.3 stays active (count > 0). 4.4.4.4 is idle but recent. Both remain.
+    limiter.removeConnection("4.4.4.4");
+    limiter.bucketPtrForTest("4.4.4.4").?.last_activity = now;
+
+    limiter.cleanup();
+
+    try std.testing.expectEqual(@as(usize, 2), limiter.getStats().tracked_ips);
+
+    // A fresh limiter tracks nothing.
+    var empty = ConnectionLimiter.init(std.testing.allocator, 5);
+    defer empty.deinit();
+    try std.testing.expectEqual(@as(usize, 0), empty.getStats().tracked_ips);
+}
 
 pub const IpFilter = struct {
     allocator: std.mem.Allocator,
@@ -406,6 +463,7 @@ test "normalizeIp" {
 pub const EventRateLimiter = struct {
     allocator: std.mem.Allocator,
     shards: [SHARD_COUNT]Shard,
+    shard_seed: u64,
     events_per_minute: u32,
 
     // Idle buckets are reclaimed after this many seconds; a bucket idle for a
@@ -430,6 +488,7 @@ pub const EventRateLimiter = struct {
         var self: EventRateLimiter = .{
             .allocator = allocator,
             .shards = undefined,
+            .shard_seed = randomSeed(),
             .events_per_minute = events_per_minute,
         };
         for (&self.shards) |*shard| {
@@ -456,7 +515,7 @@ pub const EventRateLimiter = struct {
 
     fn checkAndRecordAt(self: *EventRateLimiter, ip: []const u8, now: i64) bool {
         const io = nostr.io.io();
-        const shard = &self.shards[shardIndex(ip)];
+        const shard = &self.shards[shardIndex(self.shard_seed, ip)];
         shard.mutex.lockUncancelable(io);
         defer shard.mutex.unlock(io);
 
@@ -523,7 +582,7 @@ pub const EventRateLimiter = struct {
     }
 
     fn tracks(self: *EventRateLimiter, ip: []const u8) bool {
-        return self.shards[shardIndex(ip)].ip_buckets.contains(ip);
+        return self.shards[shardIndex(self.shard_seed, ip)].ip_buckets.contains(ip);
     }
 };
 
