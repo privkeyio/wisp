@@ -186,6 +186,27 @@ jobs:
           stop "$pid"; wait "$pid" 2>/dev/null
           exit $rc
 
+      - name: Run WS rate-limit test
+        run: |
+          stop() {
+            kill "$1" 2>/dev/null || return 0
+            for i in $(seq 1 20); do kill -0 "$1" 2>/dev/null || return 0; sleep 0.25; done
+            kill -9 "$1" 2>/dev/null || true
+          }
+          # tight per-IP event/query limits (matching LIMIT in the test) so a small burst overflows the
+          # token bucket and the throttle counters increment
+          nohup env WISP_HOST=127.0.0.1 WISP_PORT=7787 WISP_EVENTS_PER_MINUTE=3 \
+            WISP_QUERIES_PER_MINUTE=3 \
+            WISP_STORAGE_PATH="$RUNNER_TEMP/wisp-ratelimit" \
+            ./zig-out/bin/wisp relay > relay-ratelimit.log 2>&1 &
+          pid=$!
+          for i in $(seq 1 40); do nc -z 127.0.0.1 7787 && break; sleep 0.25; done
+          nc -z 127.0.0.1 7787 || { echo "relay never listened on 7787"; cat relay-ratelimit.log 2>/dev/null; stop "$pid"; wait "$pid" 2>/dev/null; exit 1; }
+          bash tests/integration_ws_rate_limit.sh ws://127.0.0.1:7787
+          rc=$?
+          stop "$pid"; wait "$pid" 2>/dev/null
+          exit $rc
+
       - name: Run spider sync test (NIP-77 client)
         run: |
           stop() {
