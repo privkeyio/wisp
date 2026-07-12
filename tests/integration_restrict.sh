@@ -26,17 +26,44 @@ chk() { # desc expected actual
 }
 
 # publish and report ok|reject based on whether the relay accepted the event.
-# Retries up to 3 times: a transient connect/read timeout under CI load (a fresh
+# Retries up to 4 times: a transient connect/read timeout under CI load (a fresh
 # TCP connection per attempt) should not fail the suite, while a real rejection
-# or a deterministic bug still reports reject after all attempts.
+# or a deterministic bug still reports reject after all attempts. The warmup gate
+# below already establishes readiness, so this only absorbs the rarer mid-run blip.
 pubres() { # noz-args...
-  for attempt in 1 2 3; do
-    if timeout 10 noz event "$@" "$R" 2>&1 | grep -q 'success'; then echo ok; return; fi
+  for attempt in 1 2 3 4; do
+    if timeout 12 noz event "$@" "$R" 2>&1 | grep -q 'success'; then echo ok; return; fi
     [ -n "${NOZ_DEBUG_RETRIES:-}" ] && echo "pubres: attempt $attempt failed [noz event $*]" >&2
-    [ "$attempt" -lt 3 ] && sleep 1
+    [ "$attempt" -lt 4 ] && sleep 1
   done
   echo reject
 }
+
+# Block until the relay actually accepts an event of this mode's accepted class,
+# not just until the TCP port is open. In CI the relay is started fresh per mode
+# and `nc -z` only proves the listener is up, not that the event pipeline is
+# ready; grading the first assertion against a still-warming relay is what made
+# this suite flaky on main (a transient miss on an expected-accept assertion
+# reports 'reject' and fails CI). Publishing an acceptable throwaway event until
+# it succeeds converts "port open" into "pipeline ready", and is independent of
+# noz's error-output format so it needs no reject-vs-timeout parsing.
+warmup() {
+  local args
+  case "$MODE" in
+    auth)      args=(--sec "$SEC1" --auth -c warmup) ;;
+    protected) args=(--sec "$SEC1" -c warmup) ;;
+    pow)       args=(--sec "$SEC1" --pow 8 -c warmup) ;;
+    *)         return 0 ;; # unknown mode is reported by the assertion case below
+  esac
+  for i in $(seq 1 40); do
+    timeout 12 noz event "${args[@]}" "$R" 2>&1 | grep -q 'success' && return 0
+    sleep 0.5
+  done
+  echo "warmup: relay never accepted an event in '$MODE' mode after ~20s" >&2
+  return 1
+}
+
+warmup || exit 1
 
 case "$MODE" in
   auth)
