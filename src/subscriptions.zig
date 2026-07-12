@@ -157,7 +157,10 @@ pub const Subscriptions = struct {
     // thread in durable sync modes but on multiple worker threads concurrently
     // in sync=none, so the scratch is threadlocal (no shared-mutable state) and
     // cleared per call rather than reallocated, avoiding per-event glibc arena
-    // churn in the fan-out hot path.
+    // churn in the fan-out hot path. Reusing one buffer per thread makes
+    // forEachMatching non-reentrant on a thread: callees (the post-unlock socket
+    // writes) must never re-enter it, or the inner clear would corrupt the outer
+    // drain and unbalance write_guard.
     threadlocal var tl_pending: std.ArrayListUnmanaged(PendingWrite) = .empty;
     threadlocal var tl_seen: ?std.AutoHashMap(u64, void) = null;
 
