@@ -41,7 +41,7 @@ For more options, see `wisp.toml.example`.
 
 ## Features
 
-* NIPs: 1, 2, 9, 11, 13, 16, 17, 33, 40, 42, 45, 50, 51, 65, 70, 77, 86
+* NIPs: 1, 2, 9, 11, 13, 16, 33, 40, 42, 45, 50, 51, 65, 70, 77, 86
 * LMDB storage (no external database)
 * Spider mode for syncing events from external relays
 * Import/export to JSONL
@@ -51,6 +51,9 @@ Marmot/MLS compatible: Wisp's generic NIP-16/NIP-33 handling stores and serves
 kind 10050 (DM/inbox relays, replaceable), 10051 (KeyPackage relays,
 replaceable), 30443 (KeyPackage, addressable) / legacy 443, and 1059 gift
 wraps, so Haven, WhiteNoise, and other Marmot clients work without extra setup.
+Gift wraps are stored and served like any other event; Wisp does not implement
+the NIP-17 recipient-only serving rule, so operators wanting to restrict who can
+read kind 1059 should enable AUTH (`auth_required`).
 
 ## Monitoring
 
