@@ -72,6 +72,15 @@ chk "NIP-16 replaceable kept single" 1 "$(req -k 0 -a "$PK2")"
 chk "NIP-16 replaceable keeps latest" "v2" \
   "$(timeout 10 noz req -k 0 -a "$PK2" "$R" 2>/dev/null | grep -o 'v[12]' | head -1)"
 
+# --- NIP-17/NIP-51 DM relays list (kind 10050) replaceable, latest wins ---
+dmbase=$(($(date +%s) - 20))
+pub --sec $SEC2 -k 10050 --ts $dmbase -t relay=wss://relay.one -c ""
+pub --sec $SEC2 -k 10050 --ts $((dmbase + 1)) -t relay=wss://relay.two -c ""
+sleep 0.5
+chk "NIP-17/51 kind 10050 kept single" 1 "$(req -k 10050 -a "$PK2")"
+chk "NIP-17/51 kind 10050 keeps latest" "wss://relay.two" \
+  "$(timeout 10 noz req -k 10050 -a "$PK2" "$R" 2>/dev/null | grep -oE 'wss://relay\.(one|two)' | head -1)"
+
 # --- NIP-16 ephemeral (kind 20000) not stored ---
 pub --sec $SEC1 -k 20000 -c "ephemeral"
 sleep 0.5
