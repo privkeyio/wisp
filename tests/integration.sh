@@ -81,6 +81,15 @@ chk "NIP-17/51 kind 10050 kept single" 1 "$(req -k 10050 -a "$PK2")"
 chk "NIP-17/51 kind 10050 keeps latest" "wss://relay.two" \
   "$(timeout 10 noz req -k 10050 -a "$PK2" "$R" 2>/dev/null | grep -oE 'wss://relay\.(one|two)' | head -1)"
 
+# --- Marmot/NIP-EE KeyPackage relays list (kind 10051) replaceable, latest wins ---
+kpbase=$(($(date +%s) - 20))
+pub --sec $SEC2 -k 10051 --ts $kpbase -t relay=wss://kp.one -c ""
+pub --sec $SEC2 -k 10051 --ts $((kpbase + 1)) -t relay=wss://kp.two -c ""
+sleep 0.5
+chk "Marmot kind 10051 kept single" 1 "$(req -k 10051 -a "$PK2")"
+chk "Marmot kind 10051 keeps latest" "wss://kp.two" \
+  "$(timeout 10 noz req -k 10051 -a "$PK2" "$R" 2>/dev/null | grep -oE 'wss://kp\.(one|two)' | head -1)"
+
 # --- NIP-16 ephemeral (kind 20000) not stored ---
 pub --sec $SEC1 -k 20000 -c "ephemeral"
 sleep 0.5
