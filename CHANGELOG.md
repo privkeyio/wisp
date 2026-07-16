@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.13] - 2026-07-16
+
+### Added
+
+- Advertise NIP-51 (lists) in the relay information document, and document + test relay support for Marmot MLS KeyPackage events (#158)
+
+### Changed
+
+- Shard the rate limiters and reuse broadcast scratch buffers to cut worker lock contention under load (#151)
+
 ## [0.5.12] - 2026-07-09
 
 ### Fixed
