@@ -739,7 +739,7 @@ pub const Handler = struct {
         // seen. Sealing a partial set would make reconciliation report events as
         // missing that the relay actually holds, so surface truncation as an error
         // rather than silently sealing an incomplete set.
-        if (iter.max_scan != 0 and iter.scanned >= iter.max_scan) {
+        if (iter.truncated) {
             conn.removeNegSession(sub_id);
             self.sendNegErr(conn, sub_id, "error: result set too large to reconcile");
             return;
