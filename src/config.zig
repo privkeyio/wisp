@@ -25,6 +25,10 @@ pub const Config = struct {
     max_content_length: u32,
     query_limit_default: u32,
     query_limit_max: u32,
+    // Bounds the entries a single query may scan to `limit * query_scan_multiplier`
+    // before stopping, so a selective filter (few matches) cannot page-fault the
+    // entire event DB looking for `limit` results. 0 disables the cap.
+    query_scan_multiplier: u32,
     max_event_age: i64,
     max_future_seconds: i64,
     storage_path: []const u8,
@@ -90,6 +94,7 @@ pub const Config = struct {
             .max_content_length = 102400,
             .query_limit_default = 500,
             .query_limit_max = 5000,
+            .query_scan_multiplier = 20,
             .max_event_age = 94608000,
             .max_future_seconds = 900,
             .storage_path = "./data",
@@ -201,6 +206,8 @@ pub const Config = struct {
                 self.query_limit_default = try std.fmt.parseInt(u32, value, 10);
             } else if (std.mem.eql(u8, key, "query_limit_max")) {
                 self.query_limit_max = try std.fmt.parseInt(u32, value, 10);
+            } else if (std.mem.eql(u8, key, "query_scan_multiplier")) {
+                self.query_scan_multiplier = try std.fmt.parseInt(u32, value, 10);
             } else if (std.mem.eql(u8, key, "max_event_age")) {
                 self.max_event_age = try std.fmt.parseInt(i64, value, 10);
             } else if (std.mem.eql(u8, key, "max_future_seconds")) {
@@ -315,6 +322,9 @@ pub const Config = struct {
         }
         if (getenv("WISP_QUERIES_PER_MINUTE")) |v| {
             self.queries_per_minute = std.fmt.parseInt(u32, v, 10) catch self.queries_per_minute;
+        }
+        if (getenv("WISP_QUERY_SCAN_MULTIPLIER")) |v| {
+            self.query_scan_multiplier = std.fmt.parseInt(u32, v, 10) catch self.query_scan_multiplier;
         }
         if (getenv("WISP_IDLE_SECONDS")) |v| {
             self.idle_seconds = std.fmt.parseInt(u32, v, 10) catch self.idle_seconds;

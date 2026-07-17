@@ -238,7 +238,7 @@ pub const Spider = struct {
             .limit_val = 1,
         }};
 
-        var iter = self.store.query(&filters, 1) catch return false;
+        var iter = self.store.queryFull(&filters, 1) catch return false;
         defer iter.deinit();
 
         const json = (iter.next() catch return false) orelse return false;
@@ -557,7 +557,7 @@ pub const Spider = struct {
             .{ .authors_bytes = pubkeys },
         };
 
-        var iter = self.store.query(&filters, 100000) catch {
+        var iter = self.store.queryFull(&filters, 100000) catch {
             log.err("{s}: Failed to query local events for negentropy", .{relay_url});
             return true;
         };

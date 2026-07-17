@@ -10,6 +10,10 @@ pub const Store = struct {
     lmdb: *Lmdb,
     allocator: std.mem.Allocator,
     query_cache: QueryCache,
+    // Caps QueryIterator scanning at `limit * query_scan_multiplier` entries. Set
+    // from config on the serving path; 0 disables. Defaults to 20 (matches
+    // queryMultiKind) so tooling that builds a Store directly stays bounded.
+    query_scan_multiplier: u32 = 20,
 
     events: Dbi,
     idx_created: Dbi,
@@ -360,7 +364,13 @@ pub const Store = struct {
     }
 
     pub fn query(self: *Store, filters: []const nostr.Filter, limit: u32) !QueryIterator {
-        return QueryIterator.init(self, filters, limit);
+        return QueryIterator.init(self, filters, limit, self.query_scan_multiplier);
+    }
+
+    // Uncapped scan for trusted internal callers (spider lookups, full export)
+    // that must find every match regardless of how selective the filter is.
+    pub fn queryFull(self: *Store, filters: []const nostr.Filter, limit: u32) !QueryIterator {
+        return QueryIterator.init(self, filters, limit, 0);
     }
 
     pub fn queryMultiKind(self: *Store, kinds: []const i32, limit: u32) !MultiKindResult {
@@ -494,6 +504,10 @@ pub const QueryIterator = struct {
     filters: []const nostr.Filter,
     limit: u32,
     returned: u32 = 0,
+    scanned: u32 = 0,
+    // Stop after visiting this many index entries even if fewer than `limit`
+    // matched, so a selective filter cannot fault the whole DB. 0 disables.
+    max_scan: u32 = 0,
     txn: ?Txn = null,
     cursor: ?Cursor = null,
     started: bool = false,
@@ -504,11 +518,12 @@ pub const QueryIterator = struct {
 
     const IndexType = enum { created, kind, pubkey, tag };
 
-    pub fn init(store: *Store, filters: []const nostr.Filter, limit: u32) QueryIterator {
+    pub fn init(store: *Store, filters: []const nostr.Filter, limit: u32, scan_multiplier: u32) QueryIterator {
         var iter = QueryIterator{
             .store = store,
             .filters = filters,
             .limit = limit,
+            .max_scan = if (scan_multiplier == 0) 0 else limit *| scan_multiplier,
         };
 
         if (filters.len > 0) {
@@ -614,6 +629,7 @@ pub const QueryIterator = struct {
                 {
                     return null;
                 }
+                self.scanned += 1;
                 if (try self.processEntry(entry)) |json| {
                     return json;
                 }
@@ -623,7 +639,9 @@ pub const QueryIterator = struct {
         }
 
         while (true) {
+            if (self.max_scan != 0 and self.scanned >= self.max_scan) return null;
             const entry = try self.cursor.?.get(.prev) orelse return null;
+            self.scanned += 1;
 
             if (self.prefix_len > 0) {
                 if (entry.key.len < self.prefix_len or
