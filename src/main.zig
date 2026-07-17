@@ -164,6 +164,7 @@ pub fn main(init: std.process.Init) !void {
     defer lmdb.deinit();
 
     var store = try Store.init(allocator, &lmdb);
+    store.query_scan_multiplier = config.query_scan_multiplier;
     defer store.deinit();
 
     var mgmt_store = try ManagementStore.init(allocator, &lmdb);
@@ -405,7 +406,7 @@ fn runExport(allocator: std.mem.Allocator, db_path: []const u8) !void {
     const stderr_file = stdFile(std.posix.STDERR_FILENO);
 
     const empty_filters = [_]nostr.Filter{};
-    var iter = try store.query(&empty_filters, std.math.maxInt(u32));
+    var iter = try store.queryFull(&empty_filters, std.math.maxInt(u32));
     defer iter.deinit();
 
     var exported: u64 = 0;
@@ -433,4 +434,5 @@ test {
     _ = @import("server.zig");
     _ = @import("relay_metrics.zig");
     _ = @import("subscriptions.zig");
+    _ = @import("store.zig");
 }

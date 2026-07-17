@@ -10,6 +10,10 @@ pub const Store = struct {
     lmdb: *Lmdb,
     allocator: std.mem.Allocator,
     query_cache: QueryCache,
+    // Caps QueryIterator and queryMultiKind scanning at `limit * query_scan_multiplier`
+    // entries. Set from config on the serving path; 0 disables. Defaults to 20 so
+    // tooling that builds a Store directly stays bounded.
+    query_scan_multiplier: u32 = 20,
 
     events: Dbi,
     idx_created: Dbi,
@@ -360,7 +364,17 @@ pub const Store = struct {
     }
 
     pub fn query(self: *Store, filters: []const nostr.Filter, limit: u32) !QueryIterator {
-        return QueryIterator.init(self, filters, limit);
+        return QueryIterator.init(self, filters, limit, self.query_scan_multiplier);
+    }
+
+    // Uncapped scan for trusted internal callers (spider lookups, full export)
+    // that must find every match regardless of how selective the filter is.
+    pub fn queryFull(self: *Store, filters: []const nostr.Filter, limit: u32) !QueryIterator {
+        return QueryIterator.init(self, filters, limit, 0);
+    }
+
+    fn scanCap(limit: u32, multiplier: u32) u32 {
+        return if (multiplier == 0) 0 else limit *| multiplier;
     }
 
     pub fn queryMultiKind(self: *Store, kinds: []const i32, limit: u32) !MultiKindResult {
@@ -386,9 +400,9 @@ pub const Store = struct {
         var entry = try cursor.get(.last);
         var collected: u32 = 0;
         var scanned: u32 = 0;
-        const max_scan: u32 = limit * 20;
+        const max_scan = scanCap(limit, self.query_scan_multiplier);
 
-        while (entry != null and collected < limit and scanned < max_scan) : (entry = try cursor.get(.prev)) {
+        while (entry != null and collected < limit and (max_scan == 0 or scanned < max_scan)) : (entry = try cursor.get(.prev)) {
             const e = entry.?;
             scanned += 1;
 
@@ -494,6 +508,10 @@ pub const QueryIterator = struct {
     filters: []const nostr.Filter,
     limit: u32,
     returned: u32 = 0,
+    scanned: u32 = 0,
+    // Stop after visiting this many index entries even if fewer than `limit`
+    // matched, so a selective filter cannot fault the whole DB. 0 disables.
+    max_scan: u32 = 0,
     txn: ?Txn = null,
     cursor: ?Cursor = null,
     started: bool = false,
@@ -501,18 +519,45 @@ pub const QueryIterator = struct {
     prefix: [44]u8 = undefined,
     prefix_len: usize = 0,
     skip_filter: bool = false,
+    ids: ?[][32]u8 = null,
+    // Materialized id fast-path hits, sorted newest-first, built lazily on the
+    // first nextIds call and freed in deinit.
+    ids_hits: ?std.ArrayListUnmanaged(IdHit) = null,
+    ids_hits_index: usize = 0,
+    // Set true only when scanning stopped because it hit the scan cap with more
+    // in-prefix entries still available, so callers can tell a truncated scan
+    // apart from a match set that ended exactly at the cap.
+    truncated: bool = false,
 
-    const IndexType = enum { created, kind, pubkey, tag };
+    const IdHit = struct { json: []const u8, created_at: i64 };
 
-    pub fn init(store: *Store, filters: []const nostr.Filter, limit: u32) QueryIterator {
+    const IndexType = enum { created, kind, pubkey, tag, ids };
+
+    pub fn init(store: *Store, filters: []const nostr.Filter, limit: u32, scan_multiplier: u32) QueryIterator {
         var iter = QueryIterator{
             .store = store,
             .filters = filters,
             .limit = limit,
+            .max_scan = Store.scanCap(limit, scan_multiplier),
         };
 
         if (filters.len > 0) {
             const f = filters[0];
+
+            // Direct point lookups by id are inherently bounded (id list is
+            // capped by max message size), so they bypass the scan cap and
+            // return matches regardless of age. Only safe as a single-filter
+            // fast-path: with multiple filters the match set is a union across
+            // all of them, and this path only enumerates filter[0]'s ids.
+            if (filters.len == 1) {
+                if (f.ids()) |id_list| {
+                    if (id_list.len > 0) {
+                        iter.index_type = .ids;
+                        iter.ids = id_list;
+                        return iter;
+                    }
+                }
+            }
 
             if (f.authors()) |authors| {
                 if (authors.len == 1) {
@@ -563,6 +608,8 @@ pub const QueryIterator = struct {
     pub fn next(self: *QueryIterator) !?[]const u8 {
         if (self.returned >= self.limit) return null;
 
+        if (self.index_type == .ids) return self.nextIds();
+
         if (self.txn == null) {
             self.txn = try self.store.lmdb.beginTxn(true);
             const dbi = switch (self.index_type) {
@@ -570,6 +617,7 @@ pub const QueryIterator = struct {
                 .pubkey => self.store.idx_pubkey,
                 .tag => self.store.idx_tag,
                 .created => self.store.idx_created,
+                .ids => unreachable,
             };
             self.cursor = try self.txn.?.cursor(dbi);
         }
@@ -600,6 +648,7 @@ pub const QueryIterator = struct {
                         break :blk try self.cursor.?.get(.last);
                     }
                 },
+                .ids => unreachable,
                 else => try self.cursor.?.get(.last),
             };
 
@@ -614,6 +663,7 @@ pub const QueryIterator = struct {
                 {
                     return null;
                 }
+                self.scanned += 1;
                 if (try self.processEntry(entry)) |json| {
                     return json;
                 }
@@ -623,7 +673,21 @@ pub const QueryIterator = struct {
         }
 
         while (true) {
+            if (self.max_scan != 0 and self.scanned >= self.max_scan) {
+                // Distinguish hitting the cap with more work remaining from a
+                // match set that ended exactly at the cap: peek the next entry
+                // and only flag truncation if an in-prefix entry is still there.
+                if (try self.cursor.?.get(.prev)) |entry| {
+                    if (self.prefix_len == 0 or (entry.key.len >= self.prefix_len and
+                        std.mem.eql(u8, entry.key[0..self.prefix_len], self.prefix[0..self.prefix_len])))
+                    {
+                        self.truncated = true;
+                    }
+                }
+                return null;
+            }
             const entry = try self.cursor.?.get(.prev) orelse return null;
+            self.scanned += 1;
 
             if (self.prefix_len > 0) {
                 if (entry.key.len < self.prefix_len or
@@ -637,6 +701,48 @@ pub const QueryIterator = struct {
                 return json;
             }
         }
+    }
+
+    fn nextIds(self: *QueryIterator) !?[]const u8 {
+        if (self.ids_hits == null) {
+            if (self.txn == null) self.txn = try self.store.lmdb.beginTxn(true);
+            const id_list = self.ids orelse return null;
+
+            var hits: std.ArrayListUnmanaged(IdHit) = .empty;
+            errdefer hits.deinit(self.store.allocator);
+
+            // NIP-01 requires `limit` to return the most recent matches. Materialize
+            // every hit (json pointers stay valid while the read txn is held) and
+            // sort newest-first so the limit clamp in next() keeps the newest ones.
+            for (id_list) |*id| {
+                const json = try self.txn.?.get(self.store.events, id) orelse continue;
+
+                var event = nostr.Event.parse(json) catch continue;
+                defer event.deinit();
+
+                if (nostr.isExpired(&event)) continue;
+
+                if (self.filters.len == 0 or nostr.filtersMatch(self.filters, &event)) {
+                    try hits.append(self.store.allocator, .{ .json = json, .created_at = event.createdAt() });
+                }
+            }
+
+            std.sort.pdq(IdHit, hits.items, {}, struct {
+                fn lessThan(_: void, a: IdHit, b: IdHit) bool {
+                    return a.created_at > b.created_at;
+                }
+            }.lessThan);
+
+            self.ids_hits = hits;
+        }
+
+        const hits = &self.ids_hits.?;
+        if (self.ids_hits_index >= hits.items.len) return null;
+
+        const json = hits.items[self.ids_hits_index].json;
+        self.ids_hits_index += 1;
+        self.returned += 1;
+        return json;
     }
 
     const Entry = @import("lmdb.zig").Entry;
@@ -658,6 +764,7 @@ pub const QueryIterator = struct {
                 if (entry.key.len < 40) return null;
                 break :blk entry.key[8..40];
             },
+            .ids => unreachable,
         };
 
         const json = try self.txn.?.get(self.store.events, event_id) orelse return null;
@@ -681,7 +788,216 @@ pub const QueryIterator = struct {
     }
 
     pub fn deinit(self: *QueryIterator) void {
+        if (self.ids_hits) |*h| h.deinit(self.store.allocator);
         if (self.cursor) |*cur| cur.close();
         if (self.txn) |*t| t.abort();
     }
 };
+
+const testing = std.testing;
+
+fn testIdHex(n: u32, buf: *[64]u8) void {
+    @memset(buf, '0');
+    _ = std.fmt.bufPrint(buf[56..64], "{x:0>8}", .{n}) catch unreachable;
+}
+
+fn storeTestEvent(s: *Store, alloc: std.mem.Allocator, id_hex: []const u8, pubkey_hex: []const u8, created_at: i64) !void {
+    const sig_hex = "0" ** 128;
+    const json = try std.fmt.allocPrint(
+        alloc,
+        "{{\"id\":\"{s}\",\"pubkey\":\"{s}\",\"sig\":\"{s}\",\"kind\":1,\"created_at\":{d},\"content\":\"x\",\"tags\":[]}}",
+        .{ id_hex, pubkey_hex, sig_hex, created_at },
+    );
+    defer alloc.free(json);
+    var event = try nostr.Event.parse(json);
+    defer event.deinit();
+    _ = try s.store(&event, json);
+}
+
+test "scanCap disables at 0 and saturates without wrapping" {
+    try testing.expectEqual(@as(u32, 0), Store.scanCap(1000, 0));
+    try testing.expectEqual(@as(u32, 200), Store.scanCap(10, 20));
+    try testing.expectEqual(std.math.maxInt(u32), Store.scanCap(std.math.maxInt(u32), 20));
+}
+
+test "query scan cap stops at limit times multiplier" {
+    const alloc = testing.allocator;
+    const io = nostr.io.io();
+    const dir = "./.test-scan-cap-a";
+    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+
+    var lmdb = try Lmdb.init(alloc, dir ++ "/db.mdb", 256, .none);
+    defer lmdb.deinit();
+    var s = try Store.init(alloc, &lmdb);
+    defer s.deinit();
+
+    const base = nostr.io.timestamp() - 100000;
+    const filler_pk = "aa" ** 32;
+    var i: u32 = 0;
+    while (i < 20) : (i += 1) {
+        var idb: [64]u8 = undefined;
+        testIdHex(i + 1, &idb);
+        try storeTestEvent(&s, alloc, &idb, filler_pk, base + @as(i64, i));
+    }
+
+    s.query_scan_multiplier = 3;
+    var authors = [_][32]u8{ [_]u8{0xcc} ** 32, [_]u8{0xdd} ** 32 };
+    const filters = [_]nostr.Filter{.{ .authors_bytes = &authors }};
+    var iter = try s.query(&filters, 5);
+    defer iter.deinit();
+
+    var count: u32 = 0;
+    while (try iter.next()) |_| count += 1;
+    try testing.expectEqual(@as(u32, 0), count);
+    try testing.expectEqual(@as(u32, 15), iter.scanned);
+    // Cap fired with more entries (20 stored, 15 scanned) still available.
+    try testing.expect(iter.truncated);
+}
+
+test "query scan cap not flagged truncated when match set ends at the cap" {
+    const alloc = testing.allocator;
+    const io = nostr.io.io();
+    const dir = "./.test-scan-cap-exhausted";
+    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+
+    var lmdb = try Lmdb.init(alloc, dir ++ "/db.mdb", 256, .none);
+    defer lmdb.deinit();
+    var s = try Store.init(alloc, &lmdb);
+    defer s.deinit();
+
+    const base = nostr.io.timestamp() - 100000;
+    const filler_pk = "aa" ** 32;
+    // Exactly max_scan (limit 5 * multiplier 3 = 15) entries, none matching.
+    var i: u32 = 0;
+    while (i < 15) : (i += 1) {
+        var idb: [64]u8 = undefined;
+        testIdHex(i + 1, &idb);
+        try storeTestEvent(&s, alloc, &idb, filler_pk, base + @as(i64, i));
+    }
+
+    s.query_scan_multiplier = 3;
+    var authors = [_][32]u8{ [_]u8{0xcc} ** 32, [_]u8{0xdd} ** 32 };
+    const filters = [_]nostr.Filter{.{ .authors_bytes = &authors }};
+    var iter = try s.query(&filters, 5);
+    defer iter.deinit();
+
+    var count: u32 = 0;
+    while (try iter.next()) |_| count += 1;
+    try testing.expectEqual(@as(u32, 0), count);
+    try testing.expectEqual(@as(u32, 15), iter.scanned);
+    // Scanned exactly the cap but nothing remained, so enumeration was complete.
+    try testing.expect(!iter.truncated);
+}
+
+test "ids fast-path returns newest matches first under limit" {
+    const alloc = testing.allocator;
+    const io = nostr.io.io();
+    const dir = "./.test-ids-order";
+    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+
+    var lmdb = try Lmdb.init(alloc, dir ++ "/db.mdb", 256, .none);
+    defer lmdb.deinit();
+    var s = try Store.init(alloc, &lmdb);
+    defer s.deinit();
+
+    const base = nostr.io.timestamp() - 100000;
+    const pk = "cc" ** 32;
+
+    // created_at rises with id index, so the id array below (oldest-first) does
+    // not match age order; the fast-path must still return newest-first.
+    const n: u32 = 6;
+    var ids: [6][32]u8 = undefined;
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        var idb: [64]u8 = undefined;
+        testIdHex(i + 1, &idb);
+        try storeTestEvent(&s, alloc, &idb, pk, base + @as(i64, i));
+        _ = try std.fmt.hexToBytes(&ids[i], &idb);
+    }
+
+    const id_filters = [_]nostr.Filter{.{ .ids_bytes = &ids }};
+    var iter = try s.query(&id_filters, 3);
+    defer iter.deinit();
+
+    var prev: i64 = std.math.maxInt(i64);
+    var count: u32 = 0;
+    while (try iter.next()) |json| {
+        var ev = try nostr.Event.parse(json);
+        defer ev.deinit();
+        const ts = ev.createdAt();
+        try testing.expect(ts <= prev);
+        prev = ts;
+        count += 1;
+    }
+    try testing.expectEqual(@as(u32, 3), count);
+    // Newest three are base+5, base+4, base+3; the last returned is base+3.
+    try testing.expectEqual(base + 3, prev);
+}
+
+test "queryFull and ids fast-path bypass the scan cap for old matches" {
+    const alloc = testing.allocator;
+    const io = nostr.io.io();
+    const dir = "./.test-scan-cap-b";
+    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+
+    var lmdb = try Lmdb.init(alloc, dir ++ "/db.mdb", 256, .none);
+    defer lmdb.deinit();
+    var s = try Store.init(alloc, &lmdb);
+    defer s.deinit();
+
+    const base = nostr.io.timestamp() - 100000;
+    const target_pk = "bb" ** 32;
+    const filler_pk = "aa" ** 32;
+
+    var target_id_hex: [64]u8 = undefined;
+    testIdHex(999, &target_id_hex);
+    try storeTestEvent(&s, alloc, &target_id_hex, target_pk, base);
+
+    var i: u32 = 0;
+    while (i < 30) : (i += 1) {
+        var idb: [64]u8 = undefined;
+        testIdHex(i + 1, &idb);
+        try storeTestEvent(&s, alloc, &idb, filler_pk, base + 1 + @as(i64, i));
+    }
+
+    s.query_scan_multiplier = 2;
+
+    var target_pk_bytes: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&target_pk_bytes, target_pk);
+    var authors = [_][32]u8{ target_pk_bytes, [_]u8{0xcc} ** 32 };
+    const filters = [_]nostr.Filter{.{ .authors_bytes = &authors }};
+
+    // LMDB is opened without MDB_NOTLS, so a thread may hold only one read txn
+    // at a time; scope each iterator so its txn is closed before the next opens.
+    {
+        var capped = try s.query(&filters, 10);
+        defer capped.deinit();
+        var capped_count: u32 = 0;
+        while (try capped.next()) |_| capped_count += 1;
+        try testing.expectEqual(@as(u32, 0), capped_count);
+    }
+
+    {
+        var full = try s.queryFull(&filters, 10);
+        defer full.deinit();
+        var full_count: u32 = 0;
+        while (try full.next()) |_| full_count += 1;
+        try testing.expectEqual(@as(u32, 1), full_count);
+    }
+
+    {
+        var target_id_bytes: [32]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&target_id_bytes, &target_id_hex);
+        var ids = [_][32]u8{target_id_bytes};
+        const id_filters = [_]nostr.Filter{.{ .ids_bytes = &ids }};
+        var by_id = try s.query(&id_filters, 10);
+        defer by_id.deinit();
+        var id_count: u32 = 0;
+        while (try by_id.next()) |_| id_count += 1;
+        try testing.expectEqual(@as(u32, 1), id_count);
+    }
+}

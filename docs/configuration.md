@@ -103,6 +103,7 @@ write path, since there is no fsync to amortize.
 | `max_content_length` | — | u32 | `102400` | Maximum event `content` length, in bytes. |
 | `query_limit_default` | — | u32 | `500` | Events returned per REQ when the client sets no `limit`. |
 | `query_limit_max` | — | u32 | `5000` | Hard cap on events returned per REQ. |
+| `query_scan_multiplier` | `WISP_QUERY_SCAN_MULTIPLIER` | u32 | `20` | Caps entries scanned per query at `limit × multiplier` before stopping, so a selective filter cannot page-fault the whole event DB. `0` disables the cap. |
 | `max_event_age` | — | i64 (seconds) | `94608000` | Reject events whose `created_at` is older than this (default 3 years). |
 | `max_future_seconds` | — | i64 (seconds) | `900` | Reject events dated more than this far in the future (default 15 minutes). |
 | `min_pow_difficulty` | `WISP_MIN_POW_DIFFICULTY` | u8 | `0` | Required NIP-13 proof-of-work leading-zero bits. `0` disables. |
