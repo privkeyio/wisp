@@ -584,6 +584,9 @@ pub const Handler = struct {
 
         var total_count: u64 = 0;
         for (filters) |filter| {
+            // Uses the capped query() intentionally: for a selective filter this
+            // count is approximate (bounded by the scan cap) rather than exact,
+            // which is the accepted DoS tradeoff for network-reachable COUNT.
             var iter = self.store.query(&[_]nostr.Filter{filter}, self.config.query_limit_max) catch {
                 self.sendClosed(conn, sub_id, "error: query failed");
                 return;
@@ -708,6 +711,9 @@ pub const Handler = struct {
         };
 
         if (self.shutdown.load(.acquire)) return;
+        // Serving-side enumeration uses the capped query() by design: this path is
+        // network-reachable, so reconciliation stays DoS-safe at the cost of
+        // possibly under-enumerating on a pathologically large DB.
         var iter = self.store.query(&[_]nostr.Filter{filter}, self.config.negentropy_max_sync_events) catch {
             conn.removeNegSession(sub_id);
             self.sendNegErr(conn, sub_id, "error: query failed");

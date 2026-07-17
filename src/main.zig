@@ -434,4 +434,5 @@ test {
     _ = @import("server.zig");
     _ = @import("relay_metrics.zig");
     _ = @import("subscriptions.zig");
+    _ = @import("store.zig");
 }
