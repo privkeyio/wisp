@@ -712,8 +712,9 @@ pub const Handler = struct {
 
         if (self.shutdown.load(.acquire)) return;
         // Serving-side enumeration uses the capped query() by design: this path is
-        // network-reachable, so reconciliation stays DoS-safe at the cost of
-        // possibly under-enumerating on a pathologically large DB.
+        // network-reachable, so reconciliation stays DoS-safe. If the scan cap
+        // truncates enumeration it is detected below and surfaced as NEG-ERR
+        // rather than silently under-enumerating.
         var iter = self.store.query(&[_]nostr.Filter{filter}, self.config.negentropy_max_sync_events) catch {
             conn.removeNegSession(sub_id);
             self.sendNegErr(conn, sub_id, "error: query failed");
@@ -732,6 +733,16 @@ pub const Handler = struct {
                 self.sendNegErr(conn, sub_id, "blocked: too many events");
                 return;
             }
+        }
+
+        // The scan cap may stop enumeration before all matching stored events are
+        // seen. Sealing a partial set would make reconciliation report events as
+        // missing that the relay actually holds, so surface truncation as an error
+        // rather than silently sealing an incomplete set.
+        if (iter.max_scan != 0 and iter.scanned >= iter.max_scan) {
+            conn.removeNegSession(sub_id);
+            self.sendNegErr(conn, sub_id, "error: result set too large to reconcile");
+            return;
         }
 
         session.storage.seal();
