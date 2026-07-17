@@ -842,25 +842,33 @@ test "queryFull and ids fast-path bypass the scan cap for old matches" {
     var authors = [_][32]u8{ target_pk_bytes, [_]u8{0xcc} ** 32 };
     const filters = [_]nostr.Filter{.{ .authors_bytes = &authors }};
 
-    var capped = try s.query(&filters, 10);
-    defer capped.deinit();
-    var capped_count: u32 = 0;
-    while (try capped.next()) |_| capped_count += 1;
-    try testing.expectEqual(@as(u32, 0), capped_count);
+    // LMDB is opened without MDB_NOTLS, so a thread may hold only one read txn
+    // at a time; scope each iterator so its txn is closed before the next opens.
+    {
+        var capped = try s.query(&filters, 10);
+        defer capped.deinit();
+        var capped_count: u32 = 0;
+        while (try capped.next()) |_| capped_count += 1;
+        try testing.expectEqual(@as(u32, 0), capped_count);
+    }
 
-    var full = try s.queryFull(&filters, 10);
-    defer full.deinit();
-    var full_count: u32 = 0;
-    while (try full.next()) |_| full_count += 1;
-    try testing.expectEqual(@as(u32, 1), full_count);
+    {
+        var full = try s.queryFull(&filters, 10);
+        defer full.deinit();
+        var full_count: u32 = 0;
+        while (try full.next()) |_| full_count += 1;
+        try testing.expectEqual(@as(u32, 1), full_count);
+    }
 
-    var target_id_bytes: [32]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&target_id_bytes, &target_id_hex);
-    var ids = [_][32]u8{target_id_bytes};
-    const id_filters = [_]nostr.Filter{.{ .ids_bytes = &ids }};
-    var by_id = try s.query(&id_filters, 10);
-    defer by_id.deinit();
-    var id_count: u32 = 0;
-    while (try by_id.next()) |_| id_count += 1;
-    try testing.expectEqual(@as(u32, 1), id_count);
+    {
+        var target_id_bytes: [32]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&target_id_bytes, &target_id_hex);
+        var ids = [_][32]u8{target_id_bytes};
+        const id_filters = [_]nostr.Filter{.{ .ids_bytes = &ids }};
+        var by_id = try s.query(&id_filters, 10);
+        defer by_id.deinit();
+        var id_count: u32 = 0;
+        while (try by_id.next()) |_| id_count += 1;
+        try testing.expectEqual(@as(u32, 1), id_count);
+    }
 }
