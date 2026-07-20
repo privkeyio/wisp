@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.14] - 2026-07-20
+
+### Fixed
+
+- Queries are now bounded in how many stored entries they may scan, so a selective filter matching fewer events than its `limit` no longer scans the entire database. Fixes severe CPU and major page-fault load on large databases; the `query_scan_multiplier` config knob (default 20, 0 disables) controls the bound (#160)
+
 ## [0.5.13] - 2026-07-16
 
 ### Added
