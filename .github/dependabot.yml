@@ -1,0 +1,12 @@
+version: 2
+updates:
+  # Zig dependencies in build.zig.zon have no Dependabot ecosystem, and the Zig
+  # toolchain itself is fetched by checksum in ci.yml. Both are tracked by hand.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      all:
+        patterns: ["*"]
+    open-pull-requests-limit: 5
