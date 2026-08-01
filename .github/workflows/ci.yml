@@ -20,9 +20,20 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y liblmdb-dev libsecp256k1-dev libssl-dev
 
       - name: Setup Zig
+        env:
+          ZIG_VERSION: 0.16.0
+          # sha256 of zig-x86_64-linux-0.16.0.tar.xz, from ziglang.org/download/index.json
+          ZIG_SHA256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
         run: |
-          curl -L https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz | tar -xJ
-          echo "$PWD/zig-x86_64-linux-0.16.0" >> $GITHUB_PATH
+          set -euo pipefail
+          tarball="zig-x86_64-linux-$ZIG_VERSION.tar.xz"
+          # download to disk and verify before extracting: piping straight into
+          # tar executes whatever was served, with no chance to check it first
+          curl -fsSL --retry 3 -o "$tarball" \
+            "https://ziglang.org/download/$ZIG_VERSION/$tarball"
+          echo "$ZIG_SHA256  $tarball" | sha256sum -c -
+          tar -xJf "$tarball"
+          echo "$PWD/zig-x86_64-linux-$ZIG_VERSION" >> $GITHUB_PATH
 
       - name: Build
         run: zig build
@@ -46,15 +57,28 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y liblmdb-dev libsecp256k1-dev libssl-dev
 
       - name: Setup Zig
+        env:
+          ZIG_VERSION: 0.16.0
+          # sha256 of zig-x86_64-linux-0.16.0.tar.xz, from ziglang.org/download/index.json
+          ZIG_SHA256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
         run: |
-          curl -L https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz | tar -xJ
-          echo "$PWD/zig-x86_64-linux-0.16.0" >> $GITHUB_PATH
+          set -euo pipefail
+          tarball="zig-x86_64-linux-$ZIG_VERSION.tar.xz"
+          # download to disk and verify before extracting: piping straight into
+          # tar executes whatever was served, with no chance to check it first
+          curl -fsSL --retry 3 -o "$tarball" \
+            "https://ziglang.org/download/$ZIG_VERSION/$tarball"
+          echo "$ZIG_SHA256  $tarball" | sha256sum -c -
+          tar -xJf "$tarball"
+          echo "$PWD/zig-x86_64-linux-$ZIG_VERSION" >> $GITHUB_PATH
 
       - name: Build noz (nostr test client)
         env:
-          NOZ_VERSION: v0.2.1
+          # pinned by commit: a tag can be moved, a commit cannot
+          NOZ_COMMIT: 848a2e3acdcfd0c82364ee391cc50ec0784ea5f0
         run: |
-          git clone --depth 1 --branch "$NOZ_VERSION" https://github.com/privkeyio/noz "$RUNNER_TEMP/noz"
+          git clone --filter=blob:none https://github.com/privkeyio/noz "$RUNNER_TEMP/noz"
+          git -C "$RUNNER_TEMP/noz" checkout --detach "$NOZ_COMMIT"
           (cd "$RUNNER_TEMP/noz" && zig build -Doptimize=ReleaseFast)
           echo "$RUNNER_TEMP/noz/zig-out/bin" >> $GITHUB_PATH
 
