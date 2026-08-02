@@ -50,6 +50,13 @@ jobs:
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.16.0
+          # Released binaries are built from a cold Zig cache. use-cache covers
+          # the global and local Zig build-cache directories, which are restored
+          # from the GitHub Actions cache and are writable by other workflow runs
+          # in this repository. A release artifact should not be able to pick up
+          # compilation output that something other than this run produced.
+          # Costs a full rebuild per release, which is the right trade here.
+          use-cache: false
 
       - name: Build
         run: zig build -Doptimize=ReleaseFast
