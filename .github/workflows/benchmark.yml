@@ -22,7 +22,7 @@ jobs:
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Clone nostr-bench
         run: git clone --depth 1 --branch v0.2.1 https://github.com/privkeyio/nostr-bench ../nostr-bench
@@ -85,7 +85,7 @@ jobs:
           python3 benchmark/compare.py benchmark/baseline.json benchmark/results.json
 
       - name: Upload results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: benchmark-results
