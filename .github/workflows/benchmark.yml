@@ -18,11 +18,15 @@ on:
 
 jobs:
   benchmark:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Clone nostr-bench
         run: git clone --depth 1 --branch v0.2.1 https://github.com/privkeyio/nostr-bench ../nostr-bench
@@ -31,7 +35,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y liblmdb-dev libsecp256k1-dev libssl-dev netcat-openbsd
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.16.0
 
@@ -85,7 +89,7 @@ jobs:
           python3 benchmark/compare.py benchmark/baseline.json benchmark/results.json
 
       - name: Upload results
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: benchmark-results

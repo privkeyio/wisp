@@ -8,6 +8,8 @@ on:
 
 jobs:
   build:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     if: github.event.pull_request.draft != true
 
@@ -45,6 +47,8 @@ jobs:
         run: zig build test
 
   integration:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     if: github.event.pull_request.draft != true
 
