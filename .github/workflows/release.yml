@@ -11,6 +11,8 @@ permissions:
 
 jobs:
   build:
+    permissions:
+      contents: read
     strategy:
       matrix:
         include:
@@ -26,7 +28,9 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
@@ -43,9 +47,16 @@ jobs:
         shell: bash
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.16.0
+          # Released binaries are built from a cold Zig cache. use-cache covers
+          # the global and local Zig build-cache directories, which are restored
+          # from the GitHub Actions cache and are writable by other workflow runs
+          # in this repository. A release artifact should not be able to pick up
+          # compilation output that something other than this run produced.
+          # Costs a full rebuild per release, which is the right trade here.
+          use-cache: false
 
       - name: Build
         run: zig build -Doptimize=ReleaseFast
@@ -70,19 +81,24 @@ jobs:
         shell: pwsh
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}.*
 
   docker:
+    permissions:
+      contents: read
+      packages: write
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -90,7 +106,7 @@ jobs:
 
       - name: Docker meta
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
@@ -99,7 +115,7 @@ jobs:
             type=raw,value=latest
 
       - name: Build and push
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           push: true
@@ -107,20 +123,24 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
 
   release:
+    permissions:
+      contents: write
     needs: [build, docker]
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Download artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts
           pattern: wisp-*
 
       - name: Create Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           files: artifacts/**/*
           generate_release_notes: true
