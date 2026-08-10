@@ -51,6 +51,11 @@ fn monotonicSeconds() i64 {
 /// completion, since EOSE tells the client it has the whole set.
 const StreamOutcome = enum { complete, write_failed, timed_out, incomplete };
 
+/// Result of enumerating the serving side of a negentropy session. Kept separate
+/// from the replies so the read transaction can be closed before any of them are
+/// written.
+const NegEnumeration = enum { ok, query_failed, too_many, truncated };
+
 // `conn` is generic so the budget path can be exercised without a live
 // socket: a real *Connection returns error.NotConnected when it has no
 // websocket, which would mask every outcome as .write_failed.
@@ -774,38 +779,56 @@ pub const Handler = struct {
         };
 
         if (self.shutdown.load(.acquire)) return;
-        // Serving-side enumeration uses the capped query() by design: this path is
-        // network-reachable, so reconciliation stays DoS-safe. If the scan cap
-        // truncates enumeration it is detected below and surfaced as NEG-ERR
-        // rather than silently under-enumerating.
-        var iter = self.store.query(&[_]nostr.Filter{filter}, self.config.negentropy_max_sync_events) catch {
-            conn.removeNegSession(sub_id);
-            self.sendNegErr(conn, sub_id, "error: query failed");
-            return;
-        };
-        defer iter.deinit();
 
-        var count: u32 = 0;
-        while (iter.next() catch null) |json| {
-            var event = nostr.Event.parse(json) catch continue;
-            defer event.deinit();
-            session.storage.insert(@intCast(event.createdAt()), event.id()) catch continue;
-            count += 1;
-            if (count >= self.config.negentropy_max_sync_events) {
+        // Enumerate inside a block so the LMDB read transaction is released
+        // before anything is written to the socket. LMDB cannot reclaim a page
+        // freed after the transaction started for as long as it lives, and every
+        // exit from here writes: the replies below, and reconcileAndSend, which
+        // builds a 128 KiB frame and hands it to a client that may be slow to
+        // take it. Nothing is sent until the transaction is gone.
+        const enumeration: NegEnumeration = blk: {
+            // Serving-side enumeration uses the capped query() by design: this
+            // path is network-reachable, so reconciliation stays DoS-safe. If the
+            // scan cap truncates enumeration it is detected below and surfaced as
+            // NEG-ERR rather than silently under-enumerating.
+            var iter = self.store.query(&[_]nostr.Filter{filter}, self.config.negentropy_max_sync_events) catch
+                break :blk .query_failed;
+            defer iter.deinit();
+
+            var count: u32 = 0;
+            while (iter.next() catch null) |json| {
+                var event = nostr.Event.parse(json) catch continue;
+                defer event.deinit();
+                session.storage.insert(@intCast(event.createdAt()), event.id()) catch continue;
+                count += 1;
+                if (count >= self.config.negentropy_max_sync_events) break :blk .too_many;
+            }
+
+            // The scan cap may stop enumeration before all matching stored events
+            // are seen. Sealing a partial set would make reconciliation report
+            // events as missing that the relay actually holds, so surface
+            // truncation as an error rather than silently sealing it.
+            if (iter.truncated) break :blk .truncated;
+            break :blk .ok;
+        };
+
+        switch (enumeration) {
+            .ok => {},
+            .query_failed => {
+                conn.removeNegSession(sub_id);
+                self.sendNegErr(conn, sub_id, "error: query failed");
+                return;
+            },
+            .too_many => {
                 conn.removeNegSession(sub_id);
                 self.sendNegErr(conn, sub_id, "blocked: too many events");
                 return;
-            }
-        }
-
-        // The scan cap may stop enumeration before all matching stored events are
-        // seen. Sealing a partial set would make reconciliation report events as
-        // missing that the relay actually holds, so surface truncation as an error
-        // rather than silently sealing an incomplete set.
-        if (iter.truncated) {
-            conn.removeNegSession(sub_id);
-            self.sendNegErr(conn, sub_id, "error: result set too large to reconcile");
-            return;
+            },
+            .truncated => {
+                conn.removeNegSession(sub_id);
+                self.sendNegErr(conn, sub_id, "error: result set too large to reconcile");
+                return;
+            },
         }
 
         session.storage.seal();
