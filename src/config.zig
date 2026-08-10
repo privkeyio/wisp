@@ -46,7 +46,7 @@ fn envBool(name: []const u8, value: []const u8, current: bool) bool {
 // printable ASCII and truncate, so a bad value cannot forge a log record or
 // repaint a terminal. Mirrors safeIp() in server.zig, which does the same for
 // forwarded-header IPs.
-fn safeValue(value: []const u8, buf: *[64]u8) []const u8 {
+fn safeValue(value: []const u8, buf: []u8) []const u8 {
     const len = @min(value.len, buf.len);
     for (value[0..len], buf[0..len]) |c, *out| {
         out.* = if (std.ascii.isPrint(c)) c else '?';
@@ -241,8 +241,20 @@ pub const Config = struct {
             // error.InvalidCharacter this used to surface gave an operator nothing
             // to go on in a file with dozens of keys.
             config.setValue(section, key, value) catch |err| {
-                var buf: [64]u8 = undefined;
-                log.err("{s}:{d}: [{s}] {s} = \"{s}\": {t}", .{ path, line_no, section, key, safeValue(value, &buf), err });
+                // Every field here comes from the file or the command line, and
+                // all of them can carry escapes, not just the value.
+                var path_buf: [256]u8 = undefined;
+                var section_buf: [64]u8 = undefined;
+                var key_buf: [64]u8 = undefined;
+                var value_buf: [64]u8 = undefined;
+                log.err("{s}:{d}: [{s}] {s} = \"{s}\": {t}", .{
+                    safeValue(path, &path_buf),
+                    line_no,
+                    safeValue(section, &section_buf),
+                    safeValue(key, &key_buf),
+                    safeValue(value, &value_buf),
+                    err,
+                });
                 return err;
             };
         }
@@ -490,4 +502,7 @@ test safeValue {
     // Long values are truncated so one variable cannot flood the log.
     const long = "x" ** 200;
     try std.testing.expectEqual(@as(usize, 64), safeValue(long, &buf).len);
+    // The buffer sets the cap, so a larger one keeps more of a long field.
+    var wide: [256]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 200), safeValue(long, &wide).len);
 }
