@@ -75,6 +75,14 @@ const State = struct {
         // running, so the probe was starved (slow handler, saturated thread
         // pool) rather than wedged. Corroboration only ever clears failures, it
         // never adds any, so it can only make the watchdog less trigger-happy.
+        //
+        // Note this covers the probe's own connection: httpz counts an accept
+        // before any handler runs, so a probe that gets accepted and then goes
+        // unanswered vetoes itself. That is deliberate. It makes this strictly
+        // an accept-loop watchdog: a relay whose handlers are slow or whose
+        // thread pool is saturated is degraded, not wedged, and restarting it
+        // would turn a slowdown into an outage. Only a relay that never accepts
+        // the probe at all can reach the exit path.
         if (accepts_progressed) {
             self.consecutive_failures = 0;
             return .healthy;

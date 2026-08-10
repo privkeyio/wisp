@@ -124,6 +124,15 @@ accepted a connection since the previous probe. Connection refusals and local
 descriptor exhaustion are logged but never counted, since a restart fixes
 neither. Set `enabled = false` to opt out entirely.
 
+The accept check is what makes this specifically an *accept-loop* watchdog. httpz
+counts an accept before any handler runs, so a probe that is accepted and then
+goes unanswered vetoes itself: a relay whose handlers are slow or whose thread
+pool is saturated is degraded rather than wedged, and restarting it would turn a
+slowdown into an outage. Only a relay that never accepts the probe at all can
+reach the exit path. `httpz_connections` on `/metrics` is that same accept
+counter, so comparing it against `wisp_connections_total` (completed WebSocket
+upgrades) shows whether the accept loop is running while work backs up.
+
 Because the process exits deliberately, run wisp under something that restarts
 it (`--restart unless-stopped` for Docker, `Restart=always` for systemd).
 Without a supervisor, a wedge that used to leave a degraded relay running will
@@ -214,3 +223,11 @@ Operational metrics are served in Prometheus format at `GET /metrics` on the rel
 connection counts, events stored/rejected/broadcast, REQ totals, and rate-limit counters. The
 endpoint honors `ip_whitelist`/`ip_blacklist`, so restrict it there or at your reverse
 proxy/firewall if it should not be public.
+
+The `httpz_*` series come from the embedded HTTP server. The useful one is
+`httpz_connections`, which counts accepted TCP connections before any handler runs. Read
+against `wisp_connections_total` (completed WebSocket upgrades) it separates two states that
+look identical from outside: if accepts climb while upgrades stall, the accept loop is running
+and work is backing up; if accepts stop climbing while clients are still connecting, the accept
+loop itself is stuck. `httpz_timeout_request` and `httpz_timeout_keepalive` count connections
+reaped for holding a slot without completing a request.
