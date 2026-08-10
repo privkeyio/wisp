@@ -937,6 +937,64 @@ test "ids fast-path returns newest matches first under limit" {
     try testing.expectEqual(base + 3, prev);
 }
 
+test "a multi-filter REQ is not narrowed to the ids in filters[0]" {
+    // Guards the filters.len == 1 gate on the ids fast path. Without it a REQ
+    // whose first filter carries ids answers from that id list alone and the
+    // other filters are dropped, so a client asking for "these two ids OR
+    // everything by this author" silently loses the author half. Nothing
+    // exercised this before, so removing the gate passed CI.
+    const alloc = testing.allocator;
+    const io = nostr.io.io();
+    const dir = "./.test-ids-multifilter";
+    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+
+    var lmdb = try Lmdb.init(alloc, dir ++ "/db.mdb", 256, .none);
+    defer lmdb.deinit();
+    var s = try Store.init(alloc, &lmdb);
+    defer s.deinit();
+
+    const base = nostr.io.timestamp() - 100000;
+    const pk_ids = "aa" ** 32;
+    const pk_other = "bb" ** 32;
+
+    // Two events addressed by id, and one that only the second filter can reach.
+    var ids: [2][32]u8 = undefined;
+    var i: u32 = 0;
+    while (i < 2) : (i += 1) {
+        var idb: [64]u8 = undefined;
+        testIdHex(i + 1, &idb);
+        try storeTestEvent(&s, alloc, &idb, pk_ids, base + @as(i64, i));
+        _ = try std.fmt.hexToBytes(&ids[i], &idb);
+    }
+    var other_id: [64]u8 = undefined;
+    testIdHex(99, &other_id);
+    try storeTestEvent(&s, alloc, &other_id, pk_other, base + 50);
+
+    var authors: [1][32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&authors[0], pk_other);
+    const filters = [_]nostr.Filter{
+        .{ .ids_bytes = &ids },
+        .{ .authors_bytes = &authors },
+    };
+
+    var iter = try s.query(&filters, 100);
+    defer iter.deinit();
+
+    var saw_other = false;
+    var count: u32 = 0;
+    while (try iter.next()) |json| {
+        var ev = try nostr.Event.parse(json);
+        defer ev.deinit();
+        if (std.mem.eql(u8, &ev.pubkey_bytes, &authors[0])) saw_other = true;
+        count += 1;
+    }
+
+    // The union of both filters is all three events; the ids-only answer is two.
+    try testing.expect(saw_other);
+    try testing.expectEqual(@as(u32, 3), count);
+}
+
 test "queryFull and ids fast-path bypass the scan cap for old matches" {
     const alloc = testing.allocator;
     const io = nostr.io.io();
