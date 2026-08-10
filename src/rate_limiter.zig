@@ -1,6 +1,39 @@
 const std = @import("std");
 const nostr = @import("nostr.zig");
 
+const log = std.log.scoped(.ip_filter);
+
+/// Can this entry ever match a client address?
+///
+/// Entries are compared as text: exactly, or as a prefix when they end in '.'
+/// or ':'. An entry that is neither a valid address nor a valid prefix is
+/// accepted at load and then never matches anything, which for a blocklist
+/// means an operator believes a range is blocked when it is not. CIDR
+/// ("10.0.0.0/8") and globs ("192.168.*") are the usual way this happens, since
+/// both look right and neither is supported.
+fn safeEntry(entry: []const u8, buf: *[64]u8) []const u8 {
+    const len = @min(entry.len, buf.len);
+    for (entry[0..len], buf[0..len]) |c, *out| {
+        out.* = if (std.ascii.isPrint(c)) c else '?';
+    }
+    return buf[0..len];
+}
+
+fn entryCanMatch(entry: []const u8) bool {
+    if (entry.len == 0) return false;
+    const last = entry[entry.len - 1];
+    if (last == '.' or last == ':') {
+        if (entry.len < 2) return false;
+        for (entry) |c| switch (c) {
+            '0'...'9', 'a'...'f', 'A'...'F', '.', ':' => {},
+            else => return false,
+        };
+        return true;
+    }
+    _ = std.Io.net.IpAddress.parse(entry, 0) catch return false;
+    return true;
+}
+
 // Per-IP limiter state is sharded across independent mutex+map buckets so
 // worker threads keying on different IPs do not serialize on one process-global
 // lock on every event/query/connection. The shard is chosen by hashing the
@@ -246,37 +279,40 @@ pub const IpFilter = struct {
     }
 
     pub fn loadWhitelist(self: *IpFilter, list: []const u8) !void {
-        const io = nostr.io.io();
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-
-        if (list.len == 0) return;
-
-        self.whitelist_enabled = true;
-        var iter = std.mem.splitScalar(u8, list, ',');
-        while (iter.next()) |entry| {
-            const trimmed = std.mem.trim(u8, entry, " \t");
-            if (trimmed.len > 0) {
-                const copy = try self.allocator.dupe(u8, trimmed);
-                try self.whitelist.put(copy, {});
-            }
-        }
+        return self.loadInto(&self.whitelist, list, "allow list", true);
     }
 
     pub fn loadBlacklist(self: *IpFilter, list: []const u8) !void {
+        return self.loadInto(&self.blacklist, list, "deny list", false);
+    }
+
+    fn loadInto(
+        self: *IpFilter,
+        map: *std.StringHashMap(void),
+        list: []const u8,
+        name: []const u8,
+        enables_whitelist: bool,
+    ) !void {
         const io = nostr.io.io();
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
         if (list.len == 0) return;
 
+        if (enables_whitelist) self.whitelist_enabled = true;
         var iter = std.mem.splitScalar(u8, list, ',');
         while (iter.next()) |entry| {
             const trimmed = std.mem.trim(u8, entry, " \t");
-            if (trimmed.len > 0) {
-                const copy = try self.allocator.dupe(u8, trimmed);
-                try self.blacklist.put(copy, {});
+            if (trimmed.len == 0) continue;
+            // Refusing the entry and saying so beats storing one that quietly
+            // never matches: the operator can act on a log line, not on silence.
+            if (!entryCanMatch(trimmed)) {
+                var buf: [64]u8 = undefined;
+                log.warn("{s} entry \"{s}\" can never match and was ignored: entries are an exact address or a prefix ending in '.' or ':'; CIDR and '*' are not supported", .{ name, safeEntry(trimmed, &buf) });
+                continue;
             }
+            const copy = try self.allocator.dupe(u8, trimmed);
+            try map.put(copy, {});
         }
     }
 
@@ -669,4 +705,42 @@ test "EventRateLimiter cleanup reclaims only idle buckets" {
     limiter.cleanupAt(1060);
     try std.testing.expectEqual(@as(usize, 1), limiter.trackedCount());
     try std.testing.expect(limiter.tracks("2.2.2.2"));
+}
+
+test entryCanMatch {
+    // Exact addresses.
+    try std.testing.expect(entryCanMatch("10.0.0.5"));
+    try std.testing.expect(entryCanMatch("::1"));
+    try std.testing.expect(entryCanMatch("2001:db8::1"));
+
+    // Prefix forms, which must end at an octet or group boundary.
+    try std.testing.expect(entryCanMatch("10.0.0."));
+    try std.testing.expect(entryCanMatch("192.168."));
+    try std.testing.expect(entryCanMatch("2001:db8:"));
+
+    // The two ways operators actually get this wrong. Both look correct and
+    // neither is supported, so before this they were stored and silently never
+    // matched, leaving a deny list open.
+    try std.testing.expect(!entryCanMatch("10.0.0.0/8"));
+    try std.testing.expect(!entryCanMatch("192.168.*"));
+    try std.testing.expect(!entryCanMatch("0.0.0.0/0"));
+
+    // Other junk that can never match an address.
+    try std.testing.expect(!entryCanMatch(""));
+    try std.testing.expect(!entryCanMatch("."));
+    try std.testing.expect(!entryCanMatch(":"));
+    try std.testing.expect(!entryCanMatch("example.com"));
+    try std.testing.expect(!entryCanMatch("10.0.0.256"));
+}
+
+test "loadBlacklist: an entry that can never match is not stored" {
+    var f = IpFilter.init(std.testing.allocator);
+    defer f.deinit();
+
+    // A CIDR entry alongside a usable one: the usable one still works, and the
+    // CIDR is dropped rather than sitting in the map pretending to block.
+    try f.loadBlacklist("10.0.0.0/8, 1.2.3.4");
+    try std.testing.expect(!f.isAllowed("1.2.3.4"));
+    // Nothing in 10.x is actually blocked, which is the point of the warning.
+    try std.testing.expect(f.isAllowed("10.1.2.3"));
 }
