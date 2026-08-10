@@ -18,6 +18,10 @@ pub const Config = struct {
     // (e.g. 1) on a personal or memory-constrained relay: each worker carries its
     // own buffer pools and thread subset, so fewer workers means a smaller footprint.
     workers: u16,
+    // Per-worker live-connection cap handed to httpz (workers.max_conn). At the cap
+    // the worker pauses accept. 0 keeps httpz's default (8192). Setting it makes an
+    // accept stall (see wisp-ci1's slot leak) trip the watchdog sooner.
+    max_conn: u16,
     max_subscriptions: u32,
     max_filters: u32,
     max_message_size: u32,
@@ -74,6 +78,16 @@ pub const Config = struct {
 
     admin_pubkeys: []const u8,
 
+    // Self-watchdog: a background thread periodically opens a loopback TCP
+    // connection to our own listener and expects an HTTP reply. If the accept
+    // loop wedges (kernel completes handshakes but wisp never services them), the
+    // probe gets no bytes back; after `watchdog_failures` consecutive misses the
+    // process exits so the supervisor restarts it. On by default.
+    watchdog_enabled: bool,
+    watchdog_interval_seconds: u32,
+    watchdog_timeout_ms: u32,
+    watchdog_failures: u32,
+
     _allocated: std.ArrayListUnmanaged([]const u8),
     _allocator: ?std.mem.Allocator,
 
@@ -87,6 +101,7 @@ pub const Config = struct {
             .contact = null,
             .max_connections = 1000,
             .workers = 0,
+            .max_conn = 0,
             .max_subscriptions = 20,
             .max_filters = 10,
             .max_message_size = 65536,
@@ -122,6 +137,10 @@ pub const Config = struct {
             .max_neg_sessions = 4,
             .min_pow_difficulty = 0,
             .admin_pubkeys = "",
+            .watchdog_enabled = true,
+            .watchdog_interval_seconds = 10,
+            .watchdog_timeout_ms = 2000,
+            .watchdog_failures = 3,
             ._allocated = undefined,
             ._allocator = null,
         };
@@ -192,6 +211,8 @@ pub const Config = struct {
                 self.max_connections = try std.fmt.parseInt(u32, value, 10);
             } else if (std.mem.eql(u8, key, "workers")) {
                 self.workers = try std.fmt.parseInt(u16, value, 10);
+            } else if (std.mem.eql(u8, key, "max_conn")) {
+                self.max_conn = try std.fmt.parseInt(u16, value, 10);
             } else if (std.mem.eql(u8, key, "max_subscriptions")) {
                 self.max_subscriptions = try std.fmt.parseInt(u32, value, 10);
             } else if (std.mem.eql(u8, key, "max_filters")) {
@@ -277,6 +298,16 @@ pub const Config = struct {
             if (std.mem.eql(u8, key, "admin_pubkeys")) {
                 self.admin_pubkeys = try self.allocString(value);
             }
+        } else if (std.mem.eql(u8, section, "watchdog")) {
+            if (std.mem.eql(u8, key, "enabled")) {
+                self.watchdog_enabled = std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1");
+            } else if (std.mem.eql(u8, key, "interval_seconds")) {
+                self.watchdog_interval_seconds = try std.fmt.parseInt(u32, value, 10);
+            } else if (std.mem.eql(u8, key, "timeout_ms")) {
+                self.watchdog_timeout_ms = try std.fmt.parseInt(u32, value, 10);
+            } else if (std.mem.eql(u8, key, "failures")) {
+                self.watchdog_failures = try std.fmt.parseInt(u32, value, 10);
+            }
         }
     }
 
@@ -317,6 +348,9 @@ pub const Config = struct {
         if (getenv("WISP_WORKERS")) |v| {
             self.workers = std.fmt.parseInt(u16, v, 10) catch self.workers;
         }
+        if (getenv("WISP_MAX_CONN")) |v| {
+            self.max_conn = std.fmt.parseInt(u16, v, 10) catch self.max_conn;
+        }
         if (getenv("WISP_EVENTS_PER_MINUTE")) |v| {
             self.events_per_minute = std.fmt.parseInt(u32, v, 10) catch self.events_per_minute;
         }
@@ -353,6 +387,18 @@ pub const Config = struct {
             self.min_pow_difficulty = std.fmt.parseInt(u8, v, 10) catch self.min_pow_difficulty;
         }
         if (getenv("WISP_ADMIN_PUBKEYS")) |v| self.admin_pubkeys = v;
+        if (getenv("WISP_WATCHDOG_ENABLED")) |v| {
+            self.watchdog_enabled = std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "1");
+        }
+        if (getenv("WISP_WATCHDOG_INTERVAL_SECONDS")) |v| {
+            self.watchdog_interval_seconds = std.fmt.parseInt(u32, v, 10) catch self.watchdog_interval_seconds;
+        }
+        if (getenv("WISP_WATCHDOG_TIMEOUT_MS")) |v| {
+            self.watchdog_timeout_ms = std.fmt.parseInt(u32, v, 10) catch self.watchdog_timeout_ms;
+        }
+        if (getenv("WISP_WATCHDOG_FAILURES")) |v| {
+            self.watchdog_failures = std.fmt.parseInt(u32, v, 10) catch self.watchdog_failures;
+        }
     }
 
     pub fn deinit(self: *Config) void {

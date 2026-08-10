@@ -477,6 +477,7 @@ pub const Server = struct {
                 .count = pool_config.workers,
                 .large_buffer_count = 4,
                 .min_conn = 8,
+                .max_conn = if (config.max_conn > 0) config.max_conn else null,
             },
             .thread_pool = .{ .count = pool_config.pool },
             .websocket = .{ .max_message_size = config.max_message_size },

@@ -19,6 +19,7 @@ const rate_limiter = @import("rate_limiter.zig");
 const ManagementStore = @import("management_store.zig").ManagementStore;
 const Nip86Handler = @import("nip86.zig").Nip86Handler;
 const Writer = @import("writer.zig").Writer;
+const watchdog = @import("watchdog.zig");
 
 var g_shutdown: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
@@ -241,6 +242,14 @@ pub fn main(init: std.process.Init) !void {
     const cleanup_thread = try std.Thread.spawn(.{}, storeCleanupThread, .{ &server, &store, &config, &subs, &g_shutdown, &server.conn_limiter, &event_limiter, &query_limiter });
     defer cleanup_thread.join();
 
+    // Self-heal: detect a wedged accept loop via loopback self-probe and exit so
+    // the supervisor restarts us. Opt out with watchdog_enabled = false.
+    const watchdog_thread: ?std.Thread = if (config.watchdog_enabled)
+        try std.Thread.spawn(.{}, watchdog.run, .{ &config, &g_shutdown })
+    else
+        null;
+    defer if (watchdog_thread) |t| t.join();
+
     try server.listen();
 
     std.log.info("Shutdown complete", .{});
@@ -435,4 +444,5 @@ test {
     _ = @import("relay_metrics.zig");
     _ = @import("subscriptions.zig");
     _ = @import("store.zig");
+    _ = @import("watchdog.zig");
 }
