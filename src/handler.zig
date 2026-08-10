@@ -64,7 +64,13 @@ fn streamQueryResults(conn: anytype, sub_id: []const u8, iter: anytype, budget_s
     // budget by the size of the step, and a step forwards would trip it instantly
     // and cut every in-flight REQ short.
     const started = monotonicSeconds();
-    while (iter.next() catch null) |json| {
+    while (true) {
+        // An iterator error must not be swallowed as "no more events". Doing so
+        // ends the stream early and reports .complete, so the client is sent
+        // EOSE over a partial set: the same failure as the too-large event
+        // below, arriving by a different route.
+        const next = iter.next() catch return .incomplete;
+        const json = next orelse break;
         var buf: [65536]u8 = undefined;
         // An event that will not fit the frame buffer cannot be delivered.
         // Skipping it silently and then reporting .complete would tell the client
@@ -651,6 +657,7 @@ pub const Handler = struct {
         }
 
         var total_count: u64 = 0;
+        var read_failed = false;
         for (filters) |filter| {
             // Uses the capped query() intentionally: for a selective filter this
             // count is approximate (bounded by the scan cap) rather than exact,
@@ -661,9 +668,25 @@ pub const Handler = struct {
             };
             defer iter.deinit();
 
-            while (iter.next() catch null) |_| {
+            while (true) {
+                // A read error would otherwise silently lower the reported count.
+                // COUNT being approximate is a documented property of the scan
+                // cap, not licence to report a number a failed read invented.
+                // Flagged rather than answered here so the reply goes out after
+                // the deferred deinit has released the read transaction.
+                const next = iter.next() catch {
+                    read_failed = true;
+                    break;
+                };
+                if (next == null) break;
                 total_count += 1;
             }
+            if (read_failed) break;
+        }
+
+        if (read_failed) {
+            self.sendClosed(conn, sub_id, "error: query failed");
+            return;
         }
 
         self.sendCount(conn, sub_id, total_count);
@@ -796,7 +819,13 @@ pub const Handler = struct {
             defer iter.deinit();
 
             var count: u32 = 0;
-            while (iter.next() catch null) |json| {
+            while (true) {
+                // Sealing a partial set makes reconciliation report events as
+                // missing that the relay actually holds, which is exactly what
+                // the truncation check below exists to prevent. An iterator
+                // error has to be surfaced for the same reason.
+                const next = iter.next() catch break :blk .query_failed;
+                const json = next orelse break;
                 var event = nostr.Event.parse(json) catch continue;
                 defer event.deinit();
                 session.storage.insert(@intCast(event.createdAt()), event.id()) catch continue;
@@ -1095,10 +1124,16 @@ const StubConn = struct {
 
 const StubIter = struct {
     remaining: usize,
+    fail_after: ?usize = null,
+    yielded: usize = 0,
 
     fn next(self: *StubIter) !?[]const u8 {
+        if (self.fail_after) |n| {
+            if (self.yielded >= n) return error.ReadFailed;
+        }
         if (self.remaining == 0) return null;
         self.remaining -= 1;
+        self.yielded += 1;
         return "{\"id\":\"x\"}";
     }
 };
@@ -1127,6 +1162,18 @@ test "streamQueryResults: a dead peer stops the stream without draining it" {
     try testing.expectEqual(StreamOutcome.write_failed, streamQueryResults(&conn, "s", &iter, 3600));
     try testing.expectEqual(@as(usize, 2), conn.written);
     try testing.expect(iter.remaining > 90);
+}
+
+test "streamQueryResults: a failing iterator is not reported as a finished set" {
+    // An iterator error used to be swallowed as "no more events", which ended
+    // the stream and reported .complete, so the client got EOSE over a partial
+    // result set.
+    var conn = StubConn{};
+    var iter = StubIter{ .remaining = 100, .fail_after = 3 };
+    const outcome = streamQueryResults(&conn, "s", &iter, 3600);
+    try testing.expectEqual(StreamOutcome.incomplete, outcome);
+    try testing.expect(outcome != .complete);
+    try testing.expectEqual(@as(usize, 3), conn.written);
 }
 
 test "streamQueryResults: a client slower than the budget is cut off, not silently truncated" {
