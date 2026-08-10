@@ -170,6 +170,29 @@ jobs:
           stop "$a"; stop "$b"; wait 2>/dev/null
           exit $rc
 
+      - name: Run NIP-77 boundary test (match set exactly at the cap)
+        run: |
+          stop() {
+            kill "$1" 2>/dev/null || return 0
+            for i in $(seq 1 20); do kill -0 "$1" 2>/dev/null || return 0; sleep 0.25; done
+            kill -9 "$1" 2>/dev/null || true
+          }
+          # A low cap so the boundary is cheap to hit; the relays must agree on it.
+          start() { # port datadir -> echoes pid, returns 1 if never ready
+            nohup env WISP_HOST=127.0.0.1 WISP_PORT="$1" WISP_STORAGE_PATH="$2" \
+              WISP_NEGENTROPY_MAX_SYNC_EVENTS=5 \
+              ./zig-out/bin/wisp relay > "relay-$1.log" 2>&1 &
+            local pid=$!
+            for i in $(seq 1 40); do nc -z 127.0.0.1 "$1" && { echo "$pid"; return 0; }; sleep 0.25; done
+            echo "$pid"; return 1
+          }
+          a=$(start 7783 "$RUNNER_TEMP/wisp-negb-a") || { echo "relay 7783 not ready"; stop "$a"; exit 1; }
+          b=$(start 7784 "$RUNNER_TEMP/wisp-negb-b") || { echo "relay 7784 not ready"; stop "$a"; stop "$b"; exit 1; }
+          bash tests/integration_negentropy_boundary.sh ws://127.0.0.1:7783 ws://127.0.0.1:7784 5
+          rc=$?
+          stop "$a"; stop "$b"; wait 2>/dev/null
+          exit $rc
+
       - name: Run NIP-86 management test
         run: |
           stop() {
