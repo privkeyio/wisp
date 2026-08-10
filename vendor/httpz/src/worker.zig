@@ -989,7 +989,7 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
                 .keepalive => self.keepalive_list.remove(io, conn),
                 .active => unreachable,
             }
-            self.len -= 1;
+            self.releaseSlot();
             self.http_conn_pool.release(http_conn);
             self.conn_mem_pool.destroy(conn);
         }

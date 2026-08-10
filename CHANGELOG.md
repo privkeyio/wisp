@@ -15,15 +15,15 @@ for any 0.5.15 deployment.
 
 ### Fixed
 
-- Idle connections can no longer force the relay to restart itself. The HTTP request and keepalive timeouts were left unset, so a connection that completed the TCP handshake and then sent nothing held a worker slot forever; enough of them paused the accept loop, which the watchdog read as a wedge and acted on by exiting. Connections now have a 10s request and 60s keepalive timeout. Idle WebSocket clients are unaffected, since a connection leaves both timeout lists once it upgrades (#165)
-- The watchdog no longer treats every probe failure as a wedge. A refused connection or local descriptor exhaustion is logged but never counted, it will not exit until at least one probe has succeeded, and a connection accepted since the previous probe now vetoes a stall. Together these stop a slow start, a firewalled loopback, or a busy relay from turning into a restart loop (#165)
-- The watchdog probe is now bounded end to end. It previously used a blocking `connect` with no timeout, which a full accept backlog (the very condition being detected) could park for the kernel's whole SYN-retry schedule, delaying detection and hanging shutdown. A `watchdog.timeout_ms` of `0` also meant "wait forever" and would hang the join on exit; it is now clamped to 100ms (#165)
-- The watchdog exits with `_exit` rather than the libc `exit`, which had been running atexit handlers and stdio teardown from the probe thread while the workers, the LMDB writer and the spider were still live (#165)
-- Guarded the vendored httpz connection-slot accounting against underflow, which would panic in `ReleaseSafe` and silently disable the `max_conn` cap in `ReleaseFast` (#165)
+- Idle connections can no longer force the relay to restart itself. The HTTP request and keepalive timeouts were left unset, so a connection that completed the TCP handshake and then sent nothing held a worker slot forever; enough of them paused the accept loop, which the watchdog read as a wedge and acted on by exiting. Connections now have a 10s request and 15s keepalive timeout. Idle WebSocket clients are unaffected, since a connection leaves both timeout lists once it upgrades (#166)
+- The watchdog no longer treats every probe failure as a wedge. A refused connection or local descriptor exhaustion is logged but never counted, it will not exit until at least one probe has succeeded, and a connection accepted since the previous probe now vetoes a stall. Together these stop a slow start, a firewalled loopback, or a busy relay from turning into a restart loop (#166)
+- The watchdog probe is now bounded end to end. It previously used a blocking `connect` with no timeout, which a full accept backlog (the very condition being detected) could park for the kernel's whole SYN-retry schedule, delaying detection and hanging shutdown. A `watchdog.timeout_ms` of `0` also meant "wait forever" and would hang the join on exit; it is now clamped to 100ms (#166)
+- The watchdog exits with `_exit` rather than the libc `exit`, which had been running atexit handlers and stdio teardown from the probe thread while the workers, the LMDB writer and the spider were still live (#166)
+- Guarded the vendored httpz connection-slot accounting against underflow, which would panic in `ReleaseSafe` and silently disable the `max_conn` cap in `ReleaseFast` (#166)
 
 ### Documentation
 
-- Documented the `[watchdog]` section and `limits.max_conn`, including the fact that the watchdog can terminate the process and how to turn it off. The Docker quickstarts now set a restart policy, which the watchdog assumes (#165)
+- Documented the `[watchdog]` section and `limits.max_conn`, including the fact that the watchdog can terminate the process and how to turn it off. The Docker quickstarts now set a restart policy, which the watchdog assumes (#166)
 
 ## [0.5.15] - 2026-08-10
 

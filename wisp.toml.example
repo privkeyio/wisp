@@ -32,8 +32,9 @@ max_connections = 1000
 # personal or memory-constrained relay to shed per-worker buffers and threads.
 workers = 0
 # Live connections per worker before that worker stops accepting. 0 keeps the
-# built-in default (8192). Note this is per worker, unlike max_connections
-# above: the real ceiling is max_conn * workers.
+# built-in default (8192). This is per worker, unlike max_connections above:
+# accepted connections are bounded by max_conn * the effective worker count,
+# which with workers = 0 is min(CPU, 4), not 0.
 # max_conn = 0
 max_subscriptions = 20
 max_filters = 10

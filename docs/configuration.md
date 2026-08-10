@@ -96,7 +96,7 @@ write path, since there is no fsync to amortize.
 |------|-----|------|---------|-------------|
 | `max_connections` | `WISP_MAX_CONNECTIONS` | u32 | `1000` | Maximum concurrent connections. |
 | `workers` | `WISP_WORKERS` | u16 | `0` | Epoll worker threads. `0` = auto (`min(CPU, 4)`). Set `1` on a personal or memory-constrained relay to shed per-worker buffers and threads. |
-| `max_conn` | `WISP_MAX_CONN` | u16 | `0` | Live connections **per worker** before that worker pauses accepting. `0` keeps the built-in default (8192). Distinct from `max_connections`, which is the relay-wide cap. The effective ceiling is `max_conn × workers`, so set it with the worker count in mind. |
+| `max_conn` | `WISP_MAX_CONN` | u16 | `0` | Live connections **per worker** before that worker pauses accepting. `0` keeps the built-in default (8192). Distinct from `max_connections`, which is the relay-wide cap. Accepted connections are limited by `max_conn` × the effective worker count (with `workers = 0` that is `min(CPU, 4)`, not `0`), while `max_connections` independently caps registered relay connections; whichever binds first applies. |
 | `max_subscriptions` | — | u32 | `20` | Maximum open REQ subscriptions per connection. |
 | `max_filters` | — | u32 | `10` | Maximum filters per REQ. |
 | `max_message_size` | — | u32 | `65536` | Maximum inbound WebSocket message size, in bytes. |
