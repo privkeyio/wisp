@@ -25,7 +25,7 @@ patch_file="$repo_root/vendor/httpz.patch"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-git clone --quiet --filter=blob:none --no-checkout "$UPSTREAM_REPO" "$tmp/upstream"
+git -c gc.auto=0 -c maintenance.auto=false clone --quiet --filter=blob:none --no-checkout "$UPSTREAM_REPO" "$tmp/upstream"
 git -C "$tmp/upstream" checkout --quiet "$UPSTREAM_COMMIT"
 
 got="$(git -C "$tmp/upstream" rev-parse HEAD)"
@@ -39,8 +39,9 @@ cp -a "$vendor_dir" "$tmp/vendor"
 
 # Paths are relative to $tmp so the headers are stable across machines, and the
 # trailing mtimes are stripped so the output depends only on content.
-( cd "$tmp" && diff -ruN upstream vendor || true ) \
-    | sed -E 's/\t[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9:.]+ [+-][0-9]{4}$//' > "$tmp/actual.patch"
+( cd "$tmp" && diff -ruN --exclude=.git upstream vendor || true ) \
+    | sed -E -e 's/\t[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9:.]+ [+-][0-9]{4}$//' \
+             -e "s/^diff -ruN '--exclude=\.git' /diff -ruN /" > "$tmp/actual.patch"
 
 if diff -u "$patch_file" "$tmp/actual.patch" > "$tmp/drift.diff"; then
     echo "vendor/httpz matches upstream $UPSTREAM_COMMIT plus vendor/httpz.patch"

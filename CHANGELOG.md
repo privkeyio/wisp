@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `/metrics` now also exposes httpz's own counters. `httpz_connections` counts accepted TCP connections before any handler runs, so reading it against `wisp_connections_total` (completed WebSocket upgrades) distinguishes an accept loop that is running while work backs up from one that is stuck (#168)
+
+### Fixed
+
+- Handler slowness or a saturated thread pool can no longer escalate to a watchdog restart. The watchdog's liveness veto counts accepts, and httpz counts an accept before any handler runs, so a probe that is accepted and then goes unanswered vetoes itself. That makes it strictly an accept-loop watchdog: only a relay that never accepts the probe at all can reach the exit path (#168)
+
 ## [0.5.15] - 2026-08-10
 
 ### Added

@@ -161,6 +161,13 @@ pub const App = struct {
         res.header("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
         const w = res.writer();
         try metrics.write(w, app.subs.connectionCount());
+        // httpz's own counters, chiefly httpz_connections. That one counts
+        // accepts, incremented before any handler runs, so comparing it against
+        // wisp_connections_total (completed WebSocket upgrades) is what tells an
+        // operator whether the accept loop is running but work is backing up, as
+        // opposed to the accept loop being stuck. It is the same signal the
+        // watchdog uses to decide a stalled probe is not a wedge.
+        try httpz.writeMetrics(w);
     }
 
     /// OPTIONS / — CORS preflight.

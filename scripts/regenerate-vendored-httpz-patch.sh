@@ -14,13 +14,14 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-git clone --quiet --filter=blob:none --no-checkout "$UPSTREAM_REPO" "$tmp/upstream"
+git -c gc.auto=0 -c maintenance.auto=false clone --quiet --filter=blob:none --no-checkout "$UPSTREAM_REPO" "$tmp/upstream"
 git -C "$tmp/upstream" checkout --quiet "$UPSTREAM_COMMIT"
 rm -rf "$tmp/upstream/.git"
 
 cp -a "$repo_root/vendor/httpz" "$tmp/vendor"
 
-( cd "$tmp" && diff -ruN upstream vendor || true ) \
-    | sed -E 's/\t[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9:.]+ [+-][0-9]{4}$//' > "$repo_root/vendor/httpz.patch"
+( cd "$tmp" && diff -ruN --exclude=.git upstream vendor || true ) \
+    | sed -E -e 's/\t[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9:.]+ [+-][0-9]{4}$//' \
+             -e "s/^diff -ruN '--exclude=\.git' /diff -ruN /" > "$repo_root/vendor/httpz.patch"
 
 echo "wrote vendor/httpz.patch ($(wc -l < "$repo_root/vendor/httpz.patch") lines)"
