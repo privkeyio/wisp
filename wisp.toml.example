@@ -31,6 +31,10 @@ max_connections = 1000
 # Epoll worker threads. 0 = auto (scales with CPU, capped at 4). Set to 1 on a
 # personal or memory-constrained relay to shed per-worker buffers and threads.
 workers = 0
+# Live connections per worker before that worker stops accepting. 0 keeps the
+# built-in default (8192). Note this is per worker, unlike max_connections
+# above: the real ceiling is max_conn * workers.
+# max_conn = 0
 max_subscriptions = 20
 max_filters = 10
 max_message_size = 65536

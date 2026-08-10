@@ -844,7 +844,7 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
                             // the ws connection down directly on the loop thread.
                             conn.close();
                             self.websocket.cleanupConn(hc);
-                            self.len -= 1;
+                            self.releaseSlot();
                             self.conn_mem_pool.destroy(conn);
                             continue;
                         };
@@ -876,9 +876,21 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
             while (c) |conn| {
                 c = conn.next;
                 closed_bool.* = true;
-                self.len -= 1;
+                self.releaseSlot();
                 self.conn_mem_pool.destroy(conn);
             }
+        }
+
+        // Reclaim one accept slot. Guarded because a double release would panic
+        // in ReleaseSafe (the StartOS/Docker build) and silently wrap to ~2^64 in
+        // ReleaseFast (the release build), which would disable the max_conn cap
+        // outright rather than fail loudly.
+        fn releaseSlot(self: *Self) void {
+            if (self.len == 0) {
+                log.err("connection slot accounting underflow", .{});
+                return;
+            }
+            self.len -= 1;
         }
 
         // Entry-point of our thread pool. `thread_buf` is a thread-specific buffer

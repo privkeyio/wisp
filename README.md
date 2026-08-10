@@ -16,7 +16,7 @@ A fast, lightweight [nostr](https://github.com/nostr-protocol/nostr) relay writt
 ### Docker
 
 ```sh
-docker run -d -p 7777:7777 -v wisp-data:/data ghcr.io/privkeyio/wisp --spider-admin npub1yourkey...
+docker run -d --restart unless-stopped -p 7777:7777 -v wisp-data:/data ghcr.io/privkeyio/wisp --spider-admin npub1yourkey...
 ```
 
 ### Build from source

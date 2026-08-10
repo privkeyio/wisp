@@ -410,6 +410,23 @@ test computePoolConfig {
 
 /// Owns the httpz server plus the per-IP limiter / filter / id counter that the
 /// App points into.
+// Without these, httpz defaults both to MAX_TIMEOUT and never reaps a connection
+// that completes the handshake and then says nothing. Such sockets hold a worker
+// slot forever, so a trivial slowloris walks a worker up to max_conn, accept
+// pauses, and the watchdog reads the silence as a wedge and restarts us: a
+// remote, unauthenticated kill. They bound only the HTTP phase; a connection
+// leaves both timeout lists once it upgrades, so idle WebSocket clients are
+// unaffected. Keepalive is short because a relay client either upgrades
+// immediately or fetches NIP-11 once, and every second here is a second an
+// attacker can hold a slot.
+pub const http_request_timeout_s: u32 = 10;
+pub const http_keepalive_timeout_s: u32 = 15;
+
+/// How long the relay may need to clear connections that occupy worker slots
+/// without doing anything. Nothing may conclude the relay is wedged until this
+/// has had a chance to run, or ordinary capacity pressure looks like a wedge.
+pub const self_heal_seconds: u32 = @as(u32, @max(http_request_timeout_s, http_keepalive_timeout_s)) + 10;
+
 pub const Server = struct {
     allocator: std.mem.Allocator,
     httpz_server: httpz.Server(App),
@@ -470,14 +487,18 @@ pub const Server = struct {
         // buffers are sized for small HTTP bodies, not for event payloads: the
         // per-worker large-buffer pool (large_buffer_count * max_body_size) and
         // the connection preallocation (min_conn) are the main idle-memory draws.
+        const max_conn: ?u16 = if (config.max_conn > 0) config.max_conn else null;
         self.httpz_server = try httpz.Server(App).init(io, allocator, .{
             .address = address,
             .request = .{ .max_body_size = 65536 },
+            .timeout = .{ .request = http_request_timeout_s, .keepalive = http_keepalive_timeout_s },
             .workers = .{
                 .count = pool_config.workers,
                 .large_buffer_count = 4,
-                .min_conn = 8,
-                .max_conn = if (config.max_conn > 0) config.max_conn else null,
+                // Preallocating more connections than the cap allows is wasteful,
+                // and httpz does not clamp it for us.
+                .min_conn = if (max_conn) |m| @min(8, m) else 8,
+                .max_conn = max_conn,
             },
             .thread_pool = .{ .count = pool_config.pool },
             .websocket = .{ .max_message_size = config.max_message_size },
