@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A REQ that ends early no longer reports success. `EOSE` tells a client it has the whole result set, and it was sent unconditionally, including after a write failure or a skipped event. Streaming now reports how it ended and `EOSE` is sent only on completion; a stream cut short ends with `CLOSED` and a reason, and the subscription is dropped first so the relay does not keep broadcasting to a subscription it just declared closed (#171)
+- Result streaming is bounded by a wall-clock budget as a backstop on how long a REQ can hold an LMDB read transaction open, which blocks free-page reclamation for its lifetime. Note the primary bound in the shipped build is that the socket is non-blocking, so a peer that stops reading fails its next write immediately; the budget matters if httpz is ever built in blocking mode. The earlier claim that `SO_SNDTIMEO` bounds these writes was wrong, and the misleading comment has been corrected (#171)
+
 - A malformed `WISP_*` environment variable is no longer ignored in silence. Values that fail to parse now log a warning naming the variable, its value and the value being kept. Previously `WISP_MAX_CONN=70000` (which does not fit its type) or `WISP_WATCHDOG_TIMEOUT_MS=2000ms` left the default in place with no output, so an operator could believe a limit was in force when it was not (#170)
 - Booleans are parsed case-insensitively and accept `yes`/`no` and `on`/`off`. Any unrecognized value was previously read as `false`, so `enabled = TRUE` silently turned a setting off, including the watchdog's own switch. In a config file an unrecognized boolean is now an error rather than a silent `false` (#170)
 - A bad value in the config file now reports the file, line, section, key and value instead of a bare parse error (#170)

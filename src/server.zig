@@ -253,14 +253,23 @@ pub const WsConn = struct {
         connection.setWsConn(conn);
         connection.setClientIp(ip);
 
-        // Restore the accept-time socket tuning the worker-pool migration dropped:
-        // disable Nagle, and bound how long a write to a stalled client can block.
-        // Broadcast and REQ-stream writes are synchronous, so without a send timeout
-        // a stuck client pins a worker (and, for REQ, an open LMDB read txn) until it
-        // disconnects. On timeout the write errors and the stream/broadcast unwinds.
+        // Restore the accept-time socket tuning the worker-pool migration dropped.
         const fd = conn.stream.socket.handle;
         const TCP_NODELAY = 1;
         std.posix.setsockopt(fd, std.posix.IPPROTO.TCP, TCP_NODELAY, &std.mem.toBytes(@as(i32, 1))) catch {};
+
+        // This send timeout does NOT bound writes in the build we ship, and the
+        // comment here used to claim that it did. httpz accepts with O_NONBLOCK
+        // and restores that flag when it hands a connection over to the WebSocket
+        // layer, and Linux ignores SO_SNDTIMEO on a non-blocking socket. Measured
+        // on a live upgrade: F_GETFL reports 2050, i.e. O_NONBLOCK is set.
+        //
+        // What actually stops a write to a stalled peer is that websocket.zig's
+        // writeAllIOVec does a bare `try posix.writev`, so a full send buffer
+        // surfaces as error.WouldBlock immediately rather than blocking. This is
+        // kept because it costs nothing and does apply if httpz is ever built in
+        // blocking mode (httpz_blocking), where an unbounded write would
+        // otherwise be possible.
         const send_timeout = std.posix.timeval{ .sec = 10, .usec = 0 };
         std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, &std.mem.toBytes(send_timeout)) catch {};
         // Kernel-level backstop for dead/half-open peers. In the production topology

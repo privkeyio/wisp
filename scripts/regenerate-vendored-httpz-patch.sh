@@ -16,7 +16,10 @@ trap 'rm -rf "$tmp"' EXIT
 
 git -c gc.auto=0 -c maintenance.auto=false clone --quiet --filter=blob:none --no-checkout "$UPSTREAM_REPO" "$tmp/upstream"
 git -C "$tmp/upstream" checkout --quiet "$UPSTREAM_COMMIT"
-rm -rf "$tmp/upstream/.git"
+# Deliberately not removed: git may still be writing into .git from background
+# maintenance spawned by the clone or checkout, which makes `rm -rf` fail with
+# "Directory not empty" and, under `set -e`, abort the run. The diff below
+# excludes .git instead, so its contents cannot affect the comparison anyway.
 
 cp -a "$repo_root/vendor/httpz" "$tmp/vendor"
 
