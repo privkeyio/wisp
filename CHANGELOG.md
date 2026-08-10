@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `/metrics` now also exposes httpz's own counters. `httpz_connections` counts accepted TCP connections before any handler runs, so reading it against `wisp_connections_total` (completed WebSocket upgrades) distinguishes an accept loop that is running while work backs up from one that is stuck (#168)
 
+### Documentation
+
+- Documented how to cap concurrent connections per source address. `max_connections_per_ip` is applied at the WebSocket upgrade, so a connection that never sends a request does not reach it; `docs/deployment.md` now covers enforcing this at the edge, including the fact that the rule belongs on the public port rather than the relay port, since behind a proxy every connection arrives from `127.0.0.1` (#169)
+
 ### Fixed
 
 - Handler slowness or a saturated thread pool can no longer escalate to a watchdog restart. The watchdog's liveness veto counts accepts, and httpz counts an accept before any handler runs, so a probe that is accepted and then goes unanswered vetoes itself. That makes it strictly an accept-loop watchdog: only a relay that never accepts the probe at all can reach the exit path (#168)

@@ -172,7 +172,7 @@ instead leave it stopped.
 |------|-----|------|---------|-------------|
 | `trust_proxy` | `WISP_TRUST_PROXY` | bool | `false` | Honor `X-Forwarded-For` / `X-Real-IP` for the client IP. Enable only behind a reverse proxy whose backend port is not directly reachable, or clients can spoof their IP. |
 | `trusted_proxies` | `WISP_TRUSTED_PROXIES` | csv | (empty) | IPs/prefixes of proxies whose forwarded headers are trusted. Empty with `trust_proxy=true` trusts any peer. |
-| `max_connections_per_ip` | `WISP_MAX_CONNECTIONS_PER_IP` | u32 | `10` | Per-IP concurrent connection cap. |
+| `max_connections_per_ip` | `WISP_MAX_CONNECTIONS_PER_IP` | u32 | `10` | Per-IP concurrent connection cap, applied at the WebSocket upgrade. A connection that never sends a request does not reach it; those are closed by the 10s request timeout instead. To cap concurrent TCP connections per source, see [Limiting connections per source](deployment.md#limiting-connections-per-source). |
 | `ip_whitelist` | `WISP_IP_WHITELIST` | csv | (empty) | If set, only these IPs/prefixes may connect. |
 | `ip_blacklist` | `WISP_IP_BLACKLIST` | csv | (empty) | These IPs/prefixes are refused. |
 
