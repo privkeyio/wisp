@@ -161,6 +161,15 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("Listening on {s}:{d}", .{ config.host, config.port });
     std.log.info("Storage: {s} (sync={s})", .{ config.storage_path, @tagName(sync_mode) });
 
+    // Trusting forwarded headers from every peer means any client can choose the
+    // IP that keys the blacklist and the per-IP connection and rate limits, which
+    // defeats all of them. That is only safe when the relay port is unreachable
+    // except through the proxy, so say so loudly rather than leaving it implied
+    // by the config comments.
+    if (config.trust_proxy and config.trusted_proxies.len == 0) {
+        std.log.warn("trust_proxy is on with no trusted_proxies: X-Forwarded-For is honored from any peer, so per-IP limits and IP deny lists can be bypassed by spoofing it. Set trusted_proxies, or make sure the relay port is reachable only from the proxy.", .{});
+    }
+
     var lmdb = try Lmdb.init(allocator, config.storage_path, config.storage_map_size_mb, sync_mode);
     defer lmdb.deinit();
 

@@ -1,9 +1,57 @@
 const std = @import("std");
 const nostr = @import("nostr.zig");
 
+const log = std.log.scoped(.config);
+
 fn getenv(name: [*:0]const u8) ?[]const u8 {
     const v = std.c.getenv(name) orelse return null;
     return std.mem.sliceTo(v, 0);
+}
+
+/// Accepted spellings of a boolean, case-insensitive. Returns null for anything
+/// else so callers can decide between failing and warning, rather than silently
+/// reading an unrecognized value as false.
+fn parseBool(value: []const u8) ?bool {
+    const truthy = [_][]const u8{ "true", "1", "yes", "on" };
+    const falsy = [_][]const u8{ "false", "0", "no", "off" };
+    for (truthy) |t| if (std.ascii.eqlIgnoreCase(value, t)) return true;
+    for (falsy) |f| if (std.ascii.eqlIgnoreCase(value, f)) return false;
+    return null;
+}
+
+// A malformed environment variable keeps the current value rather than aborting:
+// these usually come from an orchestrator, where refusing to boot turns a typo
+// into a crash loop. It must never pass silently though, since the knobs being
+// set here are limits and a self-termination switch, and an operator who
+// mistypes one would otherwise believe a cap is in force when it is not. The
+// config file is stricter: a bad value there fails the load.
+fn envInt(comptime T: type, name: []const u8, value: []const u8, current: T) T {
+    return std.fmt.parseInt(T, value, 10) catch {
+        var buf: [64]u8 = undefined;
+        log.warn("{s}=\"{s}\" is not a valid {s}; keeping {d}", .{ name, safeValue(value, &buf), @typeName(T), current });
+        return current;
+    };
+}
+
+fn envBool(name: []const u8, value: []const u8, current: bool) bool {
+    return parseBool(value) orelse {
+        var buf: [64]u8 = undefined;
+        log.warn("{s}=\"{s}\" is not a valid boolean; keeping {}", .{ name, safeValue(value, &buf), current });
+        return current;
+    };
+}
+
+// Config values are echoed back when they fail to parse, and an environment
+// variable can hold anything, including newlines and terminal escapes. Scrub to
+// printable ASCII and truncate, so a bad value cannot forge a log record or
+// repaint a terminal. Mirrors safeIp() in server.zig, which does the same for
+// forwarded-header IPs.
+fn safeValue(value: []const u8, buf: []u8) []const u8 {
+    const len = @min(value.len, buf.len);
+    for (value[0..len], buf[0..len]) |c, *out| {
+        out.* = if (std.ascii.isPrint(c)) c else '?';
+    }
+    return buf[0..len];
 }
 
 pub const Config = struct {
@@ -150,6 +198,10 @@ pub const Config = struct {
         var config = defaults();
         config._allocator = allocator;
         config._allocated = .empty;
+        // Every string duped for an earlier line is otherwise leaked when a later
+        // one fails to parse. The caller cannot clean up: its `defer config.deinit()`
+        // is only registered once this returns successfully.
+        errdefer config.deinit();
 
         const io = nostr.io.io();
         const content = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024));
@@ -157,8 +209,10 @@ pub const Config = struct {
 
         var section: []const u8 = "";
         var lines = std.mem.splitScalar(u8, content, '\n');
+        var line_no: usize = 0;
 
         while (lines.next()) |line| {
+            line_no += 1;
             const trimmed = std.mem.trim(u8, line, " \t\r");
             if (trimmed.len == 0 or trimmed[0] == '#') continue;
 
@@ -183,7 +237,26 @@ pub const Config = struct {
                 value = value[1 .. value.len - 1];
             }
 
-            try config.setValue(section, key, value);
+            // A bad value in the file aborts the load, but say which one: the bare
+            // error.InvalidCharacter this used to surface gave an operator nothing
+            // to go on in a file with dozens of keys.
+            config.setValue(section, key, value) catch |err| {
+                // Every field here comes from the file or the command line, and
+                // all of them can carry escapes, not just the value.
+                var path_buf: [256]u8 = undefined;
+                var section_buf: [64]u8 = undefined;
+                var key_buf: [64]u8 = undefined;
+                var value_buf: [64]u8 = undefined;
+                log.err("{s}:{d}: [{s}] {s} = \"{s}\": {t}", .{
+                    safeValue(path, &path_buf),
+                    line_no,
+                    safeValue(section, &section_buf),
+                    safeValue(key, &key_buf),
+                    safeValue(value, &value_buf),
+                    err,
+                });
+                return err;
+            };
         }
 
         return config;
@@ -256,15 +329,15 @@ pub const Config = struct {
             }
         } else if (std.mem.eql(u8, section, "auth")) {
             if (std.mem.eql(u8, key, "required")) {
-                self.auth_required = std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1");
+                self.auth_required = parseBool(value) orelse return error.InvalidBoolean;
             } else if (std.mem.eql(u8, key, "to_write")) {
-                self.auth_to_write = std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1");
+                self.auth_to_write = parseBool(value) orelse return error.InvalidBoolean;
             } else if (std.mem.eql(u8, key, "relay_url")) {
                 self.relay_url = try self.allocString(value);
             }
         } else if (std.mem.eql(u8, section, "security")) {
             if (std.mem.eql(u8, key, "trust_proxy")) {
-                self.trust_proxy = std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1");
+                self.trust_proxy = parseBool(value) orelse return error.InvalidBoolean;
             } else if (std.mem.eql(u8, key, "trusted_proxies")) {
                 self.trusted_proxies = try self.allocString(value);
             } else if (std.mem.eql(u8, key, "max_connections_per_ip")) {
@@ -276,7 +349,7 @@ pub const Config = struct {
             }
         } else if (std.mem.eql(u8, section, "spider")) {
             if (std.mem.eql(u8, key, "enabled")) {
-                self.spider_enabled = std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1");
+                self.spider_enabled = parseBool(value) orelse return error.InvalidBoolean;
             } else if (std.mem.eql(u8, key, "relays")) {
                 self.spider_relays = try self.allocString(value);
             } else if (std.mem.eql(u8, key, "admin")) {
@@ -288,7 +361,7 @@ pub const Config = struct {
             }
         } else if (std.mem.eql(u8, section, "negentropy")) {
             if (std.mem.eql(u8, key, "enabled")) {
-                self.negentropy_enabled = std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1");
+                self.negentropy_enabled = parseBool(value) orelse return error.InvalidBoolean;
             } else if (std.mem.eql(u8, key, "max_sync_events")) {
                 self.negentropy_max_sync_events = try std.fmt.parseInt(u32, value, 10);
             } else if (std.mem.eql(u8, key, "max_sessions")) {
@@ -300,7 +373,7 @@ pub const Config = struct {
             }
         } else if (std.mem.eql(u8, section, "watchdog")) {
             if (std.mem.eql(u8, key, "enabled")) {
-                self.watchdog_enabled = std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1");
+                self.watchdog_enabled = parseBool(value) orelse return error.InvalidBoolean;
             } else if (std.mem.eql(u8, key, "interval_seconds")) {
                 self.watchdog_interval_seconds = try std.fmt.parseInt(u32, value, 10);
             } else if (std.mem.eql(u8, key, "timeout_ms")) {
@@ -322,83 +395,39 @@ pub const Config = struct {
 
     pub fn loadEnv(self: *Config) void {
         if (getenv("WISP_HOST")) |v| self.host = v;
-        if (getenv("WISP_PORT")) |v| {
-            self.port = std.fmt.parseInt(u16, v, 10) catch self.port;
-        }
+        if (getenv("WISP_PORT")) |v| self.port = envInt(u16, "WISP_PORT", v, self.port);
         if (getenv("WISP_RELAY_NAME")) |v| self.name = v;
         if (getenv("WISP_STORAGE_PATH")) |v| self.storage_path = v;
         if (getenv("WISP_STORAGE_SYNC")) |v| self.storage_sync = v;
-        if (getenv("WISP_MAX_CONNECTIONS")) |v| {
-            self.max_connections = std.fmt.parseInt(u32, v, 10) catch self.max_connections;
-        }
-        if (getenv("WISP_AUTH_REQUIRED")) |v| {
-            self.auth_required = std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "1");
-        }
-        if (getenv("WISP_AUTH_TO_WRITE")) |v| {
-            self.auth_to_write = std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "1");
-        }
+        if (getenv("WISP_MAX_CONNECTIONS")) |v| self.max_connections = envInt(u32, "WISP_MAX_CONNECTIONS", v, self.max_connections);
+        if (getenv("WISP_AUTH_REQUIRED")) |v| self.auth_required = envBool("WISP_AUTH_REQUIRED", v, self.auth_required);
+        if (getenv("WISP_AUTH_TO_WRITE")) |v| self.auth_to_write = envBool("WISP_AUTH_TO_WRITE", v, self.auth_to_write);
         if (getenv("WISP_RELAY_URL")) |v| self.relay_url = v;
-        if (getenv("WISP_TRUST_PROXY")) |v| {
-            self.trust_proxy = std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "1");
-        }
+        if (getenv("WISP_TRUST_PROXY")) |v| self.trust_proxy = envBool("WISP_TRUST_PROXY", v, self.trust_proxy);
         if (getenv("WISP_TRUSTED_PROXIES")) |v| self.trusted_proxies = v;
-        if (getenv("WISP_MAX_CONNECTIONS_PER_IP")) |v| {
-            self.max_connections_per_ip = std.fmt.parseInt(u32, v, 10) catch self.max_connections_per_ip;
-        }
-        if (getenv("WISP_WORKERS")) |v| {
-            self.workers = std.fmt.parseInt(u16, v, 10) catch self.workers;
-        }
-        if (getenv("WISP_MAX_CONN")) |v| {
-            self.max_conn = std.fmt.parseInt(u16, v, 10) catch self.max_conn;
-        }
-        if (getenv("WISP_EVENTS_PER_MINUTE")) |v| {
-            self.events_per_minute = std.fmt.parseInt(u32, v, 10) catch self.events_per_minute;
-        }
-        if (getenv("WISP_QUERIES_PER_MINUTE")) |v| {
-            self.queries_per_minute = std.fmt.parseInt(u32, v, 10) catch self.queries_per_minute;
-        }
-        if (getenv("WISP_QUERY_SCAN_MULTIPLIER")) |v| {
-            self.query_scan_multiplier = std.fmt.parseInt(u32, v, 10) catch self.query_scan_multiplier;
-        }
-        if (getenv("WISP_IDLE_SECONDS")) |v| {
-            self.idle_seconds = std.fmt.parseInt(u32, v, 10) catch self.idle_seconds;
-        }
+        if (getenv("WISP_MAX_CONNECTIONS_PER_IP")) |v| self.max_connections_per_ip = envInt(u32, "WISP_MAX_CONNECTIONS_PER_IP", v, self.max_connections_per_ip);
+        if (getenv("WISP_WORKERS")) |v| self.workers = envInt(u16, "WISP_WORKERS", v, self.workers);
+        if (getenv("WISP_MAX_CONN")) |v| self.max_conn = envInt(u16, "WISP_MAX_CONN", v, self.max_conn);
+        if (getenv("WISP_EVENTS_PER_MINUTE")) |v| self.events_per_minute = envInt(u32, "WISP_EVENTS_PER_MINUTE", v, self.events_per_minute);
+        if (getenv("WISP_QUERIES_PER_MINUTE")) |v| self.queries_per_minute = envInt(u32, "WISP_QUERIES_PER_MINUTE", v, self.queries_per_minute);
+        if (getenv("WISP_QUERY_SCAN_MULTIPLIER")) |v| self.query_scan_multiplier = envInt(u32, "WISP_QUERY_SCAN_MULTIPLIER", v, self.query_scan_multiplier);
+        if (getenv("WISP_IDLE_SECONDS")) |v| self.idle_seconds = envInt(u32, "WISP_IDLE_SECONDS", v, self.idle_seconds);
         if (getenv("WISP_IP_WHITELIST")) |v| self.ip_whitelist = v;
         if (getenv("WISP_IP_BLACKLIST")) |v| self.ip_blacklist = v;
-        if (getenv("WISP_SPIDER_ENABLED")) |v| {
-            self.spider_enabled = std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "1");
-        }
+        if (getenv("WISP_SPIDER_ENABLED")) |v| self.spider_enabled = envBool("WISP_SPIDER_ENABLED", v, self.spider_enabled);
         if (getenv("WISP_SPIDER_RELAYS")) |v| self.spider_relays = v;
         if (getenv("WISP_SPIDER_ADMIN")) |v| self.spider_admin = v;
         if (getenv("WISP_SPIDER_PUBKEYS")) |v| self.spider_pubkeys = v;
-        if (getenv("WISP_SPIDER_SYNC_INTERVAL")) |v| {
-            self.spider_sync_interval = std.fmt.parseInt(u32, v, 10) catch self.spider_sync_interval;
-        }
-        if (getenv("WISP_NEGENTROPY_ENABLED")) |v| {
-            self.negentropy_enabled = std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "1");
-        }
-        if (getenv("WISP_NEGENTROPY_MAX_SYNC_EVENTS")) |v| {
-            self.negentropy_max_sync_events = std.fmt.parseInt(u32, v, 10) catch self.negentropy_max_sync_events;
-        }
-        if (getenv("WISP_NEGENTROPY_MAX_SESSIONS")) |v| {
-            self.max_neg_sessions = std.fmt.parseInt(u32, v, 10) catch self.max_neg_sessions;
-        }
-        if (getenv("WISP_MIN_POW_DIFFICULTY")) |v| {
-            self.min_pow_difficulty = std.fmt.parseInt(u8, v, 10) catch self.min_pow_difficulty;
-        }
+        if (getenv("WISP_SPIDER_SYNC_INTERVAL")) |v| self.spider_sync_interval = envInt(u32, "WISP_SPIDER_SYNC_INTERVAL", v, self.spider_sync_interval);
+        if (getenv("WISP_NEGENTROPY_ENABLED")) |v| self.negentropy_enabled = envBool("WISP_NEGENTROPY_ENABLED", v, self.negentropy_enabled);
+        if (getenv("WISP_NEGENTROPY_MAX_SYNC_EVENTS")) |v| self.negentropy_max_sync_events = envInt(u32, "WISP_NEGENTROPY_MAX_SYNC_EVENTS", v, self.negentropy_max_sync_events);
+        if (getenv("WISP_NEGENTROPY_MAX_SESSIONS")) |v| self.max_neg_sessions = envInt(u32, "WISP_NEGENTROPY_MAX_SESSIONS", v, self.max_neg_sessions);
+        if (getenv("WISP_MIN_POW_DIFFICULTY")) |v| self.min_pow_difficulty = envInt(u8, "WISP_MIN_POW_DIFFICULTY", v, self.min_pow_difficulty);
         if (getenv("WISP_ADMIN_PUBKEYS")) |v| self.admin_pubkeys = v;
-        if (getenv("WISP_WATCHDOG_ENABLED")) |v| {
-            self.watchdog_enabled = std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "1");
-        }
-        if (getenv("WISP_WATCHDOG_INTERVAL_SECONDS")) |v| {
-            self.watchdog_interval_seconds = std.fmt.parseInt(u32, v, 10) catch self.watchdog_interval_seconds;
-        }
-        if (getenv("WISP_WATCHDOG_TIMEOUT_MS")) |v| {
-            self.watchdog_timeout_ms = std.fmt.parseInt(u32, v, 10) catch self.watchdog_timeout_ms;
-        }
-        if (getenv("WISP_WATCHDOG_FAILURES")) |v| {
-            self.watchdog_failures = std.fmt.parseInt(u32, v, 10) catch self.watchdog_failures;
-        }
+        if (getenv("WISP_WATCHDOG_ENABLED")) |v| self.watchdog_enabled = envBool("WISP_WATCHDOG_ENABLED", v, self.watchdog_enabled);
+        if (getenv("WISP_WATCHDOG_INTERVAL_SECONDS")) |v| self.watchdog_interval_seconds = envInt(u32, "WISP_WATCHDOG_INTERVAL_SECONDS", v, self.watchdog_interval_seconds);
+        if (getenv("WISP_WATCHDOG_TIMEOUT_MS")) |v| self.watchdog_timeout_ms = envInt(u32, "WISP_WATCHDOG_TIMEOUT_MS", v, self.watchdog_timeout_ms);
+        if (getenv("WISP_WATCHDOG_FAILURES")) |v| self.watchdog_failures = envInt(u32, "WISP_WATCHDOG_FAILURES", v, self.watchdog_failures);
     }
 
     pub fn deinit(self: *Config) void {
@@ -410,3 +439,70 @@ pub const Config = struct {
         }
     }
 };
+
+test parseBool {
+    for ([_][]const u8{ "true", "TRUE", "True", "1", "yes", "YES", "on", "ON" }) |v| {
+        try std.testing.expectEqual(true, parseBool(v).?);
+    }
+    for ([_][]const u8{ "false", "FALSE", "False", "0", "no", "NO", "off", "OFF" }) |v| {
+        try std.testing.expectEqual(false, parseBool(v).?);
+    }
+    // Unrecognized values are rejected rather than read as false. The old
+    // `eql("true") or eql("1")` form silently turned `TRUE` into false, which for
+    // watchdog.enabled meant quietly disabling a self-termination switch the
+    // operator believed they had turned on.
+    for ([_][]const u8{ "", "maybe", "tru", "2", "-1", "t", "y", "enabled" }) |v| {
+        try std.testing.expectEqual(@as(?bool, null), parseBool(v));
+    }
+}
+
+test "envInt: a malformed value keeps the current one" {
+    // Out of range for the target type, which is the wisp-qj3 case:
+    // WISP_MAX_CONN=70000 does not fit u16.
+    try std.testing.expectEqual(@as(u16, 4096), envInt(u16, "WISP_MAX_CONN", "70000", 4096));
+    // Units accidentally included, the other common operator slip.
+    try std.testing.expectEqual(@as(u32, 2000), envInt(u32, "WISP_WATCHDOG_TIMEOUT_MS", "2000ms", 2000));
+    try std.testing.expectEqual(@as(u32, 7), envInt(u32, "X", "", 7));
+    // A valid value is still applied.
+    try std.testing.expectEqual(@as(u16, 12), envInt(u16, "WISP_MAX_CONN", "12", 4096));
+}
+
+test "envBool: a malformed value keeps the current one" {
+    try std.testing.expectEqual(true, envBool("WISP_WATCHDOG_ENABLED", "maybe", true));
+    try std.testing.expectEqual(false, envBool("WISP_WATCHDOG_ENABLED", "", false));
+    // Case no longer silently flips a knob off.
+    try std.testing.expectEqual(true, envBool("WISP_WATCHDOG_ENABLED", "TRUE", false));
+    try std.testing.expectEqual(false, envBool("WISP_WATCHDOG_ENABLED", "Off", true));
+}
+
+test "setValue: a malformed boolean in the config file fails the load" {
+    var config = Config.defaults();
+    // The file path is strict, unlike the environment: it is authored
+    // deliberately, so a value that cannot be read is an error rather than a
+    // silently ignored line.
+    try std.testing.expectError(error.InvalidBoolean, config.setValue("watchdog", "enabled", "maybe"));
+    try std.testing.expectError(error.InvalidCharacter, config.setValue("watchdog", "timeout_ms", "2000ms"));
+
+    // Valid spellings still load, including ones the old form rejected.
+    try config.setValue("watchdog", "enabled", "OFF");
+    try std.testing.expectEqual(false, config.watchdog_enabled);
+    try config.setValue("watchdog", "enabled", "yes");
+    try std.testing.expectEqual(true, config.watchdog_enabled);
+}
+
+test safeValue {
+    var buf: [64]u8 = undefined;
+    // A value is echoed back when it fails to parse, so control characters must
+    // not survive into the log: a newline would let a bad value forge a second
+    // log record, and an escape could repaint the operator's terminal.
+    try std.testing.expectEqualStrings("ok", safeValue("ok", &buf));
+    try std.testing.expectEqualStrings("a?b", safeValue("a\nb", &buf));
+    try std.testing.expectEqualStrings("??[31m", safeValue("\r\x1b[31m", &buf));
+    try std.testing.expectEqualStrings("a?b", safeValue("a\x00b", &buf));
+    // Long values are truncated so one variable cannot flood the log.
+    const long = "x" ** 200;
+    try std.testing.expectEqual(@as(usize, 64), safeValue(long, &buf).len);
+    // The buffer sets the cap, so a larger one keeps more of a long field.
+    var wide: [256]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 200), safeValue(long, &wide).len);
+}

@@ -40,6 +40,15 @@ hex), unlike the file/env spider settings which expect raw hex.
 Each setting lists its TOML key (under its `[section]`), its environment variable, type, and
 default. Settings with no environment variable are configurable only via the TOML file.
 
+Booleans accept `true`/`false`, `1`/`0`, `yes`/`no` and `on`/`off`, case-insensitively.
+
+Invalid values are treated differently depending on where they come from. In the TOML file
+they fail the load, naming the file, line, section and key, since the file is authored
+deliberately. In an environment variable they log a warning and the previous value is kept,
+because these usually come from an orchestrator where refusing to boot turns a typo into a
+crash loop. Either way the value is never discarded silently, so check the log after changing
+a limit if you want to be sure it took effect.
+
 ### `[server]`
 
 | TOML | Env | Type | Default | Description |

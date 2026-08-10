@@ -11,6 +11,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `/metrics` now also exposes httpz's own counters. `httpz_connections` counts accepted TCP connections before any handler runs, so reading it against `wisp_connections_total` (completed WebSocket upgrades) distinguishes an accept loop that is running while work backs up from one that is stuck (#168)
 
+### Fixed
+
+- A malformed `WISP_*` environment variable is no longer ignored in silence. Values that fail to parse now log a warning naming the variable, its value and the value being kept. Previously `WISP_MAX_CONN=70000` (which does not fit its type) or `WISP_WATCHDOG_TIMEOUT_MS=2000ms` left the default in place with no output, so an operator could believe a limit was in force when it was not (#170)
+- Booleans are parsed case-insensitively and accept `yes`/`no` and `on`/`off`. Any unrecognized value was previously read as `false`, so `enabled = TRUE` silently turned a setting off, including the watchdog's own switch. In a config file an unrecognized boolean is now an error rather than a silent `false` (#170)
+- A bad value in the config file now reports the file, line, section, key and value instead of a bare parse error (#170)
+- Warn at startup when `trust_proxy` is enabled with an empty `trusted_proxies`. In that combination `X-Forwarded-For` is honored from any peer, so the IP that keys the deny list and the per-IP connection and rate limits is attacker-chosen (#170)
+
+### Upgrade notes
+
+- Two settings can change meaning on upgrade, both because a value that was previously misread as `false` is now read correctly. **Check `trust_proxy` and `spider.enabled` before upgrading if either is spelled anything other than lowercase `true`/`false`.** For `trust_proxy` this is the one case where the fix turns something *on*: a relay that had been fail-closed only because `TRUE` was misparsed will now honor forwarded headers. The same applies to an empty `WISP_TRUST_PROXY=`, which used to override a file value to `false` and is now treated as unset. The new startup warning fires if the result is the unsafe combination.
+- An unrecognized boolean in the config file now fails the load rather than silently meaning `false`. Under a supervisor (`Restart=on-failure`, `--restart unless-stopped`) that is a restart loop until the file is corrected, so validate the config before rolling out. The error names the file, line, section and key. Only the six boolean keys are affected; unknown keys and sections are still ignored, and integer keys already behaved this way.
+
 ### Documentation
 
 - Documented how to cap concurrent connections per source address. `max_connections_per_ip` is applied at the WebSocket upgrade, so a connection that never sends a request does not reach it; `docs/deployment.md` now covers enforcing this at the edge, including the fact that the rule belongs on the public port rather than the relay port, since behind a proxy every connection arrives from `127.0.0.1` (#169)
