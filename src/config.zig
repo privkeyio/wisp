@@ -27,16 +27,31 @@ fn parseBool(value: []const u8) ?bool {
 // config file is stricter: a bad value there fails the load.
 fn envInt(comptime T: type, name: []const u8, value: []const u8, current: T) T {
     return std.fmt.parseInt(T, value, 10) catch {
-        log.warn("{s}=\"{s}\" is not a valid {s}; keeping {d}", .{ name, value, @typeName(T), current });
+        var buf: [64]u8 = undefined;
+        log.warn("{s}=\"{s}\" is not a valid {s}; keeping {d}", .{ name, safeValue(value, &buf), @typeName(T), current });
         return current;
     };
 }
 
 fn envBool(name: []const u8, value: []const u8, current: bool) bool {
     return parseBool(value) orelse {
-        log.warn("{s}=\"{s}\" is not a valid boolean; keeping {}", .{ name, value, current });
+        var buf: [64]u8 = undefined;
+        log.warn("{s}=\"{s}\" is not a valid boolean; keeping {}", .{ name, safeValue(value, &buf), current });
         return current;
     };
+}
+
+// Config values are echoed back when they fail to parse, and an environment
+// variable can hold anything, including newlines and terminal escapes. Scrub to
+// printable ASCII and truncate, so a bad value cannot forge a log record or
+// repaint a terminal. Mirrors safeIp() in server.zig, which does the same for
+// forwarded-header IPs.
+fn safeValue(value: []const u8, buf: *[64]u8) []const u8 {
+    const len = @min(value.len, buf.len);
+    for (value[0..len], buf[0..len]) |c, *out| {
+        out.* = if (std.ascii.isPrint(c)) c else '?';
+    }
+    return buf[0..len];
 }
 
 pub const Config = struct {
@@ -183,6 +198,10 @@ pub const Config = struct {
         var config = defaults();
         config._allocator = allocator;
         config._allocated = .empty;
+        // Every string duped for an earlier line is otherwise leaked when a later
+        // one fails to parse. The caller cannot clean up: its `defer config.deinit()`
+        // is only registered once this returns successfully.
+        errdefer config.deinit();
 
         const io = nostr.io.io();
         const content = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024));
@@ -222,7 +241,8 @@ pub const Config = struct {
             // error.InvalidCharacter this used to surface gave an operator nothing
             // to go on in a file with dozens of keys.
             config.setValue(section, key, value) catch |err| {
-                log.err("{s}:{d}: [{s}] {s} = \"{s}\": {t}", .{ path, line_no, section, key, value, err });
+                var buf: [64]u8 = undefined;
+                log.err("{s}:{d}: [{s}] {s} = \"{s}\": {t}", .{ path, line_no, section, key, safeValue(value, &buf), err });
                 return err;
             };
         }
@@ -456,4 +476,18 @@ test "setValue: a malformed boolean in the config file fails the load" {
     try std.testing.expectEqual(false, config.watchdog_enabled);
     try config.setValue("watchdog", "enabled", "yes");
     try std.testing.expectEqual(true, config.watchdog_enabled);
+}
+
+test safeValue {
+    var buf: [64]u8 = undefined;
+    // A value is echoed back when it fails to parse, so control characters must
+    // not survive into the log: a newline would let a bad value forge a second
+    // log record, and an escape could repaint the operator's terminal.
+    try std.testing.expectEqualStrings("ok", safeValue("ok", &buf));
+    try std.testing.expectEqualStrings("a?b", safeValue("a\nb", &buf));
+    try std.testing.expectEqualStrings("??[31m", safeValue("\r\x1b[31m", &buf));
+    try std.testing.expectEqualStrings("a?b", safeValue("a\x00b", &buf));
+    // Long values are truncated so one variable cannot flood the log.
+    const long = "x" ** 200;
+    try std.testing.expectEqual(@as(usize, 64), safeValue(long, &buf).len);
 }
