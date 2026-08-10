@@ -33,7 +33,10 @@ if [ "$got" != "$UPSTREAM_COMMIT" ]; then
     echo "upstream checkout resolved to $got, expected $UPSTREAM_COMMIT" >&2
     exit 1
 fi
-rm -rf "$tmp/upstream/.git"
+# Deliberately not removed: git may still be writing into .git from background
+# maintenance spawned by the clone or checkout, which makes `rm -rf` fail with
+# "Directory not empty" and, under `set -e`, abort the run. The diff below
+# excludes .git instead, so its contents cannot affect the comparison anyway.
 
 cp -a "$vendor_dir" "$tmp/vendor"
 
