@@ -814,7 +814,13 @@ pub const Handler = struct {
             // path is network-reachable, so reconciliation stays DoS-safe. If the
             // scan cap truncates enumeration it is detected below and surfaced as
             // NEG-ERR rather than silently under-enumerating.
-            var iter = self.store.query(&[_]nostr.Filter{filter}, self.config.negentropy_max_sync_events) catch
+            // Ask for one more than the cap. The iterator stops once it has
+            // returned `limit` events, so querying for exactly the cap makes a
+            // set of exactly negentropy_max_sync_events indistinguishable from
+            // one that exceeds it, and the complete set is rejected. Seeing the
+            // extra event is the only way to tell "at the cap" from "over" it.
+            const enumeration_limit = self.config.negentropy_max_sync_events +| 1;
+            var iter = self.store.query(&[_]nostr.Filter{filter}, enumeration_limit) catch
                 break :blk .query_failed;
             defer iter.deinit();
 
@@ -830,7 +836,9 @@ pub const Handler = struct {
                 defer event.deinit();
                 session.storage.insert(@intCast(event.createdAt()), event.id()) catch continue;
                 count += 1;
-                if (count >= self.config.negentropy_max_sync_events) break :blk .too_many;
+                // Strictly greater: reaching the cap exactly is a set the relay
+                // can reconcile, only exceeding it is not.
+                if (count > self.config.negentropy_max_sync_events) break :blk .too_many;
             }
 
             // The scan cap may stop enumeration before all matching stored events

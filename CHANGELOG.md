@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A negentropy match set of exactly `negentropy_max_sync_events` is no longer rejected as too large. The serving side asked the store for exactly the cap, and the iterator stops once it has returned that many events, so a complete set at the cap was indistinguishable from one exceeding it and got `NEG-ERR blocked: too many events`. It now asks for one more event, which is what tells the two apart (#174)
+
 - An `ip_whitelist`, `ip_blacklist` or `trusted_proxies` entry that can never match is now rejected at load with a warning naming it, instead of being stored and silently matching nothing. CIDR (`10.0.0.0/8`) and globs (`192.168.*`) are the usual way this happened: both look correct, neither is supported, and on a deny list the result was fail-open, with the operator believing a range was blocked when it was not. On `trusted_proxies` it failed the other way, collapsing every client behind the proxy into one rate-limit bucket (#173)
 
 - A failed storage read is no longer reported as a finished result set. An iterator error was swallowed as "no more events" on all three query paths, so REQ sent EOSE over a partial set, NEG-OPEN sealed and reconciled one (making the relay report events as missing that it actually holds), and COUNT answered with a number a failed read had lowered. Each now reports the failure instead (#172)
