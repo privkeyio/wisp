@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A failed storage read is no longer reported as a finished result set. An iterator error was swallowed as "no more events" on all three query paths, so REQ sent EOSE over a partial set, NEG-OPEN sealed and reconciled one (making the relay report events as missing that it actually holds), and COUNT answered with a number a failed read had lowered. Each now reports the failure instead (#172)
+- NEG-OPEN no longer holds an LMDB read transaction open while replying. Enumeration ran inside a transaction scoped to the whole function, so the reconciliation reply, a 128 KiB frame written to a client that may be slow to take it, went out with the transaction still live, and LMDB cannot reclaim a page freed after a transaction started for as long as it lives. Enumeration is now scoped so the transaction is released before anything is written. The error replies on this path were affected the same way (#172)
+
 - A REQ that ends early no longer reports success. `EOSE` tells a client it has the whole result set, and it was sent unconditionally, including after a write failure or a skipped event. Streaming now reports how it ended and `EOSE` is sent only on completion; a stream cut short ends with `CLOSED` and a reason, and the subscription is dropped first so the relay does not keep broadcasting to a subscription it just declared closed (#171)
 - Result streaming is bounded by a wall-clock budget as a backstop on how long a REQ can hold an LMDB read transaction open, which blocks free-page reclamation for its lifetime. Note the primary bound in the shipped build is that the socket is non-blocking, so a peer that stops reading fails its next write immediately; the budget matters if httpz is ever built in blocking mode. The earlier claim that `SO_SNDTIMEO` bounds these writes was wrong, and the misleading comment has been corrected (#171)
 
