@@ -126,10 +126,20 @@ pub const Spider = struct {
         log.info("Spider stopping...", .{});
         self.running.store(false, .release);
 
-        for (self.relays.values()) |*conn| {
-            conn.closeClient();
-        }
-
+        // Threads are stopped by the running flag, not by interrupting their
+        // sockets. After a relay is connected they check shouldRun() around every
+        // step and read with a 1s timeout, so they observe the flag within about
+        // a second. A thread still inside websocket.Client.init is the exception:
+        // connect, TLS and the handshake are each bounded to 10s upstream, and
+        // DNS resolution is not bounded at all, so a stop racing a connection
+        // attempt can wait that long before the thread returns.
+        //
+        // There used to be a closeClient() call here that did nothing, backed by
+        // an active_client pointer that was stored and cleared but never read.
+        // Both are gone: an interrupt that does not interrupt is worse than none,
+        // because it makes this loop look like it bounds the join when it does
+        // not. Interrupting the connect window needs the socket from inside
+        // init(), which is exactly what is not available until init() returns.
         for (self.threads.items) |thread| {
             thread.join();
         }
@@ -411,9 +421,6 @@ pub const Spider = struct {
             log.err("{s}: Host too long", .{relay_url});
             return false;
         };
-
-        conn.active_client = &client;
-        defer conn.active_client = null;
 
         client.handshake(parsed.path, .{
             .headers = host_header,
@@ -1021,7 +1028,6 @@ const RelayConn = struct {
     rate_limit_until: i64 = 0,
     rate_limit_backoff_ms: u64 = RATE_LIMIT_BACKOFF_MS,
     negentropy_supported: bool = true,
-    active_client: ?*websocket.Client = null,
     // Newly-stored events across the entire most recent session (negentropy
     // first-sync, catch-up, and the live read loop combined). A session that
     // delivered events counts as productive even if it was short, so the
@@ -1033,10 +1039,6 @@ const RelayConn = struct {
 
     fn init(url: []const u8) RelayConn {
         return .{ .url = url };
-    }
-
-    fn closeClient(self: *RelayConn) void {
-        _ = self;
     }
 
     fn applyRateLimit(self: *RelayConn) void {
