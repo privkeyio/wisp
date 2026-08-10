@@ -22,15 +22,38 @@ fn isKindOnlyQuery(f: *const nostr.Filter) bool {
     return true;
 }
 
-fn streamQueryResults(conn: *Connection, sub_id: []const u8, iter: anytype) void {
+// A REQ streams straight out of an open LMDB read transaction, and LMDB cannot
+// reclaim any page freed after that transaction started while it is still alive.
+// The per-socket send timeout bounds a single writev, but writeAllIOVec retries
+// on partial writes and each retry gets the full timeout again, so a client that
+// accepts a trickle never errors and can hold the transaction open for as long
+// as it likes, growing the map for the whole time.
+//
+// This budget is the backstop that turns "as long as it likes" into a bound. It
+// is deliberately generous: a client pulling query_limit_max events over a slow
+// link should finish well inside it, so exceeding it means the peer is not
+// keeping up rather than merely being remote.
+const stream_budget_seconds: i64 = 120;
+
+/// How a result stream ended. The caller must not send EOSE unless it ran to
+/// completion, since EOSE tells the client it has the whole set.
+const StreamOutcome = enum { complete, write_failed, timed_out };
+
+// `conn` is generic so the budget path can be exercised without a live
+// socket: a real *Connection returns error.NotConnected when it has no
+// websocket, which would mask every outcome as .write_failed.
+fn streamQueryResults(conn: anytype, sub_id: []const u8, iter: anytype, budget_seconds: i64) StreamOutcome {
+    const started = nostr.io.timestamp();
     while (iter.next() catch null) |json| {
         var buf: [65536]u8 = undefined;
         const event_msg = nostr.RelayMsg.eventRaw(sub_id, json, &buf) catch continue;
-        // A write error (peer gone / send timeout on a slow client) stops the
+        // A write error (peer gone / send timeout on a stalled client) stops the
         // stream so the LMDB read txn is released promptly.
-        conn.write(event_msg) catch break;
+        conn.write(event_msg) catch return .write_failed;
         _ = conn.events_sent.fetchAdd(1, .monotonic);
+        if (nostr.io.timestamp() - started >= budget_seconds) return .timed_out;
     }
+    return .complete;
 }
 
 fn countLeadingZeroBits(id: *const [32]u8) u8 {
@@ -496,7 +519,7 @@ pub const Handler = struct {
             limit = @min(@as(u32, @intCast(filters[0].limit())), self.config.query_limit_max);
         }
 
-        if (filters.len == 1 and isKindOnlyQuery(&filters[0])) {
+        const outcome: StreamOutcome = if (filters.len == 1 and isKindOnlyQuery(&filters[0])) blk: {
             const kinds = filters[0].kinds().?;
             if (kinds.len == 1) {
                 if (self.shutdown.load(.acquire)) return;
@@ -506,7 +529,7 @@ pub const Handler = struct {
                 };
                 defer iter.deinit();
 
-                streamQueryResults(conn, sub_id, &iter);
+                break :blk streamQueryResults(conn, sub_id, &iter, stream_budget_seconds);
             } else {
                 if (self.shutdown.load(.acquire)) return;
                 var mk_iter = self.store.queryMultiKind(kinds, limit) catch {
@@ -515,9 +538,9 @@ pub const Handler = struct {
                 };
                 defer mk_iter.deinit();
 
-                streamQueryResults(conn, sub_id, &mk_iter);
+                break :blk streamQueryResults(conn, sub_id, &mk_iter, stream_budget_seconds);
             }
-        } else {
+        } else blk: {
             if (self.shutdown.load(.acquire)) return;
             var iter = self.store.query(filters, limit) catch {
                 self.sendClosed(conn, sub_id, "error: query failed");
@@ -525,10 +548,20 @@ pub const Handler = struct {
             };
             defer iter.deinit();
 
-            streamQueryResults(conn, sub_id, &iter);
-        }
+            break :blk streamQueryResults(conn, sub_id, &iter, stream_budget_seconds);
+        };
 
-        self.sendEose(conn, sub_id);
+        switch (outcome) {
+            // EOSE means "you now have the whole set", so it is only correct
+            // after the stream ran to completion.
+            .complete => self.sendEose(conn, sub_id),
+            // The peer is gone; anything further would fail too.
+            .write_failed => {},
+            // Truncated with the client still connected. Ending the subscription
+            // explicitly is the difference between a slow client knowing its
+            // results are incomplete and silently believing they are not.
+            .timed_out => self.sendClosed(conn, sub_id, "error: result set delivery timed out"),
+        }
     }
 
     fn handleClose(self: *Handler, conn: *Connection, msg: *nostr.ClientMsg) void {
@@ -988,4 +1021,70 @@ test "scanner stress" {
         _ = extractNonceTarget(input);
         _ = Handler.validateMessageStructure(input);
     }
+}
+
+// Stands in for a Connection so the stream outcomes can be driven directly. A
+// real Connection has no websocket in a unit test and fails every write, which
+// would collapse all three outcomes into .write_failed.
+const StubConn = struct {
+    events_sent: std.atomic.Value(u64) = .init(0),
+    written: usize = 0,
+    fail_after: ?usize = null,
+
+    fn write(self: *StubConn, data: []const u8) !void {
+        _ = data;
+        if (self.fail_after) |n| {
+            if (self.written >= n) return error.NotConnected;
+        }
+        self.written += 1;
+    }
+};
+
+const StubIter = struct {
+    remaining: usize,
+
+    fn next(self: *StubIter) !?[]const u8 {
+        if (self.remaining == 0) return null;
+        self.remaining -= 1;
+        return "{\"id\":\"x\"}";
+    }
+};
+
+test "streamQueryResults: a fully delivered set reports complete" {
+    var conn = StubConn{};
+    var iter = StubIter{ .remaining = 3 };
+    try testing.expectEqual(StreamOutcome.complete, streamQueryResults(&conn, "s", &iter, 3600));
+    try testing.expectEqual(@as(usize, 3), conn.written);
+    try testing.expectEqual(@as(u64, 3), conn.events_sent.load(.monotonic));
+}
+
+test "streamQueryResults: an empty result set is still complete" {
+    // Nothing is written, but the client is entitled to its EOSE.
+    var conn = StubConn{};
+    var iter = StubIter{ .remaining = 0 };
+    try testing.expectEqual(StreamOutcome.complete, streamQueryResults(&conn, "s", &iter, 3600));
+    try testing.expectEqual(@as(usize, 0), conn.written);
+}
+
+test "streamQueryResults: a dead peer stops the stream without draining it" {
+    // The LMDB read txn is released as soon as the peer is gone, rather than
+    // after walking the rest of the match set.
+    var conn = StubConn{ .fail_after = 2 };
+    var iter = StubIter{ .remaining = 100 };
+    try testing.expectEqual(StreamOutcome.write_failed, streamQueryResults(&conn, "s", &iter, 3600));
+    try testing.expectEqual(@as(usize, 2), conn.written);
+    try testing.expect(iter.remaining > 90);
+}
+
+test "streamQueryResults: a client slower than the budget is cut off, not silently truncated" {
+    // The caller distinguishes this from .complete and sends CLOSED rather than
+    // EOSE, so the client is never told an incomplete set is the whole set.
+    var conn = StubConn{};
+    var iter = StubIter{ .remaining = 100 };
+    const outcome = streamQueryResults(&conn, "s", &iter, 0);
+    try testing.expectEqual(StreamOutcome.timed_out, outcome);
+    try testing.expect(outcome != .complete);
+    // It stops promptly rather than walking the whole set first.
+    try testing.expectEqual(@as(usize, 1), conn.written);
+    try testing.expect(iter.remaining > 90);
 }
