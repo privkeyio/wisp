@@ -94,7 +94,22 @@ pub const Connection = struct {
     /// the write times out, which callers use to stop streaming.
     pub fn write(self: *Connection, data: []const u8) !void {
         const conn = self.ws_conn orelse return error.NotConnected;
-        return conn.write(data);
+        conn.write(data) catch |err| {
+            // A write that fails partway leaves a truncated frame on the wire:
+            // the library drains its iovec as it goes and only surfaces the error
+            // afterwards, so bytes are already gone. Callers cannot tell how much
+            // was written, and every one of them treats a failed write as
+            // something to skip, so without this the next message written to this
+            // connection is appended into a desynchronized frame stream and the
+            // client sees garbage from then on.
+            //
+            // Disconnecting is the honest outcome: a peer that cannot accept a
+            // frame is not receiving the subscription anyway, and it can
+            // reconnect. Shutting the read half down lets the epoll worker run
+            // its normal cleanup rather than closing the fd underneath it.
+            self.closeWs();
+            return err;
+        };
     }
 
     /// Request the connection be closed (e.g. idle timeout). Safe to call from
