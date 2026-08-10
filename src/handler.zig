@@ -23,35 +23,54 @@ fn isKindOnlyQuery(f: *const nostr.Filter) bool {
 }
 
 // A REQ streams straight out of an open LMDB read transaction, and LMDB cannot
-// reclaim any page freed after that transaction started while it is still alive.
-// The per-socket send timeout bounds a single writev, but writeAllIOVec retries
-// on partial writes and each retry gets the full timeout again, so a client that
-// accepts a trickle never errors and can hold the transaction open for as long
-// as it likes, growing the map for the whole time.
+// reclaim any page freed after that transaction started while it is still alive,
+// so the map grows for as long as the read is in flight.
 //
-// This budget is the backstop that turns "as long as it likes" into a bound. It
-// is deliberately generous: a client pulling query_limit_max events over a slow
-// link should finish well inside it, so exceeding it means the peer is not
-// keeping up rather than merely being remote.
+// In the build we ship the WebSocket socket is non-blocking (measured: F_GETFL
+// reports O_NONBLOCK on a live upgrade), and websocket.zig's writeAllIOVec does
+// a bare `try posix.writev`, so a peer that stops reading fills the send buffer
+// and the next write fails with WouldBlock in milliseconds. That, not the send
+// timeout, is what releases the transaction in practice.
+//
+// This budget is therefore a backstop rather than the primary bound. It matters
+// if httpz is ever built in blocking mode (httpz_blocking), where SO_SNDTIMEO
+// applies per writev and writeAllIOVec re-arms it on every partial write, so a
+// peer opening its window a little at a time could otherwise hold one write, and
+// with it the transaction, open for far longer than any per-write timeout
+// suggests. It is deliberately generous so it never cuts off a legitimately slow
+// client.
 const stream_budget_seconds: i64 = 120;
+
+fn monotonicSeconds() i64 {
+    var ts: std.posix.timespec = undefined;
+    if (std.posix.errno(std.posix.system.clock_gettime(std.posix.CLOCK.MONOTONIC, &ts)) != .SUCCESS) return 0;
+    return ts.sec;
+}
 
 /// How a result stream ended. The caller must not send EOSE unless it ran to
 /// completion, since EOSE tells the client it has the whole set.
-const StreamOutcome = enum { complete, write_failed, timed_out };
+const StreamOutcome = enum { complete, write_failed, timed_out, incomplete };
 
 // `conn` is generic so the budget path can be exercised without a live
 // socket: a real *Connection returns error.NotConnected when it has no
 // websocket, which would mask every outcome as .write_failed.
 fn streamQueryResults(conn: anytype, sub_id: []const u8, iter: anytype, budget_seconds: i64) StreamOutcome {
-    const started = nostr.io.timestamp();
+    // Monotonic, not wall clock: an NTP step backwards would otherwise extend the
+    // budget by the size of the step, and a step forwards would trip it instantly
+    // and cut every in-flight REQ short.
+    const started = monotonicSeconds();
     while (iter.next() catch null) |json| {
         var buf: [65536]u8 = undefined;
-        const event_msg = nostr.RelayMsg.eventRaw(sub_id, json, &buf) catch continue;
+        // An event that will not fit the frame buffer cannot be delivered.
+        // Skipping it silently and then reporting .complete would tell the client
+        // a set with a hole in it is whole, which is the failure this outcome
+        // split exists to prevent.
+        const event_msg = nostr.RelayMsg.eventRaw(sub_id, json, &buf) catch return .incomplete;
         // A write error (peer gone / send timeout on a stalled client) stops the
         // stream so the LMDB read txn is released promptly.
         conn.write(event_msg) catch return .write_failed;
         _ = conn.events_sent.fetchAdd(1, .monotonic);
-        if (nostr.io.timestamp() - started >= budget_seconds) return .timed_out;
+        if (monotonicSeconds() - started >= budget_seconds) return .timed_out;
     }
     return .complete;
 }
@@ -557,10 +576,21 @@ pub const Handler = struct {
             .complete => self.sendEose(conn, sub_id),
             // The peer is gone; anything further would fail too.
             .write_failed => {},
-            // Truncated with the client still connected. Ending the subscription
-            // explicitly is the difference between a slow client knowing its
-            // results are incomplete and silently believing they are not.
-            .timed_out => self.sendClosed(conn, sub_id, "error: result set delivery timed out"),
+            // Truncated with the client still connected. Drop the subscription
+            // before saying so: per NIP-01 a conforming client will not send
+            // CLOSE in response to CLOSED, so leaving it registered would have
+            // the relay keep broadcasting to a subscription it just declared
+            // closed. Telling the client explicitly is the difference between it
+            // knowing the results are incomplete and silently believing they are
+            // not.
+            .timed_out => {
+                self.subs.unsubscribe(conn, sub_id);
+                self.sendClosed(conn, sub_id, "error: result set delivery timed out");
+            },
+            .incomplete => {
+                self.subs.unsubscribe(conn, sub_id);
+                self.sendClosed(conn, sub_id, "error: an event was too large to deliver");
+            },
         }
     }
 
