@@ -12,6 +12,7 @@ Thank you for your interest in contributing to wisp! This document provides guid
 - [Pull Request Guidelines](#pull-request-guidelines)
 - [NIP Implementation Policy](#nip-implementation-policy)
 - [Breaking Changes](#breaking-changes)
+- [Vendored Dependencies](#vendored-dependencies)
 - [Documentation Requirements](#documentation-requirements)
 - [Development Setup](#development-setup)
 - [Code of Conduct](#code-of-conduct)
@@ -257,6 +258,30 @@ Breaking changes require careful consideration:
 - Removing support for a NIP
 - Changing the database schema
 - Modifying the wire protocol in incompatible ways
+
+## Vendored Dependencies
+
+`vendor/httpz` is a copy of [http.zig](https://github.com/karlseguin/http.zig) pinned to a specific
+upstream commit, carrying a small local patch. `build.zig.zon` refers to it by path, which means the
+Zig package manager does not hash it: without a check, an edit anywhere in those sources would pass
+review unnoticed.
+
+CI therefore asserts that `vendor/httpz` equals upstream at the pinned commit plus exactly the delta
+recorded in `vendor/httpz.patch`. Upstream is fetched by commit SHA rather than by release tarball,
+because a SHA is content-addressed and cannot drift.
+
+If you need to change the vendored sources:
+
+1. Edit the files under `vendor/httpz/` as usual.
+2. Run `scripts/regenerate-vendored-httpz-patch.sh`.
+3. Commit the regenerated `vendor/httpz.patch` alongside your change, and explain the local delta in
+   the PR. `vendor/httpz.patch` is the reviewable record of everything we changed, so keep it small
+   and prefer upstreaming fixes.
+
+To move to a new upstream commit, update `UPSTREAM_COMMIT` in both scripts and the comment in
+`build.zig.zon`, re-vendor the tree, then regenerate the patch.
+
+Verify locally with `./scripts/verify-vendored-httpz.sh`.
 
 ## Documentation Requirements
 

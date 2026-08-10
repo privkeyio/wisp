@@ -1,0 +1,218 @@
+diff -ruN upstream/src/httpz.zig vendor/src/httpz.zig
+--- upstream/src/httpz.zig
++++ vendor/src/httpz.zig
+@@ -37,6 +37,13 @@
+     return @import("metrics.zig").write(writer);
+ }
+ 
++/// Connections accepted since start, read directly rather than scraped. Moves
++/// on every accept, before any handler runs, so it reports whether the accept
++/// loop itself is alive independently of the thread pool.
++pub fn connectionCount() usize {
++    return @import("metrics.zig").connectionCount();
++}
++
+ pub const Protocol = enum {
+     HTTP10,
+     HTTP11,
+diff -ruN upstream/src/metrics.zig vendor/src/metrics.zig
+--- upstream/src/metrics.zig
++++ vendor/src/metrics.zig
+@@ -86,6 +86,14 @@
+     metrics.connections.incr();
+ }
+ 
++/// Connections accepted since start. Incremented in the accept path before any
++/// handler runs, so it advances whenever the accept loop is alive even if the
++/// thread pool is saturated. Exposed for callers that need that as a liveness
++/// signal without scraping the Prometheus output.
++pub fn connectionCount() usize {
++    return @atomicLoad(usize, &metrics.connections.count, .monotonic);
++}
++
+ pub fn request() void {
+     metrics.requests.incr();
+ }
+diff -ruN upstream/src/worker.zig vendor/src/worker.zig
+--- upstream/src/worker.zig
++++ vendor/src/worker.zig
+@@ -408,6 +408,15 @@
+         // that alone) and the worker thread will process it.
+         handover_list: ConcurrentList(Conn(WSH)),
+ 
++        // WebSocket connections which have closed and whose Conn(WSH) wrapper +
++        // per-worker slot (self.len) must be reclaimed. The teardown of a ws
++        // connection happens on a thread-pool thread (processWebsocketData), but
++        // self.len and conn_mem_pool may only be touched on the event-loop
++        // thread. So the worker thread cleans up the ws.HandlerConn + socket and
++        // hands the wrapper here; the loop thread reaps it (see
++        // reapClosedWebsockets) and re-arms accept if it was full.
++        websocket_close_list: ConcurrentList(Conn(WSH)),
++
+         // A pool of HTTPConn objects. The pool maintains a configured min # of these.
+         // An HTTPConn is relatively expensive, since we pre-allocate all types
+         // of things (a Request.State and Response.State).
+@@ -488,6 +497,7 @@
+                 .request_list = .{},
+                 .handover_list = .{},
+                 .keepalive_list = .{},
++                .websocket_close_list = .{},
+                 .buffer_pool = buffer_pool,
+                 .conn_mem_pool = conn_mem_pool,
+                 .http_conn_pool = http_conn_pool,
+@@ -782,7 +792,15 @@
+ 
+             while (c) |conn| {
+                 c = conn.next;
+-                const http_conn = conn.protocol.http;
++                // The handover list must only ever contain HTTP connections: a
++                // connection is switched to .websocket here (below) and then
++                // removed from this list. If a race ever leaves a .websocket
++                // conn in the handover snapshot, skip it rather than misread the
++                // active union field as .http (which aborts the process).
++                const http_conn = switch (conn.protocol) {
++                    .http => |hc| hc,
++                    .websocket => continue,
++                };
+                 switch (http_conn.handover) {
+                     .close, .unknown => {
+                         closed_bool.* = true;
+@@ -821,14 +839,58 @@
+                         loop.switchToOneShot(conn) catch {
+                             metrics.internalError();
+                             closed_bool.* = true;
++                            // protocol is now .websocket, so disown() (which
++                            // reads protocol.http) must not be used here. Tear
++                            // the ws connection down directly on the loop thread.
+                             conn.close();
+-                            self.disown(conn);
++                            self.websocket.cleanupConn(hc);
++                            self.releaseSlot();
++                            self.conn_mem_pool.destroy(conn);
+                             continue;
+                         };
+                     },
+                     .keepalive => unreachable,
+                 }
+             }
++
++            self.reapClosedWebsockets(closed_bool);
++        }
++
++        // Runs on the event-loop thread. Reclaims the per-worker slot and frees
++        // the Conn(WSH) wrapper for every WebSocket connection that closed since
++        // the last pass. The socket and ws.HandlerConn were already torn down on
++        // the worker thread (processWebsocketData); closing the socket removed it
++        // from the event loop, so we must NOT call loop.remove here (the fd may
++        // have been recycled by a subsequent accept).
++        fn reapClosedWebsockets(self: *Self, closed_bool: *bool) void {
++            const io = self.io;
++            var wl = &self.websocket_close_list;
++            var c = blk: {
++                wl.mut.lockUncancelable(io);
++                defer wl.mut.unlock(io);
++                const head = wl.inner.head;
++                wl.inner = .{};
++                break :blk head;
++            };
++
++            while (c) |conn| {
++                c = conn.next;
++                closed_bool.* = true;
++                self.releaseSlot();
++                self.conn_mem_pool.destroy(conn);
++            }
++        }
++
++        // Reclaim one accept slot. Guarded because a double release would panic
++        // in ReleaseSafe (the StartOS/Docker build) and silently wrap to ~2^64 in
++        // ReleaseFast (the release build), which would disable the max_conn cap
++        // outright rather than fail loudly.
++        fn releaseSlot(self: *Self) void {
++            if (self.len == 0) {
++                log.err("connection slot accounting underflow", .{});
++                return;
++            }
++            self.len -= 1;
+         }
+ 
+         // Entry-point of our thread pool. `thread_buf` is a thread-specific buffer
+@@ -885,10 +947,10 @@
+             if (success == false) {
+                 ws_conn.close(.{ .code = 4997, .reason = "wsz" }) catch {};
+                 self.websocket.cleanupConn(hc);
+-                conn.releaseProcessing();
++                self.closeWebsocket(conn);
+             } else if (ws_conn.isClosed()) {
+                 self.websocket.cleanupConn(hc);
+-                conn.releaseProcessing();
++                self.closeWebsocket(conn);
+             } else {
+                 // Release `processing` before re-arming. With EPOLLONESHOT, re-arming
+                 // while still holding `processing` loses a read that arrives in the
+@@ -903,10 +965,21 @@
+                     log.debug("({f}) failed to add read event monitor: {}", .{ ws_conn.address, err });
+                     ws_conn.close(.{ .code = 4998, .reason = "wsz" }) catch {};
+                     self.websocket.cleanupConn(hc);
++                    self.closeWebsocket(conn);
+                 };
+             }
+         }
+ 
++        // Called from a thread-pool thread once a WebSocket connection has been
++        // fully torn down (socket closed, ws.HandlerConn cleaned up). Hands the
++        // Conn(WSH) wrapper to the event-loop thread, which owns self.len and
++        // conn_mem_pool, to reclaim the slot and free the wrapper. Mirrors the
++        // signal-based handover used for HTTP connections.
++        fn closeWebsocket(self: *Self, conn: *Conn(WSH)) void {
++            self.websocket_close_list.insert(self.io, conn);
++            self.loop.signal() catch |err| log.err("failed to signal worker: {}", .{err});
++        }
++
+         fn disown(self: *Self, conn: *Conn(WSH)) void {
+             const io = self.io;
+             const http_conn = conn.protocol.http;
+@@ -916,7 +989,7 @@
+                 .keepalive => self.keepalive_list.remove(io, conn),
+                 .active => unreachable,
+             }
+-            self.len -= 1;
++            self.releaseSlot();
+             self.http_conn_pool.release(http_conn);
+             self.conn_mem_pool.destroy(conn);
+         }
+@@ -970,6 +1043,11 @@
+             while (conn) |c| {
+                 const timeout = c.protocol.http.timeout;
+                 if (timeout > now) {
++                    // Detach the survivor from the expired prefix before it
++                    // becomes the head. Those nodes are about to be destroyed,
++                    // so a stale prev would leave this connection pointing into
++                    // memory the pool has recycled.
++                    c.prev = null;
+                     list.head = c;
+                     return .{ timed_out, count, timeout };
+                 }
+@@ -982,12 +1060,21 @@
+             return .{ timed_out, count, null };
+         }
+ 
++        // Releases connections that collectTimedOut already spliced out of their
++        // owning list. It must not go through disown(): that removes the node
++        // from request_list/keepalive_list a second time, and List.remove
++        // rewrites head/tail from a node that is no longer a member. The effect
++        // was that a sweep with both expired and surviving entries dropped every
++        // survivor from the list, so those connections never timed out and held
++        // a worker slot for the life of the process.
+         fn closeList(self: *Self, list: List(Conn(WSH))) void {
+             var conn = list.head;
+             while (conn) |c| {
+                 conn = c.next;
+                 c.close();
+-                self.disown(c);
++                self.releaseSlot();
++                self.http_conn_pool.release(c.protocol.http);
++                self.conn_mem_pool.destroy(c);
+             }
+         }
+ 

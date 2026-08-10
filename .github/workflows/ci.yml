@@ -46,6 +46,23 @@ jobs:
       - name: Unit tests
         run: zig build test
 
+  vendor:
+    name: vendored httpz integrity
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft != true
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # build.zig.zon depends on vendor/httpz by path, so the package manager no
+      # longer hashes it. This is what stands in for that hash.
+      - name: Verify vendor/httpz is upstream plus the recorded patch
+        run: ./scripts/verify-vendored-httpz.sh
+
   integration:
     permissions:
       contents: read
