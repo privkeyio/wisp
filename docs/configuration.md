@@ -133,8 +133,8 @@ instead leave it stopped.
 |------|-----|------|---------|-------------|
 | `enabled` | `WISP_WATCHDOG_ENABLED` | bool | `true` | Enable the self-probe. |
 | `interval_seconds` | `WISP_WATCHDOG_INTERVAL_SECONDS` | u32 | `10` | Seconds between probes. Values below `1` are clamped to `1`. |
-| `timeout_ms` | `WISP_WATCHDOG_TIMEOUT_MS` | u32 | `2000` | Deadline for a single probe, covering connect, send and reply. Values below `100` are clamped to `100`. |
-| `failures` | `WISP_WATCHDOG_FAILURES` | u32 | `3` | Consecutive stalled probes before exiting. Values below `1` are clamped to `1`. |
+| `timeout_ms` | `WISP_WATCHDOG_TIMEOUT_MS` | u32 | `2000` | Deadline for a single probe, covering connect, send and reply. Clamped to `100`–`5000`; the upper bound also caps how long a shutdown can wait on a probe already in flight. |
+| `failures` | `WISP_WATCHDOG_FAILURES` | u32 | `3` | Consecutive stalled probes before exiting. **Raised automatically** when `interval_seconds × failures` would be short enough to fire before the relay reaps stalled connections, so that connection pressure cannot force a restart. At `interval_seconds = 1` the effective value becomes 26; the raise is logged at startup. The shipped defaults are already sufficient and are left untouched. |
 
 ### `[rate_limits]`
 

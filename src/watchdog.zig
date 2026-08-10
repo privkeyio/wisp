@@ -4,15 +4,17 @@ const posix = std.posix;
 const net = std.Io.net;
 const Config = @import("config.zig").Config;
 const nostr = @import("nostr.zig");
-const relay_metrics = @import("relay_metrics.zig");
+const httpz = @import("httpz");
 const server = @import("server.zig");
 
 const log = std.log.scoped(.watchdog);
 
-// A zero timeout means "wait forever" to both poll() and SO_RCVTIMEO, which
-// would park the probe thread and, with it, the join in main(). Never let a
-// configured 0 through.
+// A probe deadline is also the worst case a shutdown waits on a probe that is
+// already in flight, since main() joins this thread. Keep it inside a range that
+// is long enough to be meaningful and short enough not to stall an operator's
+// stop.
 const min_timeout_ms: u32 = 100;
+const max_timeout_ms: u32 = 5_000;
 
 /// What a single self-probe observed.
 pub const Outcome = enum {
@@ -36,8 +38,14 @@ pub const Outcome = enum {
 // must never be able to fire before that has had time to happen, whatever the
 // operator configured, or anyone who can open sockets can force a restart.
 fn minFailures(interval_seconds: u32, configured: u32) u32 {
-    const needed = std.math.divCeil(u32, server.self_heal_seconds, interval_seconds) catch return configured;
-    return @max(configured, needed);
+    // The observation window is measured from the first stalled probe, and the
+    // threshold is reached on the Nth stall, so N probes only span (N-1)
+    // intervals. Without the +1 a threshold of 1 exits on the very first stall
+    // no matter how long the interval is, which is exactly the behavior this
+    // guard exists to prevent.
+    const spans = std.math.divCeil(u32, server.self_heal_seconds, @max(interval_seconds, 1)) catch
+        return @max(configured, 2);
+    return @max(configured, spans + 1);
 }
 
 /// Decision for one probe, kept separate from the I/O so the three-strike logic
@@ -63,8 +71,8 @@ const State = struct {
             .stalled => {},
         }
 
-        // A connection accepted since the previous probe proves the accept loop
-        // is running, so the probe was starved (slow handler, saturated thread
+        // An accept completed since the previous probe proves the accept loop is
+        // running, so the probe was starved (slow handler, saturated thread
         // pool) rather than wedged. Corroboration only ever clears failures, it
         // never adds any, so it can only make the watchdog less trigger-happy.
         if (accepts_progressed) {
@@ -89,7 +97,7 @@ pub fn run(config: *const Config, shutdown: *std.atomic.Value(bool)) void {
     };
 
     const interval: u32 = @max(config.watchdog_interval_seconds, 1);
-    const timeout_ms: u32 = @max(config.watchdog_timeout_ms, min_timeout_ms);
+    const timeout_ms: u32 = std.math.clamp(config.watchdog_timeout_ms, min_timeout_ms, max_timeout_ms);
 
     const configured_failures = @max(config.watchdog_failures, 1);
     const fail_threshold = minFailures(interval, configured_failures);
@@ -97,21 +105,27 @@ pub fn run(config: *const Config, shutdown: *std.atomic.Value(bool)) void {
         log.warn("watchdog.failures raised {d} -> {d}: at a {d}s interval a lower value could fire before the relay reaps stalled connections ({d}s), turning ordinary connection pressure into a restart", .{ configured_failures, fail_threshold, interval, server.self_heal_seconds });
     }
     var state: State = .{ .fail_threshold = fail_threshold };
-    var last_accepts = relay_metrics.connectionsTotal();
-    var elapsed: u32 = 0;
+    var last_accepts = httpz.connectionCount();
+    const interval_ms: u64 = @as(u64, interval) * std.time.ms_per_s;
+    var next_probe_at: u64 = (monotonicMs() orelse 0) + interval_ms;
 
     while (!shutdown.load(.acquire)) {
         // Sleep in 1s steps so a shutdown is noticed promptly rather than after a
         // whole probe interval (the main thread joins this thread on exit).
         std.Io.sleep(nostr.io.io(), .{ .nanoseconds = std.time.ns_per_s }, .awake) catch {};
         if (shutdown.load(.acquire)) return;
-        elapsed += 1;
-        if (elapsed < interval) continue;
-        elapsed = 0;
+
+        // Gate on the clock rather than on a count of sleeps: if sleep fails and
+        // returns immediately, counting iterations would spin and fire probes
+        // back to back, collapsing the whole minFailures time budget into
+        // milliseconds.
+        const now = monotonicMs() orelse continue;
+        if (now < next_probe_at) continue;
+        next_probe_at = now + interval_ms;
 
         const outcome = probe(address, timeout_ms);
 
-        const accepts = relay_metrics.connectionsTotal();
+        const accepts = httpz.connectionCount();
         const progressed = accepts != last_accepts;
         last_accepts = accepts;
 
@@ -174,7 +188,7 @@ fn probe(address: net.IpAddress, timeout_ms: u32) Outcome {
 // makes the kernel drop our SYN, parking the caller for the whole SYN-retry
 // schedule (~130s by default), long past a shutdown request.
 fn probeAddr(family: u32, sa: *const posix.sockaddr, sa_len: posix.socklen_t, timeout_ms: u32) Outcome {
-    const deadline = monotonicMs() + timeout_ms;
+    const deadline = (monotonicMs() orelse return .no_connection) + timeout_ms;
 
     const srv = posix.system.socket(family, posix.SOCK.STREAM | posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC, 0);
     if (posix.errno(srv) != .SUCCESS) return .no_connection;
@@ -184,7 +198,7 @@ fn probeAddr(family: u32, sa: *const posix.sockaddr, sa_len: posix.socklen_t, ti
     switch (posix.errno(posix.system.connect(sock, sa, sa_len))) {
         .SUCCESS => {},
         .INPROGRESS, .INTR, .ALREADY => {
-            switch (wait(sock, posix.POLL.OUT, remainingMs(deadline))) {
+            switch (wait(sock, posix.POLL.OUT, deadline)) {
                 .ready => {},
                 // Nothing completed the handshake in time. On loopback that means
                 // the accept queue is full, i.e. the relay is not draining it.
@@ -210,7 +224,7 @@ fn probeAddr(family: u32, sa: *const posix.sockaddr, sa_len: posix.socklen_t, ti
                 written += n;
             },
             .INTR => {},
-            .AGAIN => switch (wait(sock, posix.POLL.OUT, remainingMs(deadline))) {
+            .AGAIN => switch (wait(sock, posix.POLL.OUT, deadline)) {
                 .ready => {},
                 .timed_out => return .stalled,
                 .failed => return .no_connection,
@@ -223,11 +237,12 @@ fn probeAddr(family: u32, sa: *const posix.sockaddr, sa_len: posix.socklen_t, ti
     while (true) {
         const rrc = posix.system.read(sock, &buf, buf.len);
         switch (posix.errno(rrc)) {
-            // A wedged relay accepts and never answers. A clean EOF with no bytes
-            // read is the same "no answer" signal, so it counts as a stall too.
-            .SUCCESS => return if (rrc > 0) .alive else .stalled,
+            // A clean EOF with no bytes means something accepted the connection
+            // and closed it, which is evidence the accept loop ran. Not a reply,
+            // so not `.alive`, but definitely not the silence of a wedge either.
+            .SUCCESS => return if (rrc > 0) .alive else .no_connection,
             .INTR => {},
-            .AGAIN => switch (wait(sock, posix.POLL.IN, remainingMs(deadline))) {
+            .AGAIN => switch (wait(sock, posix.POLL.IN, deadline)) {
                 .ready => {},
                 .timed_out => return .stalled,
                 .failed => return .no_connection,
@@ -243,23 +258,24 @@ fn closeSocket(fd: posix.fd_t) void {
 
 const Wait = enum { ready, timed_out, failed };
 
-fn wait(sock: posix.fd_t, events: i16, timeout_ms: i32) Wait {
-    if (timeout_ms <= 0) return .timed_out;
+fn wait(sock: posix.fd_t, events: i16, deadline: u64) Wait {
+    // Losing the clock mid-probe is reported as `.failed`, which maps to
+    // `.no_connection` and is never counted toward the exit threshold.
+    const now = monotonicMs() orelse return .failed;
+    if (now >= deadline) return .timed_out;
+    const timeout_ms = std.math.cast(i32, deadline - now) orelse std.math.maxInt(i32);
     var fds = [_]posix.pollfd{.{ .fd = sock, .events = events, .revents = 0 }};
     const n = posix.poll(&fds, timeout_ms) catch return .failed;
     return if (n == 0) .timed_out else .ready;
 }
 
-fn monotonicMs() u64 {
+// Null rather than a sentinel: a 0 here would silently disable the probe
+// deadline, and depending on which call failed that means either every probe
+// instantly reading as stalled or none of them ever timing out.
+fn monotonicMs() ?u64 {
     var ts: posix.timespec = undefined;
-    if (posix.errno(posix.system.clock_gettime(posix.CLOCK.MONOTONIC, &ts)) != .SUCCESS) return 0;
+    if (posix.errno(posix.system.clock_gettime(posix.CLOCK.MONOTONIC, &ts)) != .SUCCESS) return null;
     return @as(u64, @intCast(ts.sec)) * std.time.ms_per_s + @as(u64, @intCast(ts.nsec)) / std.time.ns_per_ms;
-}
-
-fn remainingMs(deadline: u64) i32 {
-    const now = monotonicMs();
-    if (now >= deadline) return 0;
-    return std.math.cast(i32, deadline - now) orelse std.math.maxInt(i32);
 }
 
 test probeHost {
@@ -274,19 +290,31 @@ test "minFailures: the watchdog can never fire before the relay self-heals" {
     // Whatever the operator sets, interval * failures must cover the window in
     // which stalled connections are reaped, or a burst of idle connections is
     // enough to restart the relay.
-    for ([_]u32{ 1, 2, 3, 5, 10, 30, 60 }) |interval| {
+    // Intervals at and above self_heal_seconds are included deliberately: there
+    // divCeil is 1, and without the +1 the threshold stays at the configured 1,
+    // so a single stalled probe would exit.
+    for ([_]u32{ 1, 2, 3, 5, 10, 24, 25, 26, 30, 60, 3600 }) |interval| {
         for ([_]u32{ 1, 2, 3, 10 }) |configured| {
             const got = minFailures(interval, configured);
             try std.testing.expect(got >= configured);
-            try std.testing.expect(got * interval >= server.self_heal_seconds);
+            try std.testing.expect(got >= 2);
+            // The window runs from the first stall to the Nth, which is N-1
+            // intervals, not N.
+            try std.testing.expect((got - 1) * interval >= server.self_heal_seconds);
         }
     }
 }
 
-test "minFailures: a configuration with enough headroom is left alone" {
-    // The shipped defaults (10s interval, 3 failures = 30s) must not be altered.
-    try std.testing.expectEqual(@as(u32, 3), minFailures(10, 3));
-    try std.testing.expectEqual(@as(u32, 10), minFailures(60, 10));
+test "minFailures: a single stalled probe can never trigger an exit" {
+    // Regression: divCeil(25, 25) == 1 previously left `failures = 1` untouched,
+    // restoring the one-burst restart this guard is meant to remove.
+    for ([_]u32{ 25, 26, 100, 4000 }) |interval| {
+        try std.testing.expect(minFailures(interval, 1) >= 2);
+    }
+}
+
+test "minFailures: an interval of zero cannot divide by zero" {
+    try std.testing.expect(minFailures(0, 1) >= 2);
 }
 
 test "step: a live relay clears the failure count and arms the exit" {
@@ -368,6 +396,11 @@ test "probe: a listener that replies is alive" {
 
     const t = try std.Thread.spawn(.{}, struct {
         fn accept(fd: posix.fd_t) void {
+            // Bounded: a blocking accept() here would hang the test binary
+            // forever if the probe never connects, instead of failing.
+            var fds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
+            const ready = posix.poll(&fds, 5000) catch return;
+            if (ready == 0) return;
             const c = posix.system.accept(fd, null, null);
             if (posix.errno(c) != .SUCCESS) return;
             const conn: posix.fd_t = @intCast(c);
@@ -376,10 +409,13 @@ test "probe: a listener that replies is alive" {
             _ = posix.system.write(conn, reply.ptr, reply.len);
         }
     }.accept, .{l.fd});
-    defer t.join();
 
     const addr = try net.IpAddress.parse("127.0.0.1", l.port);
-    try std.testing.expectEqual(Outcome.alive, probe(addr, 5000));
+    // Join before asserting: a failed assert would otherwise skip the join and
+    // leave the thread running against a listener the defer is about to close.
+    const outcome = probe(addr, 5000);
+    t.join();
+    try std.testing.expectEqual(Outcome.alive, outcome);
 }
 
 // The wedge this watchdog exists to catch: the kernel completes the handshake
@@ -389,10 +425,10 @@ test "probe: a listener that never accepts is a stall, not a connection failure"
     defer closeSocket(l.fd);
 
     const addr = try net.IpAddress.parse("127.0.0.1", l.port);
-    const started = monotonicMs();
+    const started = monotonicMs().?;
     try std.testing.expectEqual(Outcome.stalled, probe(addr, 300));
     // The deadline is honored rather than blocking indefinitely.
-    try std.testing.expect(monotonicMs() - started < 5 * std.time.ms_per_s);
+    try std.testing.expect(monotonicMs().? - started < 5 * std.time.ms_per_s);
 }
 
 test "probe: a closed port is a connection failure, not a stall" {
@@ -411,7 +447,7 @@ test "probe: a zero timeout still terminates" {
     // run() clamps to min_timeout_ms, but probe() itself must never block
     // forever even when handed 0 directly.
     const addr = try net.IpAddress.parse("127.0.0.1", l.port);
-    const started = monotonicMs();
+    const started = monotonicMs().?;
     _ = probe(addr, 0);
-    try std.testing.expect(monotonicMs() - started < 5 * std.time.ms_per_s);
+    try std.testing.expect(monotonicMs().? - started < 5 * std.time.ms_per_s);
 }

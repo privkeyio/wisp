@@ -17,13 +17,6 @@ pub fn connectionOpened() void {
     _ = connections_total.fetchAdd(1, .monotonic);
 }
 
-/// Connections accepted since start. The watchdog reads this as an independent
-/// liveness signal: if it advanced between two probes, the accept loop is
-/// running whatever the probe itself saw.
-pub fn connectionsTotal() u64 {
-    return connections_total.load(.monotonic);
-}
-
 pub fn eventStored() void {
     _ = events_stored.fetchAdd(1, .monotonic);
 }

@@ -94,3 +94,18 @@ max_sessions = 4
 [management]
 # NIP-86 relay management. Comma-separated hex pubkeys allowed to run admin commands.
 # admin_pubkeys = ""
+
+[watchdog]
+# Detects a wedged accept loop: the relay probes its own listener over loopback
+# and, after `failures` consecutive stalls, EXITS so a supervisor restarts it.
+# Run wisp under something that restarts it (docker --restart unless-stopped,
+# systemd Restart=always) or a wedge will leave it stopped instead of degraded.
+# Set enabled = false to opt out.
+enabled = true
+interval_seconds = 10
+# Deadline for one probe. Clamped to 100..5000ms.
+timeout_ms = 2000
+# Consecutive stalls before exiting. Raised automatically if interval_seconds *
+# failures would be short enough to fire before the relay reaps stalled
+# connections, so ordinary connection pressure cannot force a restart.
+failures = 3
