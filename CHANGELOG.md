@@ -7,41 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.5.16] - 2026-08-10
+## [0.5.15] - 2026-08-10
 
-Re-release of 0.5.15. The watchdog it shipped could be driven to terminate the
-relay by anyone able to open TCP connections to it, so upgrading is recommended
-for any 0.5.15 deployment.
+### Added
+
+- Optional accept-loop watchdog: a background thread probes the relay's own listener over loopback and restarts the process if the accept loop wedges. Configurable under `[watchdog]`, and documented including the fact that it can terminate the process and how to turn it off. It is guarded so that ordinary connection pressure cannot trigger it: only "connected, then silence" counts, it will not exit until at least one probe has succeeded, an accept completed since the previous probe vetoes a stall, the probe is bounded end to end, and the failure threshold is raised at startup whenever `interval_seconds x failures` would be short enough to fire before stalled connections are reaped (#165, #166)
+- `limits.max_conn` sets the per-worker live-connection cap handed to httpz (#165, #166)
+- HTTP request and keepalive timeouts (10s and 15s), so a connection that completes the TCP handshake and then sends nothing cannot hold a worker slot indefinitely. Idle WebSocket clients are unaffected, since a connection leaves both timeout lists once it upgrades (#166)
 
 ### Fixed
 
-- Idle connections can no longer force the relay to restart itself. The HTTP request and keepalive timeouts were left unset, so a connection that completed the TCP handshake and then sent nothing held a worker slot forever; enough of them paused the accept loop, which the watchdog read as a wedge and acted on by exiting. Connections now have a 10s request and 15s keepalive timeout. Idle WebSocket clients are unaffected, since a connection leaves both timeout lists once it upgrades (#166)
-- Fixed a connection-slot leak in the vendored httpz timeout sweep, which enabling those timeouts would otherwise have activated. When a sweep found both expired and surviving connections, it removed the expired ones from the tracking list a second time, which silently dropped every survivor from that list: those connections then never timed out and held a worker slot for the life of the process, and the survivor was left pointing at memory the connection pool had already recycled. Staggered idle connections are now each reaped at their own deadline (#166)
-- The watchdog no longer treats every probe failure as a wedge. A refused connection or local descriptor exhaustion is logged but never counted, it will not exit until at least one probe has succeeded, and an accept completed since the previous probe now vetoes a stall. The veto reads httpz's accept counter, which advances before any handler runs, so it still reports the accept loop as alive when the thread pool is saturated. Together these stop a slow start, a firewalled loopback, or a busy relay from turning into a restart loop (#166)
-- The watchdog's failure threshold is raised at startup whenever `interval_seconds × failures` would be short enough to fire before stalled connections are reaped, so no configuration lets ordinary connection pressure force a restart. Previously `failures = 1` bypassed the guard entirely at any interval (#166)
-- The watchdog probe is now bounded end to end. It previously used a blocking `connect` with no timeout, which a full accept backlog (the very condition being detected) could park for the kernel's whole SYN-retry schedule, delaying detection and hanging shutdown. A `watchdog.timeout_ms` of `0` also meant "wait forever" and would hang the join on exit; it is now clamped to the 100-5000ms range (#166)
-- The watchdog exits with `_exit` rather than the libc `exit`, which had been running atexit handlers and stdio teardown from the probe thread while the workers, the LMDB writer and the spider were still live (#166)
+- Vendored httpz with a patch for a WebSocket accept-stall leak: a closing WebSocket did not release its per-worker connection slot, so a relay would eventually stop accepting. Also guards a union access that could abort the process during connection handover (#165)
+- Fixed a connection-slot leak in the vendored httpz timeout sweep, which enabling the request and keepalive timeouts would otherwise have activated. When a sweep found both expired and surviving connections, it removed the expired ones from the tracking list a second time, which silently dropped every survivor from that list: those connections then never timed out and held a worker slot for the life of the process, and the survivor was left pointing at memory the connection pool had already recycled. Staggered idle connections are now each reaped at their own deadline (#166)
 - Guarded the vendored httpz connection-slot accounting against underflow, which would panic in `ReleaseSafe` and silently disable the `max_conn` cap in `ReleaseFast` (#166)
 - The relay no longer hangs on exit when startup fails. Only the signal handler set the shutdown flag, so an error out of `listen()` left the background threads running and the process blocked joining them (#166)
 
 ### Known limitations
 
 - A client that sends a cheap request more often than the 10s request timeout keeps re-arming it and can hold a worker slot indefinitely. Enough such clients still saturate a worker and, sustained past the watchdog's threshold, can still provoke a restart. Bounding this needs a per-IP cap applied at accept time rather than at WebSocket upgrade, which is tracked separately.
-
-### Documentation
-
-- Documented the `[watchdog]` section and `limits.max_conn`, including the fact that the watchdog can terminate the process and how to turn it off. The Docker quickstarts now set a restart policy, which the watchdog assumes (#166)
-
-## [0.5.15] - 2026-08-10
-
-### Added
-
-- Optional accept-loop watchdog: a background thread probes the relay's own listener over loopback and restarts the process if the accept loop wedges. Configurable under `[watchdog]` (#165)
-- `limits.max_conn` sets the per-worker live-connection cap handed to httpz (#165)
-
-### Fixed
-
-- Vendored httpz with a patch for a WebSocket accept-stall leak: a closing WebSocket did not release its per-worker connection slot, so a relay would eventually stop accepting. Also guards a union access that could abort the process during connection handover (#165)
 
 ## [0.5.14] - 2026-07-20
 
@@ -199,8 +182,7 @@ for any 0.5.15 deployment.
 - Import/export to JSONL format
 - Configuration via TOML file or environment variables
 
-[Unreleased]: https://github.com/privkeyio/wisp/compare/v0.5.16...HEAD
-[0.5.16]: https://github.com/privkeyio/wisp/compare/v0.5.15...v0.5.16
+[Unreleased]: https://github.com/privkeyio/wisp/compare/v0.5.15...HEAD
 [0.5.15]: https://github.com/privkeyio/wisp/compare/v0.5.14...v0.5.15
 [0.5.14]: https://github.com/privkeyio/wisp/compare/v0.5.13...v0.5.14
 [0.5.13]: https://github.com/privkeyio/wisp/compare/v0.5.12...v0.5.13
