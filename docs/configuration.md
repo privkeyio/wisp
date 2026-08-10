@@ -186,7 +186,9 @@ instead leave it stopped.
 | `ip_blacklist` | `WISP_IP_BLACKLIST` | csv | (empty) | These IPs/prefixes are refused. |
 
 IP list entries match exactly unless they end in `.` (IPv4 prefix) or `:` (IPv6 prefix), e.g.
-`10.0.0.` matches `10.0.0.0`–`10.0.0.255`. CIDR notation and `*` wildcards are not supported.
+`10.0.0.` matches `10.0.0.0`–`10.0.0.255`. CIDR notation and `*` wildcards are not supported: an
+entry like `10.0.0.0/8` or `192.168.*` is rejected at startup with a warning naming it, rather
+than being accepted and then matching nothing. The same applies to `trusted_proxies`.
 
 ### `[spider]`
 

@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An `ip_whitelist`, `ip_blacklist` or `trusted_proxies` entry that can never match is now rejected at load with a warning naming it, instead of being stored and silently matching nothing. CIDR (`10.0.0.0/8`) and globs (`192.168.*`) are the usual way this happened: both look correct, neither is supported, and on a deny list the result was fail-open, with the operator believing a range was blocked when it was not. On `trusted_proxies` it failed the other way, collapsing every client behind the proxy into one rate-limit bucket (#173)
+
 - A failed storage read is no longer reported as a finished result set. An iterator error was swallowed as "no more events" on all three query paths, so REQ sent EOSE over a partial set, NEG-OPEN sealed and reconciled one (making the relay report events as missing that it actually holds), and COUNT answered with a number a failed read had lowered. Each now reports the failure instead (#172)
 - NEG-OPEN no longer holds an LMDB read transaction open while replying. Enumeration ran inside a transaction scoped to the whole function, so the reconciliation reply, a 128 KiB frame written to a client that may be slow to take it, went out with the transaction still live, and LMDB cannot reclaim a page freed after a transaction started for as long as it lives. Enumeration is now scoped so the transaction is released before anything is written. The error replies on this path were affected the same way (#172)
 
