@@ -22,14 +22,21 @@
         // recv-on-freed-Conn fix (#216) and the shutdown-buffer join-order fix
         // (#217), alongside the prior fixes (#215, #214, #213). Pins the same
         // websocket commit (b70e733) as above so they dedup.
+        // Vendored (see vendor/httpz) from upstream commit 01dc09453ae5, with a
+        // local patch to the NonBlocking epoll worker that reclaims the
+        // per-worker connection slot (self.len) and frees the Conn wrapper when a
+        // WebSocket closes (wisp-ci1: accept-stall leak) and guards the handover
+        // union access against a .websocket conn (wisp-8sk: union panic). Kept as
+        // a path dependency so a clean `zig build` (incl. the StartOS Docker
+        // fetch) picks up the fix with no external fork.
         .httpz = .{
-            .url = "https://github.com/karlseguin/http.zig/archive/01dc09453ae50b82cc74ac2f90e9cd57e0b38500.tar.gz",
-            .hash = "httpz-0.0.0-PNVzrEnoCAAwAtnht2430lpr-ynyNpLeTpoy_-lmWyhD",
+            .path = "vendor/httpz",
         },
     },
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
+        "vendor",
     },
 }
