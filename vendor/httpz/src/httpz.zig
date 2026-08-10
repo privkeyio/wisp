@@ -37,6 +37,13 @@ pub fn writeMetrics(writer: *std.Io.Writer) !void {
     return @import("metrics.zig").write(writer);
 }
 
+/// Connections accepted since start, read directly rather than scraped. Moves
+/// on every accept, before any handler runs, so it reports whether the accept
+/// loop itself is alive independently of the thread pool.
+pub fn connectionCount() usize {
+    return @import("metrics.zig").connectionCount();
+}
+
 pub const Protocol = enum {
     HTTP10,
     HTTP11,

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.15] - 2026-08-10
+
+### Added
+
+- Optional accept-loop watchdog: a background thread probes the relay's own listener over loopback and restarts the process if the accept loop wedges. Configurable under `[watchdog]`, and documented including the fact that it can terminate the process and how to turn it off. It is guarded so that ordinary connection pressure cannot trigger it: only "connected, then silence" counts, it will not exit until at least one probe has succeeded, an accept completed since the previous probe vetoes a stall, the probe is bounded end to end, and the failure threshold is raised at startup whenever `interval_seconds x failures` would be short enough to fire before stalled connections are reaped (#165, #166)
+- `limits.max_conn` sets the per-worker live-connection cap handed to httpz (#165, #166)
+- HTTP request and keepalive timeouts (10s and 15s), so a connection that completes the TCP handshake and then sends nothing cannot hold a worker slot indefinitely. Idle WebSocket clients are unaffected, since a connection leaves both timeout lists once it upgrades (#166)
+
+### Fixed
+
+- Vendored httpz with a patch for a WebSocket accept-stall leak: a closing WebSocket did not release its per-worker connection slot, so a relay would eventually stop accepting. Also guards a union access that could abort the process during connection handover (#165)
+- Fixed a connection-slot leak in the vendored httpz timeout sweep, which enabling the request and keepalive timeouts would otherwise have activated. When a sweep found both expired and surviving connections, it removed the expired ones from the tracking list a second time, which silently dropped every survivor from that list: those connections then never timed out and held a worker slot for the life of the process, and the survivor was left pointing at memory the connection pool had already recycled. Staggered idle connections are now each reaped at their own deadline (#166)
+- Guarded the vendored httpz connection-slot accounting against underflow, which would panic in `ReleaseSafe` and silently disable the `max_conn` cap in `ReleaseFast` (#166)
+- The relay no longer hangs on exit when startup fails. Only the signal handler set the shutdown flag, so an error out of `listen()` left the background threads running and the process blocked joining them (#166)
+
+### Known limitations
+
+- A client that sends a cheap request more often than the 10s request timeout keeps re-arming it and can hold a worker slot indefinitely. Enough such clients still saturate a worker and, sustained past the watchdog's threshold, can still provoke a restart. Bounding this needs a per-IP cap applied at accept time rather than at WebSocket upgrade, which is tracked separately.
+
 ## [0.5.14] - 2026-07-20
 
 ### Fixed
@@ -163,7 +182,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Import/export to JSONL format
 - Configuration via TOML file or environment variables
 
-[Unreleased]: https://github.com/privkeyio/wisp/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/privkeyio/wisp/compare/v0.5.15...HEAD
+[0.5.15]: https://github.com/privkeyio/wisp/compare/v0.5.14...v0.5.15
+[0.5.14]: https://github.com/privkeyio/wisp/compare/v0.5.13...v0.5.14
+[0.5.13]: https://github.com/privkeyio/wisp/compare/v0.5.12...v0.5.13
+[0.5.12]: https://github.com/privkeyio/wisp/compare/v0.5.11...v0.5.12
+[0.5.11]: https://github.com/privkeyio/wisp/compare/v0.5.10...v0.5.11
+[0.5.10]: https://github.com/privkeyio/wisp/compare/v0.5.9...v0.5.10
+[0.5.9]: https://github.com/privkeyio/wisp/compare/v0.5.8...v0.5.9
+[0.5.8]: https://github.com/privkeyio/wisp/compare/v0.5.7...v0.5.8
+[0.5.7]: https://github.com/privkeyio/wisp/compare/v0.5.6...v0.5.7
+[0.5.6]: https://github.com/privkeyio/wisp/compare/v0.5.5...v0.5.6
+[0.5.5]: https://github.com/privkeyio/wisp/compare/v0.5.4...v0.5.5
+[0.5.4]: https://github.com/privkeyio/wisp/compare/v0.5.3...v0.5.4
+[0.5.3]: https://github.com/privkeyio/wisp/compare/v0.5.2...v0.5.3
+[0.5.2]: https://github.com/privkeyio/wisp/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/privkeyio/wisp/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/privkeyio/wisp/compare/v0.1.2...v0.5.0
 [0.1.2]: https://github.com/privkeyio/wisp/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/privkeyio/wisp/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/privkeyio/wisp/releases/tag/v0.1.0

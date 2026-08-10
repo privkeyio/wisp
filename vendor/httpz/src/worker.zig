@@ -844,7 +844,7 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
                             // the ws connection down directly on the loop thread.
                             conn.close();
                             self.websocket.cleanupConn(hc);
-                            self.len -= 1;
+                            self.releaseSlot();
                             self.conn_mem_pool.destroy(conn);
                             continue;
                         };
@@ -876,9 +876,21 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
             while (c) |conn| {
                 c = conn.next;
                 closed_bool.* = true;
-                self.len -= 1;
+                self.releaseSlot();
                 self.conn_mem_pool.destroy(conn);
             }
+        }
+
+        // Reclaim one accept slot. Guarded because a double release would panic
+        // in ReleaseSafe (the StartOS/Docker build) and silently wrap to ~2^64 in
+        // ReleaseFast (the release build), which would disable the max_conn cap
+        // outright rather than fail loudly.
+        fn releaseSlot(self: *Self) void {
+            if (self.len == 0) {
+                log.err("connection slot accounting underflow", .{});
+                return;
+            }
+            self.len -= 1;
         }
 
         // Entry-point of our thread pool. `thread_buf` is a thread-specific buffer
@@ -977,7 +989,7 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
                 .keepalive => self.keepalive_list.remove(io, conn),
                 .active => unreachable,
             }
-            self.len -= 1;
+            self.releaseSlot();
             self.http_conn_pool.release(http_conn);
             self.conn_mem_pool.destroy(conn);
         }
@@ -1031,6 +1043,11 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
             while (conn) |c| {
                 const timeout = c.protocol.http.timeout;
                 if (timeout > now) {
+                    // Detach the survivor from the expired prefix before it
+                    // becomes the head. Those nodes are about to be destroyed,
+                    // so a stale prev would leave this connection pointing into
+                    // memory the pool has recycled.
+                    c.prev = null;
                     list.head = c;
                     return .{ timed_out, count, timeout };
                 }
@@ -1043,12 +1060,21 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
             return .{ timed_out, count, null };
         }
 
+        // Releases connections that collectTimedOut already spliced out of their
+        // owning list. It must not go through disown(): that removes the node
+        // from request_list/keepalive_list a second time, and List.remove
+        // rewrites head/tail from a node that is no longer a member. The effect
+        // was that a sweep with both expired and surviving entries dropped every
+        // survivor from the list, so those connections never timed out and held
+        // a worker slot for the life of the process.
         fn closeList(self: *Self, list: List(Conn(WSH))) void {
             var conn = list.head;
             while (conn) |c| {
                 conn = c.next;
                 c.close();
-                self.disown(c);
+                self.releaseSlot();
+                self.http_conn_pool.release(c.protocol.http);
+                self.conn_mem_pool.destroy(c);
             }
         }
 

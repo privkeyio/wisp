@@ -1,7 +1,8 @@
 # NixOS module for the wisp nostr relay. `settings` is a freeform attrset serialized to wisp's
 # config.toml, so it maps every current (and future) config option without this module enumerating
 # them: sections [server], [relay], [limits], [storage], [timeouts], [rate_limits], [auth] (NIP-42:
-# required / to_write / relay_url), [security], [spider], [negentropy], [management]. `host`, `port`,
+# required / to_write / relay_url), [security], [spider], [negentropy], [management], [watchdog].
+# `host`, `port`,
 # and `dataDir` are convenience options that populate [server].host, [server].port, and [storage].path.
 {
   config,
@@ -102,7 +103,7 @@ in
       description = ''
         wisp configuration as a Nix attrset, serialized to config.toml. See wisp's config sections
         ([server], [relay], [limits], [storage], [timeouts], [rate_limits], [auth], [security],
-        [spider], [negentropy], [management]). `host`, `port`, and `dataDir` populate `server.host`,
+        [spider], [negentropy], [management], [watchdog]). `host`, `port`, and `dataDir` populate `server.host`,
         `server.port`, and `storage.path` unless overridden here.
 
         List-like options (`spider.relays`, `security.ip_whitelist`, `management.admin_pubkeys`, ...)

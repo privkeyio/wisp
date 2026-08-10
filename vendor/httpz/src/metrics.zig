@@ -86,6 +86,14 @@ pub fn connection() void {
     metrics.connections.incr();
 }
 
+/// Connections accepted since start. Incremented in the accept path before any
+/// handler runs, so it advances whenever the accept loop is alive even if the
+/// thread pool is saturated. Exposed for callers that need that as a liveness
+/// signal without scraping the Prometheus output.
+pub fn connectionCount() usize {
+    return @atomicLoad(usize, &metrics.connections.count, .monotonic);
+}
+
 pub fn request() void {
     metrics.requests.incr();
 }

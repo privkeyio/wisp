@@ -250,6 +250,12 @@ pub fn main(init: std.process.Init) !void {
         null;
     defer if (watchdog_thread) |t| t.join();
 
+    // Registered after the joins so it runs before them (defers unwind LIFO).
+    // Only the signal handler sets this flag, so if listen() returns an error the
+    // background threads would otherwise never be told to stop and the joins
+    // above would hang instead of surfacing the error.
+    defer g_shutdown.store(true, .release);
+
     try server.listen();
 
     std.log.info("Shutdown complete", .{});

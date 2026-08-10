@@ -96,6 +96,7 @@ write path, since there is no fsync to amortize.
 |------|-----|------|---------|-------------|
 | `max_connections` | `WISP_MAX_CONNECTIONS` | u32 | `1000` | Maximum concurrent connections. |
 | `workers` | `WISP_WORKERS` | u16 | `0` | Epoll worker threads. `0` = auto (`min(CPU, 4)`). Set `1` on a personal or memory-constrained relay to shed per-worker buffers and threads. |
+| `max_conn` | `WISP_MAX_CONN` | u16 | `0` | Live connections **per worker** before that worker pauses accepting. `0` keeps the built-in default (8192). Distinct from `max_connections`, which is the relay-wide cap. Accepted connections are limited by `max_conn` × the effective worker count (with `workers = 0` that is `min(CPU, 4)`, not `0`), while `max_connections` independently caps registered relay connections; whichever binds first applies. |
 | `max_subscriptions` | — | u32 | `20` | Maximum open REQ subscriptions per connection. |
 | `max_filters` | — | u32 | `10` | Maximum filters per REQ. |
 | `max_message_size` | — | u32 | `65536` | Maximum inbound WebSocket message size, in bytes. |
@@ -107,6 +108,33 @@ write path, since there is no fsync to amortize.
 | `max_event_age` | — | i64 (seconds) | `94608000` | Reject events whose `created_at` is older than this (default 3 years). |
 | `max_future_seconds` | — | i64 (seconds) | `900` | Reject events dated more than this far in the future (default 15 minutes). |
 | `min_pow_difficulty` | `WISP_MIN_POW_DIFFICULTY` | u8 | `0` | Required NIP-13 proof-of-work leading-zero bits. `0` disables. |
+
+### `[watchdog]`
+
+Detects a wedged accept loop: a state where the kernel completes TCP handshakes
+but the relay never services them, leaving the process alive at near-zero CPU
+while every connection hangs. A background thread opens a loopback connection to
+the relay's own listener and expects any HTTP reply. After `failures`
+consecutive stalls it terminates the process so a supervisor restarts it.
+
+**This means the relay can exit on its own.** It only does so when it has
+answered at least one probe successfully (so a slow start or an environment where
+loopback probing cannot work never triggers it), and never when the relay
+accepted a connection since the previous probe. Connection refusals and local
+descriptor exhaustion are logged but never counted, since a restart fixes
+neither. Set `enabled = false` to opt out entirely.
+
+Because the process exits deliberately, run wisp under something that restarts
+it (`--restart unless-stopped` for Docker, `Restart=always` for systemd).
+Without a supervisor, a wedge that used to leave a degraded relay running will
+instead leave it stopped.
+
+| TOML | Env | Type | Default | Description |
+|------|-----|------|---------|-------------|
+| `enabled` | `WISP_WATCHDOG_ENABLED` | bool | `true` | Enable the self-probe. |
+| `interval_seconds` | `WISP_WATCHDOG_INTERVAL_SECONDS` | u32 | `10` | Seconds between probes. Values below `1` are clamped to `1`. |
+| `timeout_ms` | `WISP_WATCHDOG_TIMEOUT_MS` | u32 | `2000` | Deadline for a single probe, covering connect, send and reply. Clamped to `100`–`5000`; the upper bound also caps how long a shutdown can wait on a probe already in flight. |
+| `failures` | `WISP_WATCHDOG_FAILURES` | u32 | `3` | Consecutive stalled probes before exiting. **Raised automatically** when `interval_seconds × failures` would be short enough to fire before the relay reaps stalled connections, so that connection pressure cannot force a restart. At `interval_seconds = 1` the effective value becomes 26; the raise is logged at startup. The shipped defaults are already sufficient and are left untouched. |
 
 ### `[rate_limits]`
 
