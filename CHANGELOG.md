@@ -7,9 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-11
+
+Correctness and hardening across the query, reconciliation and configuration
+paths, found while verifying the watchdog work that went into 0.5.15.
+
+The theme is silence: a failed storage read was reported as a finished result
+set, a negentropy session sealed and reconciled a partial one, config values
+that could never take effect were accepted without a word, and a write that
+failed partway left a truncated frame on a connection that stayed open. Each of
+those now says so.
+
+Two changes can alter behavior on upgrade; see the upgrade notes below before
+rolling out.
+
 ### Changed
 
-- Bumped libnostr-z past v0.3.6 to pick up a negentropy storage fix. Loading records into a reconciliation session was O(n^2), because each insert moved every element after it and wisp enumerates a newest-first index, so every record landed at the front and shifted the whole array. Serving a NEG-OPEN over a large match set spent that time on a handler thread while the peer waited (#178)
+- Bumped libnostr-z to v0.3.7 to pick up a negentropy storage fix. Loading records into a reconciliation session was O(n^2), because each insert moved every element after it and wisp enumerates a newest-first index, so every record landed at the front and shifted the whole array. Serving a NEG-OPEN over a large match set spent that time on a handler thread while the peer waited (#178)
 
 ### Added
 
@@ -222,7 +236,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Import/export to JSONL format
 - Configuration via TOML file or environment variables
 
-[Unreleased]: https://github.com/privkeyio/wisp/compare/v0.5.15...HEAD
+[Unreleased]: https://github.com/privkeyio/wisp/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/privkeyio/wisp/compare/v0.5.15...v0.6.0
 [0.5.15]: https://github.com/privkeyio/wisp/compare/v0.5.14...v0.5.15
 [0.5.14]: https://github.com/privkeyio/wisp/compare/v0.5.13...v0.5.14
 [0.5.13]: https://github.com/privkeyio/wisp/compare/v0.5.12...v0.5.13
