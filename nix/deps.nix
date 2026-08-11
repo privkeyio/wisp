@@ -45,10 +45,10 @@ linkFarm "zig-packages" [
     };
   }
   {
-    name = "nostr-0.3.6-JY6OcLPKDwAP8UJz5qRAVc4LKg3AB2zE7Eok-gky9o4d";
+    name = "nostr-0.3.6-JY6OcKvaDwD1I7e9mP9Q84fcu1K0GMfyhhkKSLx2SC_F";
     path = fetchzip {
-      url = "https://codeload.github.com/privkeyio/libnostr-z/tar.gz/refs/tags/v0.3.6";
-      hash = "sha256-uCt2U8KRoF0W2oK8KzB8rEt32lbD+pMaVwVL/9XaBYw=";
+      url = "https://codeload.github.com/privkeyio/libnostr-z/tar.gz/9a4170fba7f5a7ea2b70e1323f88146adf3ce50f";
+      hash = "sha256-WnU+uIvYA4gmRQRmWoyvYfFy7RUZxeoxzjERrQNiS0c=";
       extension = "tar.gz";
     };
   }
