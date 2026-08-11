@@ -13,9 +13,16 @@
             .url = "https://github.com/karlseguin/websocket.zig/archive/b70e733bc0d0ba0a98ff5fe5ef64d3017c85f369.tar.gz",
             .hash = "websocket-0.1.0-ZPISdUoQBQC7zw1uSwbOEYdxZiTxNN4nf9RlWBsN0_Nd",
         },
+        // Pinned past v0.3.6 by commit for the negentropy storage fix: loading
+        // records used to be O(n^2) because each insert moved every element
+        // after it, and wisp enumerates a newest-first index, so every record
+        // landed at index 0 and shifted the whole array. Serving NEG-OPEN over a
+        // large match set spent that time on a handler thread. The manifest
+        // still says 0.3.6 because that is the version in the dependency's own
+        // build.zig.zon; the digest is what identifies the content.
         .nostr = .{
-            .url = "https://github.com/privkeyio/libnostr-z/archive/refs/tags/v0.3.6.tar.gz",
-            .hash = "nostr-0.3.6-JY6OcLPKDwAP8UJz5qRAVc4LKg3AB2zE7Eok-gky9o4d",
+            .url = "https://github.com/privkeyio/libnostr-z/archive/9a4170fba7f5a7ea2b70e1323f88146adf3ce50f.tar.gz",
+            .hash = "nostr-0.3.6-JY6OcKvaDwD1I7e9mP9Q84fcu1K0GMfyhhkKSLx2SC_F",
         },
         // http.zig: HTTP routing (NIP-11/NIP-86) + WebSocket upgrade onto
         // websocket.zig's epoll worker pool. Upstream, includes the epoll

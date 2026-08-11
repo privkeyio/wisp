@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Bumped libnostr-z past v0.3.6 to pick up a negentropy storage fix. Loading records into a reconciliation session was O(n^2), because each insert moved every element after it and wisp enumerates a newest-first index, so every record landed at the front and shifted the whole array. Serving a NEG-OPEN over a large match set spent that time on a handler thread while the peer waited (#178)
+
 ### Added
 
 - `/metrics` now also exposes httpz's own counters. `httpz_connections` counts accepted TCP connections before any handler runs, so reading it against `wisp_connections_total` (completed WebSocket upgrades) distinguishes an accept loop that is running while work backs up from one that is stuck (#168)
