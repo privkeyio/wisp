@@ -795,13 +795,19 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
                 http_conn.stream = .{ .socket = .{ .handle = socket, .address = ip_address } };
                 http_conn.timeout = now + self.timeout_request;
 
-                self.len += 1;
                 conn.* = .{
                     .next = null,
                     .prev = null,
                     .protocol = .{ .http = http_conn },
                 };
                 self.request_list.insert(conn);
+                // Take the slot and arm the full teardown together, with nothing
+                // fallible between them. The two errdefers above release neither
+                // the slot nor the list entry, so a `try` added in that gap would
+                // leak a worker slot permanently and, past the insert, leave a
+                // freed Conn in the live request_list. These three statements
+                // must stay adjacent.
+                self.len += 1;
                 conn_owns_teardown = true;
                 errdefer {
                     conn.close();
