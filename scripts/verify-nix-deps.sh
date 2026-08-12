@@ -128,9 +128,9 @@ done <<< "$required_pairs"
 
 # build.zig.zon is the source of truth. Three other files carry the version by
 # hand and none of them is generated, so each can drift silently: nix/package.nix
-# did exactly that, sitting at 0.5.10 across two releases. src/nip11.zig is the
+# did exactly that, sitting at 0.5.10 across six releases. src/nip11.zig is the
 # one users see, since it is what the relay reports over the wire.
-zon_version="$(grep -oP '(?<=\.version = ")[^"]+' build.zig.zon | head -1)"
+zon_version="$(grep -oP '(?<=\.version = ")[^"]+' build.zig.zon | head -1 || true)"
 if [ -z "$zon_version" ]; then
   echo "FAIL - could not read .version from build.zig.zon"
   fail=1
