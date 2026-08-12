@@ -18,17 +18,25 @@
             .hash = "nostr-0.3.7-JY6OcKvaDwCO3EVbmfv4WRreC-IPbZHtrBAAyMHNYmWH",
         },
         // http.zig: HTTP routing (NIP-11/NIP-86) + WebSocket upgrade onto
-        // websocket.zig's epoll worker pool. Upstream, includes the epoll
-        // recv-on-freed-Conn fix (#216) and the shutdown-buffer join-order fix
-        // (#217), alongside the prior fixes (#215, #214, #213). Pins the same
-        // websocket commit (b70e733) as above so they dedup.
-        // Vendored (see vendor/httpz) from upstream commit 01dc09453ae5, with a
-        // local patch to the NonBlocking epoll worker that reclaims the
-        // per-worker connection slot (self.len) and frees the Conn wrapper when a
-        // WebSocket closes (wisp-ci1: accept-stall leak) and guards the handover
-        // union access against a .websocket conn (wisp-8sk: union panic). Kept as
-        // a path dependency so a clean `zig build` (incl. the StartOS Docker
-        // fetch) picks up the fix with no external fork.
+        // websocket.zig's epoll worker pool.
+        //
+        // Vendored (see vendor/httpz) from upstream commit dce2cb07f1cd, which
+        // now carries the timeout-sweep fix we previously patched locally: a
+        // sweep containing both expired and surviving connections dropped every
+        // survivor from the tracking list, so those connections never timed out
+        // and held a worker slot for the life of the process. That upstream
+        // commit also strengthens the acquireProcessing ordering to .acquire per
+        // a TSan report, which the local patch below depends on.
+        //
+        // What remains local, recorded in vendor/httpz.patch and enforced by
+        // scripts/verify-vendored-httpz.sh in CI: reclaiming the per-worker slot
+        // (self.len) and freeing the Conn wrapper when a WebSocket closes
+        // (accept-stall leak), guarding the handover union against a .websocket
+        // conn, routing every slot release through a guarded helper, and a
+        // connectionCount() accessor the watchdog reads as a liveness signal.
+        //
+        // Kept as a path dependency so a clean `zig build` (incl. the StartOS
+        // Docker fetch) builds this tree with no external fork.
         .httpz = .{
             .path = "vendor/httpz",
         },

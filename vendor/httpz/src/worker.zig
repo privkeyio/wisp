@@ -496,8 +496,8 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
                 .active_list = .{},
                 .request_list = .{},
                 .handover_list = .{},
-                .keepalive_list = .{},
                 .websocket_close_list = .{},
+                .keepalive_list = .{},
                 .buffer_pool = buffer_pool,
                 .conn_mem_pool = conn_mem_pool,
                 .http_conn_pool = http_conn_pool,
@@ -1043,10 +1043,9 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
             while (conn) |c| {
                 const timeout = c.protocol.http.timeout;
                 if (timeout > now) {
-                    // Detach the survivor from the expired prefix before it
-                    // becomes the head. Those nodes are about to be destroyed,
-                    // so a stale prev would leave this connection pointing into
-                    // memory the pool has recycled.
+                    // The expired connections ahead of this one were moved into
+                    // `timed_out` and are about to be destroyed, so this node
+                    // must not keep pointing back into them.
                     c.prev = null;
                     list.head = c;
                     return .{ timed_out, count, timeout };
@@ -1060,13 +1059,10 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
             return .{ timed_out, count, null };
         }
 
-        // Releases connections that collectTimedOut already spliced out of their
-        // owning list. It must not go through disown(): that removes the node
-        // from request_list/keepalive_list a second time, and List.remove
-        // rewrites head/tail from a node that is no longer a member. The effect
-        // was that a sweep with both expired and surviving entries dropped every
-        // survivor from the list, so those connections never timed out and held
-        // a worker slot for the life of the process.
+        // `list` holds connections that collectTimedOut already detached from
+        // request_list/keepalive_list, so they must not be removed from those
+        // again. disown() would do exactly that, and List.remove rewrites head
+        // and tail from a node that is no longer a member.
         fn closeList(self: *Self, list: List(Conn(WSH))) void {
             var conn = list.head;
             while (conn) |c| {
@@ -1665,7 +1661,7 @@ pub fn Conn(comptime WSH: type) type {
 
         pub fn acquireProcessing(self: *Self) bool {
             // returns true if it was previously false
-            return @atomicRmw(bool, &self.processing, .Xchg, true, .monotonic) == false;
+            return @atomicRmw(bool, &self.processing, .Xchg, true, .acquire) == false;
         }
 
         pub fn releaseProcessing(self: *Self) void {
