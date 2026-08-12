@@ -52,14 +52,14 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
          // A pool of HTTPConn objects. The pool maintains a configured min # of these.
          // An HTTPConn is relatively expensive, since we pre-allocate all types
          // of things (a Request.State and Response.State).
-@@ -488,6 +497,7 @@
+@@ -487,6 +496,7 @@
+                 .active_list = .{},
                  .request_list = .{},
                  .handover_list = .{},
-                 .keepalive_list = .{},
 +                .websocket_close_list = .{},
+                 .keepalive_list = .{},
                  .buffer_pool = buffer_pool,
                  .conn_mem_pool = conn_mem_pool,
-                 .http_conn_pool = http_conn_pool,
 @@ -782,7 +792,15 @@
  
              while (c) |conn| {
@@ -181,38 +181,12 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
              self.http_conn_pool.release(http_conn);
              self.conn_mem_pool.destroy(conn);
          }
-@@ -970,6 +1043,11 @@
-             while (conn) |c| {
-                 const timeout = c.protocol.http.timeout;
-                 if (timeout > now) {
-+                    // Detach the survivor from the expired prefix before it
-+                    // becomes the head. Those nodes are about to be destroyed,
-+                    // so a stale prev would leave this connection pointing into
-+                    // memory the pool has recycled.
-+                    c.prev = null;
-                     list.head = c;
-                     return .{ timed_out, count, timeout };
-                 }
-@@ -982,12 +1060,21 @@
-             return .{ timed_out, count, null };
-         }
- 
-+        // Releases connections that collectTimedOut already spliced out of their
-+        // owning list. It must not go through disown(): that removes the node
-+        // from request_list/keepalive_list a second time, and List.remove
-+        // rewrites head/tail from a node that is no longer a member. The effect
-+        // was that a sweep with both expired and surviving entries dropped every
-+        // survivor from the list, so those connections never timed out and held
-+        // a worker slot for the life of the process.
-         fn closeList(self: *Self, list: List(Conn(WSH))) void {
-             var conn = list.head;
+@@ -995,7 +1068,7 @@
              while (conn) |c| {
                  conn = c.next;
                  c.close();
--                self.disown(c);
+-                self.len -= 1;
 +                self.releaseSlot();
-+                self.http_conn_pool.release(c.protocol.http);
-+                self.conn_mem_pool.destroy(c);
+                 self.http_conn_pool.release(c.protocol.http);
+                 self.conn_mem_pool.destroy(c);
              }
-         }
- 

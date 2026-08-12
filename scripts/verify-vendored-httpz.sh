@@ -13,7 +13,7 @@
 set -euo pipefail
 
 UPSTREAM_REPO="https://github.com/karlseguin/http.zig"
-UPSTREAM_COMMIT="01dc09453ae50b82cc74ac2f90e9cd57e0b38500"
+UPSTREAM_COMMIT="dce2cb07f1cd9beca6146869e1eec48025cf9f6f"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 vendor_dir="$repo_root/vendor/httpz"
