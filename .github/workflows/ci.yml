@@ -63,6 +63,51 @@ jobs:
       - name: Verify vendor/httpz is upstream plus the recorded patch
         run: ./scripts/verify-vendored-httpz.sh
 
+  nix:
+    name: nix package build
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft != true
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
+
+      # nix/deps.nix is the offline package cache for the Nix build, mirroring
+      # build.zig.zon by hand. Nothing else checks it, so it silently went stale
+      # when httpz became a path dependency and when the websocket pin moved: the
+      # cache no longer contained the revision zig asks for, and `nix build`
+      # failed with "package not found". This job is what catches that drift.
+      - name: Build the Nix package
+        run: nix build .# --print-build-logs
+
+      # Proves the packaged binary actually runs, not merely that it linked: a
+      # stale or wrong dependency can still produce something that fails on
+      # startup. NIP-11 is served before any storage write, so this needs no
+      # fixtures.
+      - name: Check the packaged binary serves NIP-11
+        run: |
+          out="$(nix build .# --no-link --print-out-paths)"
+          env WISP_HOST=127.0.0.1 WISP_PORT=7802 \
+            WISP_STORAGE_PATH="$RUNNER_TEMP/wisp-nix" \
+            "$out/bin/wisp" relay > relay-nix.log 2>&1 &
+          pid=$!
+          for i in $(seq 1 40); do nc -z 127.0.0.1 7802 && break; sleep 0.25; done
+          nc -z 127.0.0.1 7802 || { echo "packaged relay never listened"; cat relay-nix.log; kill "$pid" 2>/dev/null; exit 1; }
+          body="$(curl -sf -m 5 -H 'Accept: application/nostr+json' http://127.0.0.1:7802/)"
+          kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+          echo "$body" | grep -q '"software"' || { echo "NIP-11 response missing software field: $body"; exit 1; }
+          echo "packaged binary served NIP-11"
+
+      # The flake also exposes checks.<system>.wisp-module, a NixOS VM test that
+      # boots the module and drives a real WebSocket client. It is NOT run here:
+      # it needs /dev/kvm, which the standard GitHub runners do not provide.
+      # Run it locally with `nix flake check` when touching nix/module.nix.
+
   integration:
     permissions:
       contents: read
