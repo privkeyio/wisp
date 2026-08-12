@@ -678,21 +678,46 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
         fn swapList(self: *Self, conn: *Conn(WSH), new_state: HTTPConn.State) void {
             const io = self.io;
             const http_conn = conn.protocol.http;
-            http_conn._mut.lockUncancelable(io);
-            defer http_conn._mut.unlock(io);
+            {
+                http_conn._mut.lockUncancelable(io);
+                defer http_conn._mut.unlock(io);
+                self.swapListLocked(conn, http_conn, new_state);
+            }
 
+            // Publishing to handover_list hands this conn to the event-loop
+            // thread, which may release it (releaseHandover) before this call
+            // even returns. So it MUST be the last thing that touches conn or
+            // http_conn: doing it inside the critical section above meant the
+            // deferred _mut.unlock() then wrote into an HTTPConn already
+            // returned to the pool or destroyed, which panics in Mutex.unlock
+            // with "switch on corrupt value" (reproduced) and is a silent
+            // write to recycled memory in ReleaseFast. The caller's
+            // loop.signal() afterwards deliberately touches neither.
+            if (new_state == .handover) self.handover_list.insert(io, conn);
+        }
+
+        // Everything that needs http_conn._mut held. Split out so the handover
+        // publish can happen strictly after the mutex is released.
+        fn swapListLocked(self: *Self, conn: *Conn(WSH), http_conn: *HTTPConn, new_state: HTTPConn.State) void {
+            const io = self.io;
             switch (http_conn._state) {
                 .active => self.active_list.remove(io, conn),
                 .keepalive => self.keepalive_list.remove(io, conn),
                 .request => self.request_list.remove(conn),
-                // Unreachable in practice: both callers (run()'s parse-error
-                // path and accept()'s errdefer) only ever hold .request or
-                // .keepalive conns, and .handover conns are released through
-                // releaseHandover instead. Left as a plain remove rather than
-                // `unreachable` so that a wrong analysis degrades to a stale
-                // list entry instead of aborting a live relay. Do NOT route a
-                // handover-snapshot node here; see releaseHandover for why.
-                .handover => self.handover_list.remove(io, conn),
+                // Unreachable in practice: run()'s .recv handler skips a conn
+                // already in .handover, and processHTTPData only ever arrives
+                // here from .active.
+                //
+                // Logged rather than removed, because remove() is the dangerous
+                // option: on a non-member it rewrites the live list's head/tail
+                // from stale prev/next, which is exactly the connection-loss and
+                // core-pinning bug releaseHandover documents. That is not a
+                // "stale entry" degradation, so doing nothing is strictly safer,
+                // and the log makes a wrong analysis observable.
+                .handover => {
+                    log.err("swapList reached the unreachable .handover state; not touching any list", .{});
+                    return;
+                },
             }
 
             http_conn.setState(new_state);
@@ -701,7 +726,8 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
                 .active => self.active_list.insert(io, conn),
                 .keepalive => self.keepalive_list.insert(io, conn),
                 .request => self.request_list.insert(conn),
-                .handover => self.handover_list.insert(io, conn),
+                // Published by the caller once _mut is released; see swapList.
+                .handover => {},
             }
         }
 
@@ -1039,7 +1065,14 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
             const http_conn = conn.protocol.http;
             switch (http_conn._state) {
                 .request => self.request_list.remove(conn),
-                .handover => self.handover_list.remove(io, conn),
+                // Unreachable in practice: both callers (run()'s parse-error
+                // path and accept()'s errdefer) only ever hold .request or
+                // .keepalive conns, and .handover conns are released through
+                // releaseHandover instead. Do NOT route a handover-snapshot node
+                // here: remove() on a non-member rewrites the live list's
+                // head/tail from stale prev/next, the connection-loss bug
+                // releaseHandover documents, so this arm removes nothing.
+                .handover => log.err("disown reached the unreachable .handover state; not touching any list", .{}),
                 .keepalive => self.keepalive_list.remove(io, conn),
                 .active => unreachable,
             }
@@ -1123,6 +1156,7 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
                 conn = c.next;
                 c.close();
                 self.releaseSlot();
+
                 self.http_conn_pool.release(c.protocol.http);
                 self.conn_mem_pool.destroy(c);
             }
@@ -1636,6 +1670,38 @@ const HTTPConnPool = struct {
     }
 
     fn release(self: *HTTPConnPool, conn: *HTTPConn) void {
+        const io = self.io;
+
+        // Recycling an HTTPConn while a thread still holds its lock is a
+        // use-after-free: that thread's later _mut.unlock writes into an object
+        // returned to this pool or destroyed. Reproduced as a panic in
+        // Mutex.unlock ("switch on corrupt value"); in ReleaseFast there is no
+        // check, and since accept() does not re-init _mut, a fresh connection
+        // can inherit a stolen lock and end up with two threads inside
+        // swapListLocked for one conn.
+        //
+        // swapList holds _mut across its keepalive and request inserts, both of
+        // which publish the conn to the event-loop thread, so that thread can
+        // reach a free before the worker's deferred unlock lands. It gets there
+        // by three routes (disown, closeList, releaseHandover) and fencing them
+        // individually already missed one, so the wait lives here instead: this
+        // is the single point every free funnels through.
+        //
+        // Waiting for the lock is what makes it safe; the log is what makes the
+        // ordering violation attributable, since this race is not reachable from
+        // a unit test. Deadlock-free because every caller reaches this holding
+        // no list mutex, while the worker's order is _mut then list.mut, and
+        // because this runs before self.lock() below.
+        // Debug, not error: the wait below makes this safe, so it is an expected
+        // and handled interleaving rather than a fault. Under a deliberately
+        // widened window it fired 403 times across 1800 connections, so at error
+        // level it would be pure noise in production.
+        if (conn._mut.state.load(.monotonic) != .unlocked) {
+            log.debug("HTTPConn released while its lock was still held; waiting for the holder", .{});
+        }
+        conn._mut.lockUncancelable(io);
+        conn._mut.unlock(io);
+
         const conns = self.conns;
         self.lock();
         const available = self.available;
@@ -1643,7 +1709,6 @@ const HTTPConnPool = struct {
             self.unlock();
             conn.deinit(self.allocator);
 
-            const io = self.io;
             self.http_mem_pool_mut.lockUncancelable(io);
             self.http_mem_pool.destroy(conn);
             self.http_mem_pool_mut.unlock(io);
