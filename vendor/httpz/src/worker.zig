@@ -762,7 +762,18 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
                     // Linux can wake up multiple epoll fds for a single connection.
                     return if (err == error.WouldBlock) {} else err;
                 };
-                errdefer posix.close(socket);
+                // Set once the conn owns both the socket and its own memory, i.e.
+                // once the errdefer below can do the whole teardown. Without it
+                // the errdefers unwind LIFO and all three run: disown() destroys
+                // the Conn and closes the socket, then these two destroy it a
+                // second time and close the fd again. Reproduced by injecting a
+                // monitorRead failure: all three cleanups fired for one
+                // connection and the relay aborted. A double
+                // MemoryPool.destroy links a node to itself, so two later
+                // create() calls hand the same Conn to two connections, and the
+                // double close can land on an fd another thread just opened.
+                var conn_owns_teardown = false;
+                errdefer if (!conn_owns_teardown) posix.close(socket);
                 metrics.connection();
 
                 const socket_flags = try posix.fcntl(socket, posix.F.GETFL, 0);
@@ -770,7 +781,7 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
                 std.debug.assert(socket_flags & nonblocking == nonblocking);
 
                 const conn = try self.conn_mem_pool.create(self.allocator);
-                errdefer self.conn_mem_pool.destroy(conn);
+                errdefer if (!conn_owns_teardown) self.conn_mem_pool.destroy(conn);
 
                 const ip_address = address.toIOAddress();
 
@@ -791,6 +802,7 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
                     .protocol = .{ .http = http_conn },
                 };
                 self.request_list.insert(conn);
+                conn_owns_teardown = true;
                 errdefer {
                     conn.close();
                     self.disown(conn);
@@ -1167,7 +1179,30 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
             var conn = list.head;
             while (conn) |c| {
                 conn = c.next;
-                const http_conn = c.protocol.http;
+                // Guard the union read. This is unreachable today: handover_list
+                // has exactly one mutation site (the insert in swapList, always
+                // with a .http conn) plus the processSignal snapshot clear, and
+                // no handover_list.remove exists any more, so no stale
+                // .websocket node can be left as its head. Verified statically
+                // and across 12 shutdown-under-load rounds with upgrades in
+                // flight: zero sightings.
+                //
+                // Guarded anyway because that safety is a non-local invariant
+                // and the failure mode here is severe: reading protocol.http on
+                // a .websocket conn panics in ReleaseSafe, and in ReleaseFast
+                // reinterprets a *ws.HandlerConn as an *HTTPConn, so
+                // posix.close() would close whatever integer lands at that
+                // offset. server.deinit() runs before storage teardown, so a
+                // wild close there can land on the LMDB fd before the final
+                // sync. Skipping leaks one fd in a process that is exiting
+                // anyway, which is strictly better than either outcome.
+                const http_conn = switch (c.protocol) {
+                    .http => |hc| hc,
+                    .websocket => {
+                        log.err("shutdownList found a .websocket conn in an http list; skipping", .{});
+                        continue;
+                    },
+                };
                 posix.close(http_conn.stream.socket.handle);
                 http_conn.deinit(allocator);
             }
