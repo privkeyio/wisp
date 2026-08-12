@@ -60,7 +60,21 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
                  .keepalive_list = .{},
                  .buffer_pool = buffer_pool,
                  .conn_mem_pool = conn_mem_pool,
-@@ -782,7 +792,15 @@
+@@ -675,6 +685,13 @@
+                 .active => self.active_list.remove(io, conn),
+                 .keepalive => self.keepalive_list.remove(io, conn),
+                 .request => self.request_list.remove(conn),
++                // Unreachable in practice: both callers (run()'s parse-error
++                // path and accept()'s errdefer) only ever hold .request or
++                // .keepalive conns, and .handover conns are released through
++                // releaseHandover instead. Left as a plain remove rather than
++                // `unreachable` so that a wrong analysis degrades to a stale
++                // list entry instead of aborting a live relay. Do NOT route a
++                // handover-snapshot node here; see releaseHandover for why.
+                 .handover => self.handover_list.remove(io, conn),
+             }
+ 
+@@ -782,7 +799,15 @@
  
              while (c) |conn| {
                  c = conn.next;
@@ -77,7 +91,45 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
                  switch (http_conn.handover) {
                      .close, .unknown => {
                          closed_bool.* = true;
-@@ -821,14 +839,58 @@
+@@ -793,7 +818,7 @@
+                         // can deliver a .recv for the freed Conn.
+                         loop.remove(conn);
+                         conn.close();
+-                        self.disown(conn);
++                        self.releaseHandover(conn, http_conn);
+                     },
+                     .disown => {
+                         // When res.disown() was called, we immediately removed
+@@ -802,14 +827,14 @@
+                         // before we get back here.
+                         // https://github.com/karlseguin/http.zig/issues/129#issuecomment-3031411404
+                         closed_bool.* = true;
+-                        self.disown(conn);
++                        self.releaseHandover(conn, http_conn);
+                     },
+                     .websocket => |ptr| {
+                         if (comptime WSH == httpz.DummyWebsocketHandler) {
+                             std.debug.print("Your httpz handler must have a `WebsocketHandler` declaration. This must be the same type passed to `httpz.upgradeWebsocket`. Closing the connection.\n", .{});
+                             closed_bool.* = true;
+                             conn.close();
+-                            self.disown(conn);
++                            self.releaseHandover(conn, http_conn);
+                             continue;
+                         }
+ 
+@@ -817,18 +842,70 @@
+ 
+                         const hc: *ws.HandlerConn(WSH) = @ptrCast(@alignCast(ptr));
+                         conn.protocol = .{ .websocket = hc };
++                        // This node is in no list (the snapshot detached the
++                        // chain and `c` was advanced above), but its links still
++                        // point at Conns that releaseHandover frees in this same
++                        // pass. Nothing dereferences them today only because
++                        // List.insert overwrites both fields; null them so that
++                        // stays true without depending on it.
++                        conn.next = null;
++                        conn.prev = null;
+ 
                          loop.switchToOneShot(conn) catch {
                              metrics.internalError();
                              closed_bool.* = true;
@@ -137,7 +189,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
          }
  
          // Entry-point of our thread pool. `thread_buf` is a thread-specific buffer
-@@ -885,10 +947,10 @@
+@@ -885,10 +962,10 @@
              if (success == false) {
                  ws_conn.close(.{ .code = 4997, .reason = "wsz" }) catch {};
                  self.websocket.cleanupConn(hc);
@@ -150,7 +202,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
              } else {
                  // Release `processing` before re-arming. With EPOLLONESHOT, re-arming
                  // while still holding `processing` loses a read that arrives in the
-@@ -903,10 +965,21 @@
+@@ -903,10 +980,60 @@
                      log.debug("({f}) failed to add read event monitor: {}", .{ ws_conn.address, err });
                      ws_conn.close(.{ .code = 4998, .reason = "wsz" }) catch {};
                      self.websocket.cleanupConn(hc);
@@ -169,10 +221,49 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
 +            self.loop.signal() catch |err| log.err("failed to signal worker: {}", .{err});
 +        }
 +
++        // Releases a connection that processSignal already detached by taking the
++        // handover_list snapshot (head taken, inner cleared). It must not go
++        // through disown(): that dispatches on _state, which is still .handover,
++        // so it calls handover_list.remove() on a node that is no longer a
++        // member.
++        //
++        // The general rule is that a snapshot node's prev/next are stale with
++        // respect to the live list, so List.remove -- which rewrites head/tail
++        // from exactly those two fields -- writes garbage into a list the node
++        // no longer belongs to. Worker threads keep inserting into that live
++        // list the whole time, so there is always something to corrupt. Two
++        // shapes, both reachable:
++        //
++        //   [A(.close)] alone: prev and next are both null, so remove(A) sets
++        //   head = null and tail = null, wiping an entry that was inserted
++        //   after the snapshot was taken.
++        //
++        //   [B(.websocket), A(.close)]: the .websocket branch neither removes
++        //   its node nor releases it, so A.prev is still B. remove(A) leaves
++        //   head null and writes tail = B, a non-member, and every later insert
++        //   appends behind B until the next drain resets the list.
++        //
++        // Either way the affected connections become unreachable: the slot is
++        // never released, the fd is never closed, and they are in no timeout
++        // list, so nothing can ever reap them. They also keep the
++        // level-triggered epoll registration from accept(), so the loop
++        // re-reports and skips them on every iteration, pinning a core. Same
++        // defect class as the upstream timeout-sweep fix in
++        // collectTimedOut/closeList.
++        //
++        // Note this cannot be fixed by clearing next/prev when snapshotting:
++        // remove() would then null head/tail directly, which is precisely the
++        // first shape above.
++        fn releaseHandover(self: *Self, conn: *Conn(WSH), http_conn: *HTTPConn) void {
++            self.releaseSlot();
++            self.http_conn_pool.release(http_conn);
++            self.conn_mem_pool.destroy(conn);
++        }
++
          fn disown(self: *Self, conn: *Conn(WSH)) void {
              const io = self.io;
              const http_conn = conn.protocol.http;
-@@ -916,7 +989,7 @@
+@@ -916,7 +1043,7 @@
                  .keepalive => self.keepalive_list.remove(io, conn),
                  .active => unreachable,
              }
@@ -181,7 +272,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
              self.http_conn_pool.release(http_conn);
              self.conn_mem_pool.destroy(conn);
          }
-@@ -995,7 +1068,7 @@
+@@ -995,7 +1122,7 @@
              while (conn) |c| {
                  conn = c.next;
                  c.close();
