@@ -50,6 +50,9 @@ if [ ! -d "/proc/$PID/fd" ]; then
   exit 1
 fi
 
+tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/handover.XXXXXX")"
+trap 'rm -rf "$tmpdir"' EXIT
+
 chk() { # desc expected actual
   if [ "$2" = "$3" ]; then
     echo "ok   - $1"
@@ -72,6 +75,7 @@ sockets() { # count socket fds held by the relay
 # A WebSocket upgrade that hands over as .websocket.
 upgrade() {
   ( exec 3<>"/dev/tcp/$HOST/$PORT" || exit 0
+    printf 'x' >>"$tmpdir/up"
     printf 'GET / HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n' "$HOSTPORT" >&3
     IFS= read -t 5 -r _ <&3 || true
     # Hold briefly so this connection's .websocket handover is still in the list
@@ -83,6 +87,7 @@ upgrade() {
 # A plain HTTP request that hands over as .close.
 closereq() {
   ( exec 3<>"/dev/tcp/$HOST/$PORT" || exit 0
+    printf 'x' >>"$tmpdir/close"
     printf 'GET / HTTP/1.1\r\nHost: %s\r\nAccept: application/nostr+json\r\nConnection: close\r\n\r\n' "$HOSTPORT" >&3
     while IFS= read -t 5 -r _ <&3; do :; done || true
     exec 3>&- 3<&- ) 2>/dev/null &
@@ -106,6 +111,21 @@ for _ in $(seq 1 "$ROUNDS"); do
 done
 
 sleep "$SETTLE"
+
+# A connect refused by the OS or the relay produces no handover at all, so
+# without this floor the fd and tick assertions could pass having exercised
+# nothing. Require at least half of each kind to have connected.
+ups=$(wc -c <"$tmpdir/up" 2>/dev/null || echo 0)
+closes=$(wc -c <"$tmpdir/close" 2>/dev/null || echo 0)
+want=$((ROUNDS * PAIRS / 2))
+echo "info - connections made: $ups upgrades, $closes close-handovers (floor $want each)"
+if [ "$ups" -ge "$want" ] && [ "$closes" -ge "$want" ]; then
+  echo "ok   - load actually reached the relay"
+  pass=$((pass + 1))
+else
+  echo "FAIL - too few connections completed; the assertions below would be vacuous"
+  fail=$((fail + 1))
+fi
 
 # Measured first: a spinning relay pins a core at ~100% indefinitely, which is
 # both the worst symptom and the fastest to detect. Unfixed, this burned 99.6%
