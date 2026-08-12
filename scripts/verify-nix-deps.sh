@@ -126,14 +126,30 @@ while read -r hash want; do
   fi
 done <<< "$required_pairs"
 
-zon_version="$(grep -oP '(?<=\.version = ")[^"]+' build.zig.zon | head -1)"
-nix_version="$(grep -oP '(?<=^  version = ")[^"]+' nix/package.nix | head -1)"
-if [ -z "$zon_version" ] || [ -z "$nix_version" ]; then
-  echo "FAIL - could not read a version from build.zig.zon ('$zon_version') or nix/package.nix ('$nix_version')"
+# build.zig.zon is the source of truth. Three other files carry the version by
+# hand and none of them is generated, so each can drift silently: nix/package.nix
+# did exactly that, sitting at 0.5.10 across six releases. src/nip11.zig is the
+# one users see, since it is what the relay reports over the wire.
+zon_version="$(grep -oP '(?<=\.version = ")[^"]+' build.zig.zon | head -1 || true)"
+if [ -z "$zon_version" ]; then
+  echo "FAIL - could not read .version from build.zig.zon"
   fail=1
-elif [ "$zon_version" != "$nix_version" ]; then
-  echo "FAIL - version mismatch: build.zig.zon says '$zon_version', nix/package.nix says '$nix_version'"
-  fail=1
+else
+  check_version() { # file description extracted
+    if [ -z "$3" ]; then
+      echo "FAIL - could not read the version from $1 ($2)"
+      fail=1
+    elif [ "$3" != "$zon_version" ]; then
+      echo "FAIL - version mismatch: build.zig.zon says '$zon_version', $1 says '$3' ($2)"
+      fail=1
+    fi
+  }
+  check_version nix/package.nix "nix package version" \
+    "$(grep -oP '(?<=^  version = ")[^"]+' nix/package.nix | head -1)"
+  check_version src/main.zig "startup log line" \
+    "$(grep -oP '(?<=Wisp v)[0-9]+\.[0-9]+\.[0-9]+(?= starting)' src/main.zig | head -1)"
+  check_version src/nip11.zig "NIP-11 relay information document" \
+    "$(grep -oP '(?<=\\"version\\":\\")[^\\]+' src/nip11.zig | head -1)"
 fi
 
 [ "$fail" -eq 0 ] || exit 1

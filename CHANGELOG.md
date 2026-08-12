@@ -7,19 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-08-12
+
+Two ways a remote peer could crash or wedge the relay, a third that needs the kernel to refuse a socket registration, and a packaging build that had been failing since 0.5.12.
+
+### Changed
+
+- The vendored HTTP server is re-pinned to upstream, which has now adopted the connection timeout fix wisp has carried since 0.5.15. No behavior changes for anyone running 0.6.0: this retires a local patch and picks up an upstream atomics ordering fix that the WebSocket slot reclamation relies on (#180)
+
 ### Fixed
 
-- A connection handed over in the same batch as another could be dropped from
-  every tracking list, leaking its slot and file descriptor and leaving the
-  worker spinning on it. The epoll worker snapshots its handover list by taking
-  the head and clearing the list, but the snapshot entries keep their links, so
-  releasing one through the general path rewrote the live list's head and tail
-  from stale pointers. Anything handed over before the next drain was then
-  unreachable by any timeout sweep, while its still-registered socket was
-  re-reported on every loop iteration. Reachable remotely without
-  authentication by interleaving WebSocket upgrades with requests that end in a
-  close. Measured on the unfixed build: 42 leaked descriptors and a core pinned
-  at 99.6% after the load stopped (#181)
+- A connection handed over in the same batch as another could be dropped from every tracking list, leaking its slot and file descriptor and leaving the worker spinning on it. Anything handed over before the next drain became unreachable by any timeout sweep, while its still-registered socket was re-reported on every loop iteration. Reachable remotely without authentication by interleaving WebSocket upgrades with requests that end in a close. Measured on the unfixed build: 42 leaked descriptors and a core pinned at 99.6% after the load stopped. Covered by a new integration test that fails without the fix (#181)
+- A connection could be recycled while another thread still held its lock, so that thread then wrote into a record it no longer owned. On a build with safety checks this aborts the process; on the release build there is no such check, and a later connection can inherit a lock that is already held, which leaves two threads inside the same connection's list bookkeeping at once. Reachable remotely without authentication by driving connection churn. Affected every path that publishes a connection to the event loop while still holding its lock (#183)
+- A failed connection setup ran its whole cleanup twice, destroying the connection record and closing the socket a second time each. A double destroy links the record to itself on the free list, so later connections are handed a record that is still in use. Not directly reachable by a remote peer: it needs the kernel to refuse the socket registration, either out of memory or against the per-user watch limit (#184)
+- The Nix package build had been failing since 0.5.12, when the WebSocket dependency pin moved and the offline dependency set was not updated with it, so `nix build` stopped with "package not found". The packaged version string had also been reporting 0.5.10 since 0.5.11. Both are fixed, and CI now builds the Nix package and starts the resulting binary, so neither can break unnoticed again (#182)
 
 ## [0.6.0] - 2026-08-11
 
@@ -250,7 +251,8 @@ rolling out.
 - Import/export to JSONL format
 - Configuration via TOML file or environment variables
 
-[Unreleased]: https://github.com/privkeyio/wisp/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/privkeyio/wisp/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/privkeyio/wisp/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/privkeyio/wisp/compare/v0.5.15...v0.6.0
 [0.5.15]: https://github.com/privkeyio/wisp/compare/v0.5.14...v0.5.15
 [0.5.14]: https://github.com/privkeyio/wisp/compare/v0.5.13...v0.5.14
