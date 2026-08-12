@@ -26,8 +26,19 @@ relay's URL (start a relay first, e.g. `./zig-out/bin/wisp`):
     bash tests/integration_concurrency.sh ws://127.0.0.1:7777  # many concurrent conns
     bash tests/integration_ws_idle_reclaim.sh ws://127.0.0.1:7777 # idle-close slot/bucket reclaim
 
+    bash tests/integration_ws_rate_limit.sh ws://127.0.0.1:7777   # per-IP token buckets
+    bash tests/integration_handover_leak.sh ws://127.0.0.1:7777 PID # handover slot/fd leak
+
 The idle-reclaim test needs a dedicated relay (no other WebSocket clients)
 started with a short idle window and a per-IP limit of 2, e.g.
 `WISP_IDLE_SECONDS=1 WISP_MAX_CONNECTIONS_PER_IP=2`.
+
+The handover-leak test is Linux-only: it counts the relay's own socket
+descriptors and CPU time under `/proc`, so it takes the relay's **pid as a
+second argument** and exits immediately without one. It needs a dedicated relay
+started with `WISP_WORKERS=1` (so every connection shares one handover list) and
+a per-IP limit far above its concurrency, e.g.
+`WISP_MAX_CONNECTIONS_PER_IP=100000`. With a low limit the connections are
+rejected before they ever reach a handover and the test proves nothing.
 
 These mirror the jobs in `.github/workflows/ci.yml`.

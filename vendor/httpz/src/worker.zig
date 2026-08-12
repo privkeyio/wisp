@@ -685,6 +685,13 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
                 .active => self.active_list.remove(io, conn),
                 .keepalive => self.keepalive_list.remove(io, conn),
                 .request => self.request_list.remove(conn),
+                // Unreachable in practice: both callers (run()'s parse-error
+                // path and accept()'s errdefer) only ever hold .request or
+                // .keepalive conns, and .handover conns are released through
+                // releaseHandover instead. Left as a plain remove rather than
+                // `unreachable` so that a wrong analysis degrades to a stale
+                // list entry instead of aborting a live relay. Do NOT route a
+                // handover-snapshot node here; see releaseHandover for why.
                 .handover => self.handover_list.remove(io, conn),
             }
 
@@ -835,6 +842,14 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
 
                         const hc: *ws.HandlerConn(WSH) = @ptrCast(@alignCast(ptr));
                         conn.protocol = .{ .websocket = hc };
+                        // This node is in no list (the snapshot detached the
+                        // chain and `c` was advanced above), but its links still
+                        // point at Conns that releaseHandover frees in this same
+                        // pass. Nothing dereferences them today only because
+                        // List.insert overwrites both fields; null them so that
+                        // stays true without depending on it.
+                        conn.next = null;
+                        conn.prev = null;
 
                         loop.switchToOneShot(conn) catch {
                             metrics.internalError();
@@ -983,19 +998,36 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
         // Releases a connection that processSignal already detached by taking the
         // handover_list snapshot (head taken, inner cleared). It must not go
         // through disown(): that dispatches on _state, which is still .handover,
-        // and so calls handover_list.remove() on a node that is no longer a
-        // member. List.remove rewrites head/tail from node.prev/node.next, and
-        // the .websocket branch leaves its node linked in the detached chain, so
-        // a [websocket, close] snapshot writes the live list's tail back to a
-        // non-member while head stays null. Every handover inserted before the
-        // next drain is then unreachable: its slot is never released, its fd is
-        // never closed, and it is in no timeout list, so nothing can ever reap
-        // it. Same defect class as the upstream timeout-sweep fix in
+        // so it calls handover_list.remove() on a node that is no longer a
+        // member.
+        //
+        // The general rule is that a snapshot node's prev/next are stale with
+        // respect to the live list, so List.remove -- which rewrites head/tail
+        // from exactly those two fields -- writes garbage into a list the node
+        // no longer belongs to. Worker threads keep inserting into that live
+        // list the whole time, so there is always something to corrupt. Two
+        // shapes, both reachable:
+        //
+        //   [A(.close)] alone: prev and next are both null, so remove(A) sets
+        //   head = null and tail = null, wiping an entry that was inserted
+        //   after the snapshot was taken.
+        //
+        //   [B(.websocket), A(.close)]: the .websocket branch neither removes
+        //   its node nor releases it, so A.prev is still B. remove(A) leaves
+        //   head null and writes tail = B, a non-member, and every later insert
+        //   appends behind B until the next drain resets the list.
+        //
+        // Either way the affected connections become unreachable: the slot is
+        // never released, the fd is never closed, and they are in no timeout
+        // list, so nothing can ever reap them. They also keep the
+        // level-triggered epoll registration from accept(), so the loop
+        // re-reports and skips them on every iteration, pinning a core. Same
+        // defect class as the upstream timeout-sweep fix in
         // collectTimedOut/closeList.
         //
         // Note this cannot be fixed by clearing next/prev when snapshotting:
-        // remove() would then null out head/tail directly, discarding entries
-        // that worker threads inserted after the snapshot was taken.
+        // remove() would then null head/tail directly, which is precisely the
+        // first shape above.
         fn releaseHandover(self: *Self, conn: *Conn(WSH), http_conn: *HTTPConn) void {
             self.releaseSlot();
             self.http_conn_pool.release(http_conn);

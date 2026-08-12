@@ -35,8 +35,9 @@ HOST="${HOSTPORT%%:*}"
 PORT="${HOSTPORT##*:}"
 ROUNDS="${ROUNDS:-40}"
 PAIRS="${PAIRS:-12}"
-# Must exceed the request + keepalive timeouts so every legitimate connection has
-# been swept before we count what is left.
+# Must exceed http_request_timeout_s + http_keepalive_timeout_s (see the defaults
+# in src/server.zig) so every legitimate connection has been swept before we
+# count what is left. Raising either default means raising this too.
 SETTLE="${SETTLE:-25}"
 pass=0
 fail=0
@@ -112,6 +113,18 @@ done
 
 sleep "$SETTLE"
 
+# If the relay died during the load, ticks() and sockets() both read 0 and every
+# assertion below would print ok. Fail closed instead.
+if kill -0 "$PID" 2>/dev/null; then
+  echo "ok   - relay process still alive after load"
+  pass=$((pass + 1))
+else
+  echo "FAIL - relay process exited during the load; measurements below are meaningless"
+  echo "-----"
+  echo "$pass passed, $((fail + 1)) failed"
+  exit 1
+fi
+
 # A connect refused by the OS or the relay produces no handover at all, so
 # without this floor the fd and tick assertions could pass having exercised
 # nothing. Require at least half of each kind to have connected.
@@ -133,7 +146,7 @@ fi
 ticks() { # relay CPU ticks (utime + stime)
   local st
   st="$(cat "/proc/$PID/stat" 2>/dev/null)" || { printf '0'; return; }
-  st="${st#*) }"
+  st="${st##*) }"
   awk -v x="$st" 'BEGIN{n=split(x,f," "); print f[12]+f[13]}'
 }
 hz="$(getconf CLK_TCK 2>/dev/null)"

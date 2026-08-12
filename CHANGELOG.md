@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A connection handed over in the same batch as another could be dropped from
+  every tracking list, leaking its slot and file descriptor and leaving the
+  worker spinning on it. The epoll worker snapshots its handover list by taking
+  the head and clearing the list, but the snapshot entries keep their links, so
+  releasing one through the general path rewrote the live list's head and tail
+  from stale pointers. Anything handed over before the next drain was then
+  unreachable by any timeout sweep, while its still-registered socket was
+  re-reported on every loop iteration. Reachable remotely without
+  authentication by interleaving WebSocket upgrades with requests that end in a
+  close. Measured on the unfixed build: 42 leaked descriptors and a core pinned
+  at 99.6% after the load stopped (#181)
+
 ## [0.6.0] - 2026-08-11
 
 Correctness and hardening across the query, reconciliation and configuration
