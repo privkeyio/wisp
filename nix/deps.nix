@@ -17,8 +17,13 @@
 # how to unpack source archive" on any cache miss. The extension names the intermediate download
 # `download.tar.gz` so unpackFile recognises it.
 #
-# The `nix package build` job in .github/workflows/ci.yml is what catches drift
-# here; before it existed this file was broken for two releases without a signal.
+# Drift guards, and their limits: the `nix package build` job in
+# .github/workflows/ci.yml builds this for real, which catches an entry that is
+# MISSING, and scripts/verify-nix-deps.sh catches the same case cheaply plus a
+# package.nix version that has drifted from build.zig.zon. Neither catches an
+# entry that is EXTRA -- zig ignores what it does not resolve -- which is how the
+# obsolete httpz entry survived here for two releases. That needs the transitive
+# closure; see the note in scripts/verify-nix-deps.sh for the upgrade path.
 
 {
   linkFarm,

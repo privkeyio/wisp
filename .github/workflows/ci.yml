@@ -68,6 +68,11 @@ jobs:
     permissions:
       contents: read
     runs-on: ubuntu-latest
+    # Bounds two things this job could otherwise hang on: a relay that will not
+    # exit, and a flake.lock bump landing on a nixpkgs rev where zig_0_16 is not
+    # substitutable, which would start a source build of zig and LLVM. No job
+    # here sets a timeout otherwise, so the default is 6 hours.
+    timeout-minutes: 20
     if: github.event.pull_request.draft != true
 
     steps:
@@ -75,13 +80,19 @@ jobs:
         with:
           persist-credentials: false
 
+      # Cheap and offline, so it runs before nix is even installed: it names the
+      # offending file and hash in about a second, where nix build takes ~2
+      # minutes to report the same class of problem as a store path.
+      - name: Check nix/deps.nix and the package version against the manifests
+        run: ./scripts/verify-nix-deps.sh
+
       - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
 
       # nix/deps.nix is the offline package cache for the Nix build, mirroring
-      # build.zig.zon by hand. Nothing else checks it, so it silently went stale
-      # when httpz became a path dependency and when the websocket pin moved: the
-      # cache no longer contained the revision zig asks for, and `nix build`
-      # failed with "package not found". This job is what catches that drift.
+      # the Zig manifests by hand. Nothing built it in CI, so it silently went
+      # stale when httpz became a path dependency and when the websocket pin
+      # moved: the cache no longer contained the revision zig asks for, and
+      # `nix build` failed with "package not found" for two releases.
       - name: Build the Nix package
         run: nix build .# --print-build-logs
 
@@ -91,22 +102,42 @@ jobs:
       # fixtures.
       - name: Check the packaged binary serves NIP-11
         run: |
+          stop() {
+            kill "$1" 2>/dev/null || return 0
+            for i in $(seq 1 20); do kill -0 "$1" 2>/dev/null || return 0; sleep 0.25; done
+            kill -9 "$1" 2>/dev/null || true
+          }
+          # Re-evaluates rather than threading the path between steps; the
+          # derivation is already built, so this is a cached ~2s no-op.
           out="$(nix build .# --no-link --print-out-paths)"
           env WISP_HOST=127.0.0.1 WISP_PORT=7802 \
             WISP_STORAGE_PATH="$RUNNER_TEMP/wisp-nix" \
             "$out/bin/wisp" relay > relay-nix.log 2>&1 &
           pid=$!
           for i in $(seq 1 40); do nc -z 127.0.0.1 7802 && break; sleep 0.25; done
-          nc -z 127.0.0.1 7802 || { echo "packaged relay never listened"; cat relay-nix.log; kill "$pid" 2>/dev/null; exit 1; }
-          body="$(curl -sf -m 5 -H 'Accept: application/nostr+json' http://127.0.0.1:7802/)"
-          kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
-          echo "$body" | grep -q '"software"' || { echo "NIP-11 response missing software field: $body"; exit 1; }
-          echo "packaged binary served NIP-11"
+          nc -z 127.0.0.1 7802 || { echo "packaged relay never listened"; cat relay-nix.log; stop "$pid"; exit 1; }
+          # Capture the status explicitly: under `bash -e` a bare assignment from
+          # a failing curl aborts the step here, losing both the relay log and
+          # the chance to stop the process.
+          body="$(curl -sf -m 5 -H 'Accept: application/nostr+json' http://127.0.0.1:7802/)" || rc=$?
+          rc="${rc:-0}"
+          stop "$pid"; wait "$pid" 2>/dev/null || true
+          if [ "$rc" -ne 0 ]; then
+            echo "NIP-11 request failed (curl exit $rc); relay log:"
+            cat relay-nix.log
+            exit 1
+          fi
+          case "$body" in
+            *'"software"'*) echo "packaged binary served NIP-11" ;;
+            *) echo "NIP-11 response missing software field: $body"; cat relay-nix.log; exit 1 ;;
+          esac
 
       # The flake also exposes checks.<system>.wisp-module, a NixOS VM test that
-      # boots the module and drives a real WebSocket client. It is NOT run here:
-      # it needs /dev/kvm, which the standard GitHub runners do not provide.
-      # Run it locally with `nix flake check` when touching nix/module.nix.
+      # boots the module and drives a real WebSocket client. It is not run here
+      # only because of runtime: it builds a guest kernel and userland on top of
+      # this job's work. KVM *is* available on these runners (the installer
+      # enables it), so adding it is a cost decision, not a capability one.
+      # Run it with `nix flake check` when touching nix/module.nix.
 
   integration:
     permissions:
