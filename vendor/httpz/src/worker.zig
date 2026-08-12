@@ -811,7 +811,7 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
                         // can deliver a .recv for the freed Conn.
                         loop.remove(conn);
                         conn.close();
-                        self.disown(conn);
+                        self.releaseHandover(conn, http_conn);
                     },
                     .disown => {
                         // When res.disown() was called, we immediately removed
@@ -820,14 +820,14 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
                         // before we get back here.
                         // https://github.com/karlseguin/http.zig/issues/129#issuecomment-3031411404
                         closed_bool.* = true;
-                        self.disown(conn);
+                        self.releaseHandover(conn, http_conn);
                     },
                     .websocket => |ptr| {
                         if (comptime WSH == httpz.DummyWebsocketHandler) {
                             std.debug.print("Your httpz handler must have a `WebsocketHandler` declaration. This must be the same type passed to `httpz.upgradeWebsocket`. Closing the connection.\n", .{});
                             closed_bool.* = true;
                             conn.close();
-                            self.disown(conn);
+                            self.releaseHandover(conn, http_conn);
                             continue;
                         }
 
@@ -978,6 +978,28 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
         fn closeWebsocket(self: *Self, conn: *Conn(WSH)) void {
             self.websocket_close_list.insert(self.io, conn);
             self.loop.signal() catch |err| log.err("failed to signal worker: {}", .{err});
+        }
+
+        // Releases a connection that processSignal already detached by taking the
+        // handover_list snapshot (head taken, inner cleared). It must not go
+        // through disown(): that dispatches on _state, which is still .handover,
+        // and so calls handover_list.remove() on a node that is no longer a
+        // member. List.remove rewrites head/tail from node.prev/node.next, and
+        // the .websocket branch leaves its node linked in the detached chain, so
+        // a [websocket, close] snapshot writes the live list's tail back to a
+        // non-member while head stays null. Every handover inserted before the
+        // next drain is then unreachable: its slot is never released, its fd is
+        // never closed, and it is in no timeout list, so nothing can ever reap
+        // it. Same defect class as the upstream timeout-sweep fix in
+        // collectTimedOut/closeList.
+        //
+        // Note this cannot be fixed by clearing next/prev when snapshotting:
+        // remove() would then null out head/tail directly, discarding entries
+        // that worker threads inserted after the snapshot was taken.
+        fn releaseHandover(self: *Self, conn: *Conn(WSH), http_conn: *HTTPConn) void {
+            self.releaseSlot();
+            self.http_conn_pool.release(http_conn);
+            self.conn_mem_pool.destroy(conn);
         }
 
         fn disown(self: *Self, conn: *Conn(WSH)) void {

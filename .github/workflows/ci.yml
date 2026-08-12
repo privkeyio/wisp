@@ -254,6 +254,28 @@ jobs:
           stop "$pid"; wait "$pid" 2>/dev/null
           exit $rc
 
+      - name: Run handover-list leak test (interleaved ws upgrade + close handover)
+        run: |
+          stop() {
+            kill "$1" 2>/dev/null || return 0
+            for i in $(seq 1 20); do kill -0 "$1" 2>/dev/null || return 0; sleep 0.25; done
+            kill -9 "$1" 2>/dev/null || true
+          }
+          # one worker so every connection shares a single handover_list, and a
+          # per-IP limit far above the test's concurrency: rejected connections
+          # never reach a handover, so a low limit would make the test vacuous
+          nohup env WISP_HOST=127.0.0.1 WISP_PORT=7788 WISP_WORKERS=1 \
+            WISP_MAX_CONNECTIONS_PER_IP=100000 \
+            WISP_STORAGE_PATH="$RUNNER_TEMP/wisp-handover" \
+            ./zig-out/bin/wisp relay > relay-handover.log 2>&1 &
+          pid=$!
+          for i in $(seq 1 40); do nc -z 127.0.0.1 7788 && break; sleep 0.25; done
+          nc -z 127.0.0.1 7788 || { echo "relay never listened on 7788"; cat relay-handover.log 2>/dev/null; stop "$pid"; wait "$pid" 2>/dev/null; exit 1; }
+          bash tests/integration_handover_leak.sh ws://127.0.0.1:7788 "$pid"
+          rc=$?
+          stop "$pid"; wait "$pid" 2>/dev/null
+          exit $rc
+
       - name: Run WS rate-limit test
         run: |
           stop() {
