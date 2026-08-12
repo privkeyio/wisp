@@ -678,20 +678,37 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
         fn swapList(self: *Self, conn: *Conn(WSH), new_state: HTTPConn.State) void {
             const io = self.io;
             const http_conn = conn.protocol.http;
-            http_conn._mut.lockUncancelable(io);
-            defer http_conn._mut.unlock(io);
+            {
+                http_conn._mut.lockUncancelable(io);
+                defer http_conn._mut.unlock(io);
+                self.swapListLocked(conn, http_conn, new_state);
+            }
 
+            // Publishing to handover_list hands this conn to the event-loop
+            // thread, which may release it (releaseHandover) before this call
+            // even returns. So it MUST be the last thing that touches conn or
+            // http_conn: doing it inside the critical section above meant the
+            // deferred _mut.unlock() then wrote into an HTTPConn already
+            // returned to the pool or destroyed, which panics in Mutex.unlock
+            // with "switch on corrupt value" (reproduced) and is a silent
+            // write to recycled memory in ReleaseFast. The caller's
+            // loop.signal() afterwards deliberately touches neither.
+            if (new_state == .handover) self.handover_list.insert(io, conn);
+        }
+
+        // Everything that needs http_conn._mut held. Split out so the handover
+        // publish can happen strictly after the mutex is released.
+        fn swapListLocked(self: *Self, conn: *Conn(WSH), http_conn: *HTTPConn, new_state: HTTPConn.State) void {
+            const io = self.io;
             switch (http_conn._state) {
                 .active => self.active_list.remove(io, conn),
                 .keepalive => self.keepalive_list.remove(io, conn),
                 .request => self.request_list.remove(conn),
-                // Unreachable in practice: both callers (run()'s parse-error
-                // path and accept()'s errdefer) only ever hold .request or
-                // .keepalive conns, and .handover conns are released through
-                // releaseHandover instead. Left as a plain remove rather than
-                // `unreachable` so that a wrong analysis degrades to a stale
-                // list entry instead of aborting a live relay. Do NOT route a
-                // handover-snapshot node here; see releaseHandover for why.
+                // Unreachable in practice: run()'s .recv handler skips a conn
+                // already in .handover, and processHTTPData only ever arrives
+                // here from .active. Left as a plain remove rather than
+                // `unreachable` so a wrong analysis degrades to a stale list
+                // entry instead of aborting a live relay.
                 .handover => self.handover_list.remove(io, conn),
             }
 
@@ -701,7 +718,8 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
                 .active => self.active_list.insert(io, conn),
                 .keepalive => self.keepalive_list.insert(io, conn),
                 .request => self.request_list.insert(conn),
-                .handover => self.handover_list.insert(io, conn),
+                // Published by the caller once _mut is released; see swapList.
+                .handover => {},
             }
         }
 
@@ -1039,6 +1057,13 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
             const http_conn = conn.protocol.http;
             switch (http_conn._state) {
                 .request => self.request_list.remove(conn),
+                // Unreachable in practice: both callers (run()'s parse-error
+                // path and accept()'s errdefer) only ever hold .request or
+                // .keepalive conns, and .handover conns are released through
+                // releaseHandover instead. Left as a plain remove rather than
+                // `unreachable` so a wrong analysis degrades to a stale list
+                // entry instead of aborting a live relay. Do NOT route a
+                // handover-snapshot node here; see releaseHandover for why.
                 .handover => self.handover_list.remove(io, conn),
                 .keepalive => self.keepalive_list.remove(io, conn),
                 .active => unreachable,

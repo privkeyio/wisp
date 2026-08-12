@@ -60,21 +60,58 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
                  .keepalive_list = .{},
                  .buffer_pool = buffer_pool,
                  .conn_mem_pool = conn_mem_pool,
-@@ -675,6 +685,13 @@
+@@ -668,13 +678,37 @@
+         fn swapList(self: *Self, conn: *Conn(WSH), new_state: HTTPConn.State) void {
+             const io = self.io;
+             const http_conn = conn.protocol.http;
+-            http_conn._mut.lockUncancelable(io);
+-            defer http_conn._mut.unlock(io);
+-
++            {
++                http_conn._mut.lockUncancelable(io);
++                defer http_conn._mut.unlock(io);
++                self.swapListLocked(conn, http_conn, new_state);
++            }
++
++            // Publishing to handover_list hands this conn to the event-loop
++            // thread, which may release it (releaseHandover) before this call
++            // even returns. So it MUST be the last thing that touches conn or
++            // http_conn: doing it inside the critical section above meant the
++            // deferred _mut.unlock() then wrote into an HTTPConn already
++            // returned to the pool or destroyed, which panics in Mutex.unlock
++            // with "switch on corrupt value" (reproduced) and is a silent
++            // write to recycled memory in ReleaseFast. The caller's
++            // loop.signal() afterwards deliberately touches neither.
++            if (new_state == .handover) self.handover_list.insert(io, conn);
++        }
++
++        // Everything that needs http_conn._mut held. Split out so the handover
++        // publish can happen strictly after the mutex is released.
++        fn swapListLocked(self: *Self, conn: *Conn(WSH), http_conn: *HTTPConn, new_state: HTTPConn.State) void {
++            const io = self.io;
+             switch (http_conn._state) {
                  .active => self.active_list.remove(io, conn),
                  .keepalive => self.keepalive_list.remove(io, conn),
                  .request => self.request_list.remove(conn),
-+                // Unreachable in practice: both callers (run()'s parse-error
-+                // path and accept()'s errdefer) only ever hold .request or
-+                // .keepalive conns, and .handover conns are released through
-+                // releaseHandover instead. Left as a plain remove rather than
-+                // `unreachable` so that a wrong analysis degrades to a stale
-+                // list entry instead of aborting a live relay. Do NOT route a
-+                // handover-snapshot node here; see releaseHandover for why.
++                // Unreachable in practice: run()'s .recv handler skips a conn
++                // already in .handover, and processHTTPData only ever arrives
++                // here from .active. Left as a plain remove rather than
++                // `unreachable` so a wrong analysis degrades to a stale list
++                // entry instead of aborting a live relay.
                  .handover => self.handover_list.remove(io, conn),
              }
  
-@@ -782,7 +799,15 @@
+@@ -684,7 +718,8 @@
+                 .active => self.active_list.insert(io, conn),
+                 .keepalive => self.keepalive_list.insert(io, conn),
+                 .request => self.request_list.insert(conn),
+-                .handover => self.handover_list.insert(io, conn),
++                // Published by the caller once _mut is released; see swapList.
++                .handover => {},
+             }
+         }
+ 
+@@ -782,7 +817,15 @@
  
              while (c) |conn| {
                  c = conn.next;
@@ -91,7 +128,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
                  switch (http_conn.handover) {
                      .close, .unknown => {
                          closed_bool.* = true;
-@@ -793,7 +818,7 @@
+@@ -793,7 +836,7 @@
                          // can deliver a .recv for the freed Conn.
                          loop.remove(conn);
                          conn.close();
@@ -100,7 +137,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
                      },
                      .disown => {
                          // When res.disown() was called, we immediately removed
-@@ -802,14 +827,14 @@
+@@ -802,14 +845,14 @@
                          // before we get back here.
                          // https://github.com/karlseguin/http.zig/issues/129#issuecomment-3031411404
                          closed_bool.* = true;
@@ -117,7 +154,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
                              continue;
                          }
  
-@@ -817,18 +842,70 @@
+@@ -817,18 +860,70 @@
  
                          const hc: *ws.HandlerConn(WSH) = @ptrCast(@alignCast(ptr));
                          conn.protocol = .{ .websocket = hc };
@@ -189,7 +226,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
          }
  
          // Entry-point of our thread pool. `thread_buf` is a thread-specific buffer
-@@ -885,10 +962,10 @@
+@@ -885,10 +980,10 @@
              if (success == false) {
                  ws_conn.close(.{ .code = 4997, .reason = "wsz" }) catch {};
                  self.websocket.cleanupConn(hc);
@@ -202,7 +239,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
              } else {
                  // Release `processing` before re-arming. With EPOLLONESHOT, re-arming
                  // while still holding `processing` loses a read that arrives in the
-@@ -903,10 +980,60 @@
+@@ -903,20 +998,77 @@
                      log.debug("({f}) failed to add read event monitor: {}", .{ ws_conn.address, err });
                      ws_conn.close(.{ .code = 4998, .reason = "wsz" }) catch {};
                      self.websocket.cleanupConn(hc);
@@ -263,7 +300,16 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
          fn disown(self: *Self, conn: *Conn(WSH)) void {
              const io = self.io;
              const http_conn = conn.protocol.http;
-@@ -916,7 +1043,7 @@
+             switch (http_conn._state) {
+                 .request => self.request_list.remove(conn),
++                // Unreachable in practice: both callers (run()'s parse-error
++                // path and accept()'s errdefer) only ever hold .request or
++                // .keepalive conns, and .handover conns are released through
++                // releaseHandover instead. Left as a plain remove rather than
++                // `unreachable` so a wrong analysis degrades to a stale list
++                // entry instead of aborting a live relay. Do NOT route a
++                // handover-snapshot node here; see releaseHandover for why.
+                 .handover => self.handover_list.remove(io, conn),
                  .keepalive => self.keepalive_list.remove(io, conn),
                  .active => unreachable,
              }
@@ -272,7 +318,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
              self.http_conn_pool.release(http_conn);
              self.conn_mem_pool.destroy(conn);
          }
-@@ -995,7 +1122,7 @@
+@@ -995,7 +1147,7 @@
              while (conn) |c| {
                  conn = c.next;
                  c.close();
