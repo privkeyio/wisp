@@ -121,7 +121,58 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
              }
          }
  
-@@ -782,7 +825,15 @@
+@@ -719,7 +762,18 @@
+                     // Linux can wake up multiple epoll fds for a single connection.
+                     return if (err == error.WouldBlock) {} else err;
+                 };
+-                errdefer posix.close(socket);
++                // Set once the conn owns both the socket and its own memory, i.e.
++                // once the errdefer below can do the whole teardown. Without it
++                // the errdefers unwind LIFO and all three run: disown() destroys
++                // the Conn and closes the socket, then these two destroy it a
++                // second time and close the fd again. Reproduced by injecting a
++                // monitorRead failure: all three cleanups fired for one
++                // connection and the relay aborted. A double
++                // MemoryPool.destroy links a node to itself, so two later
++                // create() calls hand the same Conn to two connections, and the
++                // double close can land on an fd another thread just opened.
++                var conn_owns_teardown = false;
++                errdefer if (!conn_owns_teardown) posix.close(socket);
+                 metrics.connection();
+ 
+                 const socket_flags = try posix.fcntl(socket, posix.F.GETFL, 0);
+@@ -727,7 +781,7 @@
+                 std.debug.assert(socket_flags & nonblocking == nonblocking);
+ 
+                 const conn = try self.conn_mem_pool.create(self.allocator);
+-                errdefer self.conn_mem_pool.destroy(conn);
++                errdefer if (!conn_owns_teardown) self.conn_mem_pool.destroy(conn);
+ 
+                 const ip_address = address.toIOAddress();
+ 
+@@ -741,13 +795,20 @@
+                 http_conn.stream = .{ .socket = .{ .handle = socket, .address = ip_address } };
+                 http_conn.timeout = now + self.timeout_request;
+ 
+-                self.len += 1;
+                 conn.* = .{
+                     .next = null,
+                     .prev = null,
+                     .protocol = .{ .http = http_conn },
+                 };
+                 self.request_list.insert(conn);
++                // Take the slot and arm the full teardown together, with nothing
++                // fallible between them. The two errdefers above release neither
++                // the slot nor the list entry, so a `try` added in that gap would
++                // leak a worker slot permanently and, past the insert, leave a
++                // freed Conn in the live request_list. These three statements
++                // must stay adjacent.
++                self.len += 1;
++                conn_owns_teardown = true;
+                 errdefer {
+                     conn.close();
+                     self.disown(conn);
+@@ -782,7 +843,15 @@
  
              while (c) |conn| {
                  c = conn.next;
@@ -138,7 +189,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
                  switch (http_conn.handover) {
                      .close, .unknown => {
                          closed_bool.* = true;
-@@ -793,7 +844,7 @@
+@@ -793,7 +862,7 @@
                          // can deliver a .recv for the freed Conn.
                          loop.remove(conn);
                          conn.close();
@@ -147,7 +198,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
                      },
                      .disown => {
                          // When res.disown() was called, we immediately removed
-@@ -802,14 +853,14 @@
+@@ -802,14 +871,14 @@
                          // before we get back here.
                          // https://github.com/karlseguin/http.zig/issues/129#issuecomment-3031411404
                          closed_bool.* = true;
@@ -164,7 +215,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
                              continue;
                          }
  
-@@ -817,18 +868,70 @@
+@@ -817,18 +886,70 @@
  
                          const hc: *ws.HandlerConn(WSH) = @ptrCast(@alignCast(ptr));
                          conn.protocol = .{ .websocket = hc };
@@ -236,7 +287,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
          }
  
          // Entry-point of our thread pool. `thread_buf` is a thread-specific buffer
-@@ -885,10 +988,10 @@
+@@ -885,10 +1006,10 @@
              if (success == false) {
                  ws_conn.close(.{ .code = 4997, .reason = "wsz" }) catch {};
                  self.websocket.cleanupConn(hc);
@@ -249,7 +300,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
              } else {
                  // Release `processing` before re-arming. With EPOLLONESHOT, re-arming
                  // while still holding `processing` loses a read that arrives in the
-@@ -903,20 +1006,77 @@
+@@ -903,20 +1024,77 @@
                      log.debug("({f}) failed to add read event monitor: {}", .{ ws_conn.address, err });
                      ws_conn.close(.{ .code = 4998, .reason = "wsz" }) catch {};
                      self.websocket.cleanupConn(hc);
@@ -329,7 +380,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
              self.http_conn_pool.release(http_conn);
              self.conn_mem_pool.destroy(conn);
          }
-@@ -995,7 +1155,8 @@
+@@ -995,7 +1173,8 @@
              while (conn) |c| {
                  conn = c.next;
                  c.close();
@@ -339,7 +390,39 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
                  self.http_conn_pool.release(c.protocol.http);
                  self.conn_mem_pool.destroy(c);
              }
-@@ -1509,6 +1670,38 @@
+@@ -1006,7 +1185,30 @@
+             var conn = list.head;
+             while (conn) |c| {
+                 conn = c.next;
+-                const http_conn = c.protocol.http;
++                // Guard the union read. This is unreachable today: handover_list
++                // has exactly one mutation site (the insert in swapList, always
++                // with a .http conn) plus the processSignal snapshot clear, and
++                // no handover_list.remove exists any more, so no stale
++                // .websocket node can be left as its head. Verified statically
++                // and across 12 shutdown-under-load rounds with upgrades in
++                // flight: zero sightings.
++                //
++                // Guarded anyway because that safety is a non-local invariant
++                // and the failure mode here is severe: reading protocol.http on
++                // a .websocket conn panics in ReleaseSafe, and in ReleaseFast
++                // reinterprets a *ws.HandlerConn as an *HTTPConn, so
++                // posix.close() would close whatever integer lands at that
++                // offset. server.deinit() runs before storage teardown, so a
++                // wild close there can land on the LMDB fd before the final
++                // sync. Skipping leaks one fd in a process that is exiting
++                // anyway, which is strictly better than either outcome.
++                const http_conn = switch (c.protocol) {
++                    .http => |hc| hc,
++                    .websocket => {
++                        log.err("shutdownList found a .websocket conn in an http list; skipping", .{});
++                        continue;
++                    },
++                };
+                 posix.close(http_conn.stream.socket.handle);
+                 http_conn.deinit(allocator);
+             }
+@@ -1509,6 +1711,38 @@
      }
  
      fn release(self: *HTTPConnPool, conn: *HTTPConn) void {
@@ -378,7 +461,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
          const conns = self.conns;
          self.lock();
          const available = self.available;
-@@ -1516,7 +1709,6 @@
+@@ -1516,7 +1750,6 @@
              self.unlock();
              conn.deinit(self.allocator);
  
