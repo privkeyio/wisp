@@ -86,7 +86,7 @@ jobs:
       - name: Check nix/deps.nix and the package version against the manifests
         run: ./scripts/verify-nix-deps.sh
 
-      - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
 
       # nix/deps.nix is the offline package cache for the Nix build, mirroring
       # the Zig manifests by hand. Nothing built it in CI, so it silently went
