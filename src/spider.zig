@@ -222,7 +222,7 @@ pub const Spider = struct {
                     defer client.done(msg);
                     if (msg.data.len > 0) {
                         if (std.mem.startsWith(u8, msg.data, "[\"EVENT\"")) {
-                            self.handleRelayMessage(msg.data, relay_url, &events_received);
+                            self.handleRelayMessage(msg.data, relay_url, &events_received, null);
                         }
                         if (std.mem.startsWith(u8, msg.data, "[\"EOSE\"")) {
                             break;
@@ -237,6 +237,23 @@ pub const Spider = struct {
             }
         }
         log.warn("Failed to bootstrap kind 3 from any relay", .{});
+    }
+
+    /// The spider subscribes to its follows' events, events that p-tag a follow,
+    /// and the admin's own events (bootstrap). Linear in follows times p-tags,
+    /// which is fine for contact-list sizes; a set would be the upgrade.
+    fn isRequested(self: *Spider, event: *const nostr.Event, follows: []const [32]u8) bool {
+        var admin: [32]u8 = undefined;
+        if (std.fmt.hexToBytes(&admin, self.config.spider_admin)) |_| {
+            if (std.mem.eql(u8, &admin, event.pubkey())) return true;
+        } else |_| {}
+        if (containsKey(follows, event.pubkey())) return true;
+        const p_tags = event.tags.get('p') orelse return false;
+        for (p_tags) |tag| switch (tag) {
+            .binary => |pk| if (containsKey(follows, &pk)) return true,
+            .string => {},
+        };
+        return false;
     }
 
     // Whether the admin's contact list is now in the store, rather than trusting
@@ -525,7 +542,7 @@ pub const Spider = struct {
                         break;
                     }
                     if (std.mem.startsWith(u8, msg_data.data, "[\"EVENT\"")) {
-                        self.handleRelayMessage(msg_data.data, relay_url, &conn.last_session_events);
+                        self.handleRelayMessage(msg_data.data, relay_url, &conn.last_session_events, self.follow_pubkeys.items);
                     }
                     if (std.mem.startsWith(u8, msg_data.data, "[\"NOTICE\"")) {
                         self.handleNotice(msg_data.data, relay_url);
@@ -784,7 +801,7 @@ pub const Spider = struct {
                     defer client.done(msg);
                     if (std.mem.startsWith(u8, msg.data, "[\"EOSE\"")) break;
                     if (std.mem.startsWith(u8, msg.data, "[\"EVENT\"")) {
-                        self.handleRelayMessage(msg.data, relay_url, &conn.last_session_events);
+                        self.handleRelayMessage(msg.data, relay_url, &conn.last_session_events, null);
                     }
                 }
             }
@@ -891,7 +908,7 @@ pub const Spider = struct {
                 defer client.done(msg);
                 last_data = milliTimestamp();
                 if (msg.data.len > 0) {
-                    self.handleRelayMessage(msg.data, relay_url, &events_received);
+                    self.handleRelayMessage(msg.data, relay_url, &events_received, null);
                 }
             } else {
                 const now = milliTimestamp();
@@ -919,7 +936,9 @@ pub const Spider = struct {
         return events_received;
     }
 
-    fn handleRelayMessage(self: *Spider, data: []const u8, relay_url: []const u8, events_received: *u64) void {
+    /// `follows` is the follow list when the caller already holds follow_mutex;
+    /// null makes this lock it for the relevance check.
+    fn handleRelayMessage(self: *Spider, data: []const u8, relay_url: []const u8, events_received: *u64, follows: ?[]const [32]u8) void {
         if (data.len > 10 and std.mem.startsWith(u8, data, "[\"NOTICE\"")) {
             self.handleNotice(data, relay_url);
             return;
@@ -1006,6 +1025,14 @@ pub const Spider = struct {
         if (handler.limitRejection(self.config, &event) != null) return;
         if (handler.powRejection(self.config, &event) != null) return;
         if (nostr.isProtected(&event) or nostr.isExpired(&event)) return;
+        // Only what the spider asked for: an upstream relay can send any signed
+        // event, and storing it would let that relay fill this one.
+        const requested = if (follows) |list| self.isRequested(&event, list) else blk: {
+            self.follow_mutex.lockUncancelable(nostr.io.io());
+            defer self.follow_mutex.unlock(nostr.io.io());
+            break :blk self.isRequested(&event, self.follow_pubkeys.items);
+        };
+        if (!requested) return;
         if (self.mgmt_store.rejection(&event) != null) return;
 
         const result = self.store.store(&event, event_json) catch return;
@@ -1129,6 +1156,11 @@ fn parseRelayUrl(url: []const u8) ?ParsedUrl {
         .path = path,
         .use_tls = use_tls,
     };
+}
+
+fn containsKey(keys: []const [32]u8, key: *const [32]u8) bool {
+    for (keys) |k| if (std.mem.eql(u8, &k, key)) return true;
+    return false;
 }
 
 fn buildReqMessage(buf: []u8, batch_idx: usize, pubkeys: [][32]u8) ![]u8 {
@@ -1280,13 +1312,29 @@ test "synced events go through the NIP-86 policy and are stored only when admitt
     _ = try std.fmt.hexToBytes(&author, "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
 
     var received: u64 = 0;
+    // An author the spider does not follow was never asked for.
+    spider.handleRelayMessage(msg, "wss://upstream", &received, null);
+    try testing.expectEqual(@as(u64, 0), received);
+    try testing.expect((try store.get(&id)) == null);
+
+    try spider.follow_pubkeys.append(testing.allocator, author);
     try mgmt.banPubkey(&author, "");
-    spider.handleRelayMessage(msg, "wss://upstream", &received);
+    spider.handleRelayMessage(msg, "wss://upstream", &received, null);
     try testing.expectEqual(@as(u64, 0), received);
     try testing.expect((try store.get(&id)) == null);
 
     try mgmt.unbanPubkey(&author);
-    spider.handleRelayMessage(msg, "wss://upstream", &received);
+    spider.handleRelayMessage(msg, "wss://upstream", &received, null);
     try testing.expectEqual(@as(u64, 1), received);
     try testing.expect((try store.get(&id)) != null);
+
+    // An unfollowed author mentioning a follow matches the #p subscription,
+    // including when the caller passes the follow list it already holds.
+    const mention =
+        \\["EVENT","s",{"kind":1,"id":"ad6995d17cd4056c5319c110f65592e6c4705bc8eb0251cd75099b01e2066e34","pubkey":"c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5","created_at":1700000000,"tags":[["p","79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"]],"content":"mention","sig":"b1dedec8f1e1a4b2eb8d16a9e59ddfb5b446bb0a43195245fe7a2de4957921919ff5911c005d30e4e946a043f3e9fa132bcd39b170688059ec25d904cde44879"}]
+    ;
+    spider.handleRelayMessage(mention, "wss://upstream", &received, &.{});
+    try testing.expectEqual(@as(u64, 1), received);
+    spider.handleRelayMessage(mention, "wss://upstream", &received, spider.follow_pubkeys.items);
+    try testing.expectEqual(@as(u64, 2), received);
 }

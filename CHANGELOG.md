@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The spider stored any validly signed event an upstream relay sent, whether or not it matched what the spider subscribed to, so a hostile or misbehaving upstream could fill the relay with unrelated events. Synced events are now stored only if their author is followed, they p-tag a follow, or they are the admin's own.
+
 ## [0.8.0] - 2026-10-06
 
 Moves the build to Zig 0.17, which is now required, and picks up two upstream WebSocket fixes. No protocol or configuration changes from 0.7.0.
