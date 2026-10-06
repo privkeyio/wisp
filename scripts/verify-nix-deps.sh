@@ -20,7 +20,7 @@
 #      but takes ~2 minutes and reports a store path; this names the hash in a
 #      second.
 #   2. nix/package.nix's version drifting from build.zig.zon. Nothing compared
-#      these, and it silently lagged from 0.5.10 across two releases. NIP-11
+#      these, and it silently lagged at 0.5.10 across six releases. NIP-11
 #      reports its own literal, so the packaged version is invisible at runtime.
 #
 # What it deliberately does NOT catch, and why: an entry that no manifest
