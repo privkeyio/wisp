@@ -15,24 +15,28 @@
 # content) and the network `zig build` in the other CI jobs (manifest hash ->
 # content), the chain from manifest to compiled bytes is complete.
 #
-# It also catches two drift classes cheaply:
+# It also catches three drift classes cheaply:
 #   1. A direct dependency missing from the cache. `nix build` catches this too,
 #      but takes ~2 minutes and reports a store path; this names the hash in a
 #      second.
-#   2. nix/package.nix's version drifting from build.zig.zon. Nothing compared
+#   2. A stale entry for a package the in-repo manifests pin at another hash or
+#      vendor by path. zig ignores entries it does not resolve, so nothing else
+#      notices these; the obsolete websocket revision and the httpz entry left
+#      behind by vendoring were both of this kind.
+#   3. nix/package.nix's version drifting from build.zig.zon. Nothing compared
 #      these, and it silently lagged at 0.5.10 across six releases. NIP-11
 #      reports its own literal, so the packaged version is invisible at runtime.
 #
-# What it deliberately does NOT catch, and why: an entry that no manifest
-# requires (the obsolete httpz entry was one), and the url of a TRANSITIVE entry
-# such as noscrypt or StringZilla. Both need the full closure, and the transitive
-# manifests live inside fetched packages rather than the repo -- zig-pkg/ is
-# gitignored. Resolving them means network fetches on every run. Upgrade path if
-# that becomes worth it: walk the closure from a populated ZIG_GLOBAL_CACHE_DIR
-# after `zig build --fetch`, then assert set equality and cross-check every url.
+# What it deliberately does NOT catch, and why: a stale entry for a package only
+# a TRANSITIVE dependency needs (noscrypt, StringZilla), and the url of such an
+# entry. Both need the full closure, and the transitive manifests live inside
+# fetched packages rather than the repo -- zig-pkg/ is gitignored. Resolving them
+# means network fetches on every run. Upgrade path if that becomes worth it: walk
+# the closure from a populated ZIG_GLOBAL_CACHE_DIR after `zig build --fetch`,
+# then assert set equality and cross-check every url.
 #
 # Usage: scripts/verify-nix-deps.sh   (from anywhere in the repo)
-# Requires: bash, grep, awk, comm. No nix, no network.
+# Requires: bash, grep, awk, comm, cut. No nix, no network.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -125,6 +129,44 @@ while read -r hash want; do
     checked=$((checked + 1))
   fi
 done <<< "$required_pairs"
+
+# Package names the in-repo manifests account for: every pinned hash's name
+# prefix, plus the .name of each path dependency's own manifest. Nameless
+# packages (hash "N-V-...") are left out, since all of them share that prefix.
+# Ceiling: if a transitive dependency ever legitimately pins one of these
+# packages at a different revision, this flags its entry; that case needs the
+# closure walk described in the header.
+pinned_names="$(
+  {
+    printf '%s\n' "$required_hashes" | cut -d- -f1
+    awk '
+      !/^[[:space:]]*\/\// && /\.path = "/ {
+        line = $0
+        sub(/.*\.path = "/, "", line); sub(/".*/, "", line)
+        dir = FILENAME; sub(/build\.zig\.zon$/, "", dir)
+        print dir line "/build.zig.zon"
+      }
+    ' build.zig.zon vendor/httpz/build.zig.zon | while read -r manifest; do
+      grep -oP '^\s*\.name = \.\K\w+' "$manifest" \
+        || { echo "FAIL - could not read .name from $manifest" >&2; exit 1; }
+    done
+  } | awk '$0 != "" && $0 != "N"' | sort -u
+)"
+
+stale=""
+while read -r hash; do
+  [ -n "$hash" ] || continue
+  grep -qxF "${hash%%-*}" <<< "$pinned_names" || continue
+  grep -qxF "$hash" <<< "$required_hashes" && continue
+  stale+="$hash"$'\n'
+done <<< "$present_hashes"
+if [ -n "$stale" ]; then
+  echo "FAIL - nix/deps.nix has entries no manifest asks for, for packages the"
+  echo "       manifests pin at another hash or vendor by path:"
+  printf '  %s\n' $stale
+  echo "       zig ignores them, so nothing else would notice; remove them."
+  fail=1
+fi
 
 # build.zig.zon is the source of truth. Three other files carry the version by
 # hand and none of them is generated, so each can drift silently: nix/package.nix
