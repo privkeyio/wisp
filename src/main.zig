@@ -212,7 +212,7 @@ pub fn main(init: std.process.Init) !void {
 
     var spider: ?Spider = null;
     if (config.spider_enabled) {
-        spider = Spider.init(allocator, &config, &store, &broadcaster, &g_shutdown) catch |err| {
+        spider = Spider.init(allocator, &config, &store, &mgmt_store, &broadcaster, &g_shutdown) catch |err| {
             std.log.err("Failed to initialize Spider: {}", .{err});
             return err;
         };

@@ -30,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A REQ for several kinds ignored `since`, `until` and expiration, and always scanned from the newest event, so paging back with `until` past the scan window returned an empty set.
 - COUNT counted an event once per filter it matched.
 - A REQ whose query failed was reported closed but left registered, so it kept receiving live events.
+- The spider stored events from upstream relays without the NIP-86 policy published events go through, so a banned pubkey, a pubkey outside the allowlist, a disallowed kind or a banned event could still arrive by sync. Both paths now share one check.
 - The spider ended kind 3 bootstrap from a relay as soon as any message from it contained the text `"kind":3` (including `"kind":30023`), so a non-matching event could stop it before the contact list arrived. It now checks that the admin's contact list was actually stored.
 
 ## [0.6.1] - 2026-08-12

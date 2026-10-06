@@ -81,6 +81,18 @@ pub const ManagementStore = struct {
         return txn.get(dbi, key) catch null != null;
     }
 
+    /// Why the relay's NIP-86 policy refuses `event`, or null if it admits it.
+    /// A NIP-86 `allowevent` approves that one event past the pubkey and kind
+    /// allowlists; a pubkey ban still applies.
+    pub fn rejection(self: *ManagementStore, event: *const nostr.Event) ?[]const u8 {
+        if (self.isPubkeyBanned(event.pubkey())) return "blocked: pubkey is banned";
+        const approved = self.isEventAllowed(event.id());
+        if (!approved and self.hasAllowedPubkeys() and !self.isPubkeyAllowed(event.pubkey())) return "blocked: pubkey not in allowlist";
+        if (!approved and !self.isKindAllowed(event.kind())) return "blocked: event kind not allowed";
+        if (self.isEventBanned(event.id())) return "blocked: event is banned";
+        return null;
+    }
+
     pub fn banPubkey(self: *ManagementStore, pubkey: *const [32]u8, reason: []const u8) !void {
         try self.putExclusive(self.banned_pubkeys, self.allowed_pubkeys, pubkey, reason);
     }

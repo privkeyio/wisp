@@ -323,29 +323,8 @@ pub const Handler = struct {
             }
         }
 
-        if (self.mgmt_store.isPubkeyBanned(event.pubkey())) {
-            self.sendOk(conn, id, false, "blocked: pubkey is banned");
-            return;
-        }
-
-        // A NIP-86 `allowevent` approves that one event past the pubkey and kind
-        // allowlists; a pubkey ban still applies.
-        const approved = self.mgmt_store.isEventAllowed(id);
-
-        if (!approved and self.mgmt_store.hasAllowedPubkeys()) {
-            if (!self.mgmt_store.isPubkeyAllowed(event.pubkey())) {
-                self.sendOk(conn, id, false, "blocked: pubkey not in allowlist");
-                return;
-            }
-        }
-
-        if (!approved and !self.mgmt_store.isKindAllowed(event.kind())) {
-            self.sendOk(conn, id, false, "blocked: event kind not allowed");
-            return;
-        }
-
-        if (self.mgmt_store.isEventBanned(id)) {
-            self.sendOk(conn, id, false, "blocked: event is banned");
+        if (self.mgmt_store.rejection(&event)) |reason| {
+            self.sendOk(conn, id, false, reason);
             return;
         }
 

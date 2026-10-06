@@ -2,6 +2,7 @@ const std = @import("std");
 const nostr = @import("nostr.zig");
 const isPrivateKind = @import("connection.zig").isPrivateKind;
 const Store = @import("store.zig").Store;
+const ManagementStore = @import("management_store.zig").ManagementStore;
 const Broadcaster = @import("broadcaster.zig").Broadcaster;
 const Config = @import("config.zig").Config;
 const websocket = @import("websocket");
@@ -35,6 +36,7 @@ pub const Spider = struct {
     allocator: std.mem.Allocator,
     config: *const Config,
     store: *Store,
+    mgmt_store: *ManagementStore,
     broadcaster: *Broadcaster,
     running: std.atomic.Value(bool),
     global_shutdown: *std.atomic.Value(bool),
@@ -48,6 +50,7 @@ pub const Spider = struct {
         allocator: std.mem.Allocator,
         config: *const Config,
         store: *Store,
+        mgmt_store: *ManagementStore,
         broadcaster: *Broadcaster,
         global_shutdown: *std.atomic.Value(bool),
     ) !Spider {
@@ -55,6 +58,7 @@ pub const Spider = struct {
             .allocator = allocator,
             .config = config,
             .store = store,
+            .mgmt_store = mgmt_store,
             .broadcaster = broadcaster,
             .running = std.atomic.Value(bool).init(false),
             .global_shutdown = global_shutdown,
@@ -989,6 +993,8 @@ pub const Spider = struct {
         defer event.deinit();
 
         event.validate() catch return;
+        // Synced events are subject to the same NIP-86 policy as published ones.
+        if (self.mgmt_store.rejection(&event) != null) return;
 
         const result = self.store.store(&event, event_json) catch return;
 

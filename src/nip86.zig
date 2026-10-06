@@ -522,4 +522,15 @@ test "nip86 ban and allow lists are exclusive and disallowkind is a deny list" {
     try testing.expectEqual(@as(u16, 200), handler.dispatch("disallowkind", "[7]").status);
     try testing.expect(!mgmt.isKindAllowed(7));
     try testing.expect(!mgmt.isKindAllowed(1));
+
+    // rejection() is the one policy check shared by published and synced events.
+    var event = try nostr.Event.parseWithAllocator(
+        \\{"id":"00000000000000000000000000000000000000000000000000000000000000ee","pubkey":"00000000000000000000000000000000000000000000000000000000000000bb","sig":"00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000","kind":1,"created_at":1700000000,"content":"","tags":[]}
+    , testing.allocator);
+    defer event.deinit();
+    try testing.expectEqualStrings("blocked: event kind not allowed", mgmt.rejection(&event).?);
+    try testing.expectEqual(@as(u16, 200), handler.dispatch("allowevent", "[\"" ++ id_hex ++ "\"]").status);
+    try testing.expectEqual(@as(?[]const u8, null), mgmt.rejection(&event));
+    try testing.expectEqual(@as(u16, 200), handler.dispatch("banpubkey", "[\"" ++ pk_hex ++ "\"]").status);
+    try testing.expectEqualStrings("blocked: pubkey is banned", mgmt.rejection(&event).?);
 }
