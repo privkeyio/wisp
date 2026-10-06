@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-06
+
+A security release. An AUTH event signed for another relay could authenticate here, and a single REQ or negentropy message could crash or hang the relay; both are fixed through libnostr-z 0.4.0. It also brings REQ handling in line with the current NIP-01 (`limit: 0`, multi-filter unions), adds NIP-78 private app data and the new NIP-86 methods, and applies the relay's policy to events the spider syncs.
+
 ### Security
 
 - An AUTH event signed for another relay could authenticate on wisp. The library located the AUTH tags by searching for the first `"tags"` anywhere in the event while the signature covered the real `tags` member, so anyone holding a user's AUTH event from another relay (within the 10 minute window) could add a decoy member carrying wisp's challenge and relay URL and be authenticated as that user. The same flaw let NIP-98 auth for the management API be redirected from another service within its 60 second window, let a third party republish a signed event with `-` stripped (NIP-70) or with injected `expiration`, `d` or `e` tags, and let the PoW nonce check read a decoy. Event fields are now read only from the event's top-level members, through libnostr-z 0.4.0.
@@ -14,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- NIP-78: kind 78 and 30078 app data is only accepted from, and only served to, a connection authenticated (NIP-42) as its author, on REQ, live broadcast, COUNT and negentropy. Hidden events do not count toward a filter's `limit`. A REQ, COUNT or NEG-OPEN that names these kinds without authenticating gets `CLOSED auth-required` and an AUTH challenge, and the spider leaves them out of the negentropy sets it reconciles with upstream relays. `78` is advertised in `supported_nips`.
+- NIP-78: kind 78 and 30078 app data is only accepted from, and only served to, a connection authenticated (NIP-42) as its author, on REQ, live broadcast, COUNT and negentropy. Hidden events do not count toward a filter's `limit`. A REQ, COUNT or NEG-OPEN that names these kinds without authenticating is refused with `auth-required` (CLOSED, or NEG-ERR for NEG-OPEN) and an AUTH challenge, and the spider leaves them out of the negentropy sets it reconciles with upstream relays. `78` is advertised in `supported_nips`.
 - NIP-86: `unbanpubkey`, `unallowpubkey`, `unbanevent`, `unallowevent`, `listallowedevents` and `listdisallowedkinds`.
 
 ### Changed
