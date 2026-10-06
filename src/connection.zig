@@ -101,11 +101,30 @@ pub const Connection = struct {
         try self.authenticated_pubkeys.put(pubkey.*, {});
     }
 
-    /// NIP-78 app data (kinds 78 and 30078) is private to its author: it is only
-    /// accepted from, and only served to, a connection authenticated as that
-    /// author.
-    pub fn mayAccessPrivate(self: *Connection, kind: i32, author: *const [32]u8) bool {
-        return !isPrivateKind(kind) or self.isPubkeyAuthenticated(author);
+    /// NIP-78 app data (kinds 78 and 30078) is only accepted from a connection
+    /// authenticated as its author. Gift wraps are signed by one-time keys, so
+    /// anyone may publish them.
+    pub fn mayPublish(self: *Connection, kind: i32, author: *const [32]u8) bool {
+        return !isAuthorPrivateKind(kind) or self.isPubkeyAuthenticated(author);
+    }
+
+    /// NIP-78 app data is only served to its authenticated author, and gift wraps
+    /// (NIP-17/59) only to an authenticated p-tagged recipient.
+    pub fn mayRead(self: *Connection, event: *const nostr.Event) bool {
+        const kind = event.kind();
+        if (isAuthorPrivateKind(kind)) return self.isPubkeyAuthenticated(event.pubkey());
+        if (!isRecipientPrivateKind(kind)) return true;
+        const recipients = event.tags.get('p') orelse return false;
+        // One lock for every p-tag: broadcast runs this for each subscriber.
+        const io = nostr.io.io();
+        self.auth_mutex.lockUncancelable(io);
+        defer self.auth_mutex.unlock(io);
+        if (self.authenticated_pubkeys.count() == 0) return false;
+        for (recipients) |tag| switch (tag) {
+            .binary => |pk| if (self.authenticated_pubkeys.contains(pk)) return true,
+            .string => {},
+        };
+        return false;
     }
 
     /// Thread-safe write of a complete relay message (text frame). Used by both
@@ -246,8 +265,29 @@ pub const Connection = struct {
     }
 };
 
+/// Kinds served only to an authenticated author or recipient.
 pub fn isPrivateKind(kind: i32) bool {
+    return isAuthorPrivateKind(kind) or isRecipientPrivateKind(kind);
+}
+
+/// NIP-78 app data.
+pub fn isAuthorPrivateKind(kind: i32) bool {
     return kind == 78 or kind == 30078;
+}
+
+/// NIP-59 gift wraps, stored (1059) and ephemeral (21059).
+pub fn isRecipientPrivateKind(kind: i32) bool {
+    return kind == 1059 or kind == 21059;
+}
+
+/// A gift wrap no recipient could read (no valid p tag) is refused at ingest.
+pub fn hasRecipient(event: *const nostr.Event) bool {
+    const recipients = event.tags.get('p') orelse return false;
+    for (recipients) |tag| switch (tag) {
+        .binary => return true,
+        .string => {},
+    };
+    return false;
 }
 
 pub const Subscription = struct {

@@ -1,6 +1,7 @@
 const std = @import("std");
 const nostr = @import("nostr.zig");
-const isPrivateKind = @import("connection.zig").isPrivateKind;
+const connection = @import("connection.zig");
+const isPrivateKind = connection.isPrivateKind;
 const Store = @import("store.zig").Store;
 const ManagementStore = @import("management_store.zig").ManagementStore;
 const handler = @import("handler.zig");
@@ -1053,6 +1054,7 @@ pub const Spider = struct {
         if (handler.limitRejection(self.config, &event) != null) return;
         if (handler.powRejection(self.config, &event) != null) return;
         if (nostr.isProtected(&event) or nostr.isExpired(&event)) return;
+        if (connection.isRecipientPrivateKind(event.kind()) and !connection.hasRecipient(&event)) return;
         // Only what the spider asked for: an upstream relay can send any signed
         // event, and storing it would let that relay fill this one.
         const rel = self.relevance(&event);
@@ -1403,6 +1405,14 @@ test "synced events go through the NIP-86 policy and are stored only when admitt
         \\["EVENT","s",{"id":"8f2403b2cf3797cccf89ad5324e6117d685bbaacff770e36ffe3ae316ca1a945","pubkey":"1ebe578791125a06885b92f743a313976f63e96bbd90b10de2124391917c308a","created_at":1700000000,"kind":1,"tags":[["p","79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"]],"content":"mention five","sig":"2ae34707be9e2245c956fc0304ac7ab9b7268be42199a8a9c5d4b8cc7a2600ca5b613c02e312ab5fd7d3e654d21b1d8cdab009de794a1e797b40077a19d5696d"}]
     ;
     spider.handleRelayMessage(mention_five, "wss://third", &received);
+    try testing.expectEqual(@as(u64, 5), received);
+
+    // A gift wrap with no recipient could never be served, so it is not stored
+    // even from a followed author.
+    const recipientless =
+        \\["EVENT","s",{"id":"fe9c84e7063da2fb02cb7cf1f30e4a66aa172220d38cdcfd02e52d5bc8dff781","pubkey":"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798","created_at":1700000000,"kind":1059,"tags":[],"content":"no recipient","sig":"edb979314b9401376aed7455f8c8dfbcd8d0dfa1488cd840d598d878260f930e7af473a46a61bd841b8cd84e6aa2a4c6e76d240a1e875d510e29f055e6372c08"}]
+    ;
+    spider.handleRelayMessage(recipientless, "wss://upstream", &received);
     try testing.expectEqual(@as(u64, 5), received);
 }
 

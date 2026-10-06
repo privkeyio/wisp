@@ -96,13 +96,13 @@ fn streamQueryResults(conn: anytype, sub_id: []const u8, iter: anytype, started:
     return .complete;
 }
 
-/// The reader for store iterators: hides NIP-78 events from anyone but their
-/// authenticated author.
+/// The reader for store iterators: hides private events (NIP-78 app data,
+/// NIP-59 gift wraps) from anyone but their authenticated author or recipient.
 fn readerVisibility(conn: *Connection) Visibility {
     return .{ .ctx = conn, .allowsFn = struct {
-        fn allows(ctx: *anyopaque, kind: i32, author: *const [32]u8) bool {
+        fn allows(ctx: *anyopaque, event: *const nostr.Event) bool {
             const c: *Connection = @ptrCast(@alignCast(ctx));
-            return c.mayAccessPrivate(kind, author);
+            return c.mayRead(event);
         }
     }.allows };
 }
@@ -380,7 +380,12 @@ pub const Handler = struct {
             return;
         }
 
-        if (!conn.mayAccessPrivate(event.kind(), event.pubkey())) {
+        if (connection.isRecipientPrivateKind(event.kind()) and !connection.hasRecipient(&event)) {
+            self.sendOk(conn, id, false, "invalid: gift wrap must p-tag a recipient");
+            return;
+        }
+
+        if (!conn.mayPublish(event.kind(), event.pubkey())) {
             self.sendAuthChallenge(conn);
             self.sendOk(conn, id, false, "auth-required: app data may only be published by its authenticated author");
             return;
@@ -473,8 +478,20 @@ pub const Handler = struct {
             return;
         }
 
-        for (ids_to_delete) |target_id| {
-            _ = self.store.delete(&target_id, pubkey) catch {};
+        const outcomes = self.allocator.alloc(Store.DeleteOutcome, ids_to_delete.len) catch {
+            self.sendOk(conn, id, false, "error: out of memory");
+            return;
+        };
+        defer self.allocator.free(outcomes);
+        for (ids_to_delete, outcomes) |target_id, *outcome| {
+            outcome.* = self.store.deleteOutcome(&target_id, pubkey) catch .none;
+        }
+
+        // A recipient deleting gift wraps sent to them: publishing that deletion
+        // would tie their key to the wraps, so it is applied but not kept.
+        if (Store.onlyReceivedWraps(outcomes, event)) {
+            self.replyOk(conn, id, true, "");
+            return;
         }
 
         const stored = if (self.store.store(event, json)) |r| r.stored else |_| false;
@@ -545,7 +562,7 @@ pub const Handler = struct {
 
         if (!conn.isAuthenticated() and requestsPrivateKinds(filters)) {
             self.sendAuthChallenge(conn);
-            self.sendClosed(conn, sub_id, "auth-required: app data is only served to its authenticated author");
+            self.sendClosed(conn, sub_id, "auth-required: private events are only served to their authenticated author or recipient");
             conn.allocator().free(filters);
             return;
         }
@@ -675,7 +692,7 @@ pub const Handler = struct {
 
         if (!conn.isAuthenticated() and requestsPrivateKinds(filters)) {
             self.sendAuthChallenge(conn);
-            self.sendClosed(conn, sub_id, "auth-required: app data is only counted for its authenticated author");
+            self.sendClosed(conn, sub_id, "auth-required: private events are only counted for their authenticated author or recipient");
             return;
         }
 
@@ -826,7 +843,7 @@ pub const Handler = struct {
 
         if (!conn.isAuthenticated() and requestsPrivateKinds(&.{filter})) {
             self.sendAuthChallenge(conn);
-            self.sendNegErr(conn, sub_id, "auth-required: app data is only synced with its authenticated author");
+            self.sendNegErr(conn, sub_id, "auth-required: private events are only synced with their authenticated author or recipient");
             return;
         }
 

@@ -392,9 +392,18 @@ fn processImportLine(allocator: std.mem.Allocator, store: *Store, line: []const 
         };
         defer allocator.free(ids_to_delete);
 
-        const pubkey = event.pubkey();
-        for (ids_to_delete) |target_id| {
-            _ = store.delete(&target_id, pubkey) catch {};
+        const outcomes = allocator.alloc(Store.DeleteOutcome, ids_to_delete.len) catch {
+            failed.* += 1;
+            return;
+        };
+        defer allocator.free(outcomes);
+        for (ids_to_delete, outcomes) |target_id, *outcome| {
+            outcome.* = store.deleteOutcome(&target_id, event.pubkey()) catch .none;
+        }
+        // Applied but not kept, as when a recipient publishes it (see Store.onlyReceivedWraps).
+        if (Store.onlyReceivedWraps(outcomes, &event)) {
+            imported.* += 1;
+            return;
         }
     }
 

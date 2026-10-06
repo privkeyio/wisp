@@ -10,13 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `[spider] mention_events_per_minute` (`WISP_SPIDER_MENTION_EVENTS_PER_MINUTE`, default 600): per upstream relay, a cap on events stored only because they p-tag a follow. Their authors are not followed, so anyone can create them in bulk; events by follows and the admin are never limited. Mentions dropped over the cap are not fetched again later. `0` removes the cap.
+- NIP-17 / NIP-59: gift wraps (kinds 1059 and the ephemeral 21059) are only served to a connection authenticated (NIP-42) as one of their p-tagged recipients, on REQ, live broadcast, COUNT and negentropy, and a REQ, COUNT or NEG-OPEN naming kind 1059 without authenticating is refused with `auth-required`. Anyone may still publish them, since they are signed by one-time keys. A gift wrap with no valid recipient `p` tag is rejected, since no one could ever read it. A recipient can delete a gift wrap addressed to them with a NIP-09 deletion; when every target is a wrap they received (or one an earlier deletion already removed), the deletion is applied but not stored or broadcast, so it does not publicly tie their key to the wraps. A deletion that also covers the signer's own events, or carries `a` tags, is kept as usual and so does reveal its targets. `17` and `59` are advertised in `supported_nips`. Hidden gift wraps still count toward a query's scan cap (as hidden NIP-78 events do), so a non-recipient can coarsely estimate how many wraps a key receives; NIP-59's randomized timestamps blunt the timing.
 
 ### Fixed
 
 - `admin_pubkeys` silently ignored any entry that was not lowercase 64-character hex, so pasting an `npub` or uppercase hex locked the operator out of the NIP-86 management API with no warning. Entries may now be hex in any case or an `npub`, and an entry that is neither is logged at startup.
-
-### Fixed
-
 - The spider stored any validly signed event an upstream relay sent, whether or not it matched what the spider subscribed to, so a hostile or misbehaving upstream could fill the relay with unrelated events. Synced events are now stored only if their author is followed, they p-tag a follow, or they are the admin's own.
 - Refreshing the spider's follow list emptied it first and then rebuilt it, which could take tens of seconds while bootstrapping, so the relay threads dropped follows' events in that window. The new list is built aside and swapped in. Catch-up and subscription setup no longer hold the follow-list lock across network reads, writes and the pauses between subscription batches.
 - If a keep-alive connection's socket could not be switched back to non-blocking mode after a response, the vendored HTTP server reached an unreachable state, which aborts the ReleaseSafe build (Docker, StartOS) and is undefined behavior on the ReleaseFast release binaries. The connection is now closed instead.

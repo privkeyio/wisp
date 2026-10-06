@@ -33,6 +33,8 @@ const Processed = struct {
     // Persisted to disk. Distinct from `broadcast`: ephemeral events (NIP-16) broadcast
     // but are never stored, so they must not count as stored or invalidate the query cache.
     stored: bool = false,
+    // Deleted events without storing anything, so the cache is stale after commit.
+    invalidates: bool = false,
 };
 
 pub const Writer = struct {
@@ -158,7 +160,7 @@ pub const Writer = struct {
                 fatal = true;
                 break;
             };
-            if (p.stored) stored_any = true;
+            if (p.stored or p.invalidates) stored_any = true;
             processed[n] = p;
             n += 1;
         }
@@ -197,8 +199,15 @@ pub const Writer = struct {
             const ids = nostr.getDeletionIds(self.allocator, event) catch null;
             defer if (ids) |slice| self.allocator.free(slice);
             const slice = ids orelse return .{ .conn_id = job.conn_id, .event = event.*, .success = false, .message = "error: failed to parse deletion", .broadcast = false };
-            for (slice) |target| {
-                _ = try self.store.deleteInTxn(txn, &target, event.pubkey());
+            const outcomes = try self.allocator.alloc(Store.DeleteOutcome, slice.len);
+            defer self.allocator.free(outcomes);
+            for (slice, outcomes) |target, *outcome| {
+                outcome.* = try self.store.deleteOutcomeInTxn(txn, &target, event.pubkey());
+            }
+            // A recipient deleting gift wraps sent to them: publishing that
+            // deletion would tie their key to the wraps, so it is not kept.
+            if (Store.onlyReceivedWraps(outcomes, event)) {
+                return .{ .conn_id = job.conn_id, .event = event.*, .success = true, .message = "", .broadcast = false, .invalidates = true };
             }
             _ = try self.store.storeInTxn(txn, event, job.json);
             return .{ .conn_id = job.conn_id, .event = event.*, .success = true, .message = "", .broadcast = true, .stored = true };
