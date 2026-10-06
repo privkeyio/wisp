@@ -58,8 +58,10 @@ jobs:
           # Costs a full rebuild per release, which is the right trade here.
           use-cache: false
 
+      # Without -Dcpu, Zig targets the runner's own CPU and the binary can use
+      # instructions other machines lack (SIGILL). Baseline runs on any CPU of the arch.
       - name: Build
-        run: zig build -Doptimize=ReleaseFast
+        run: zig build -Doptimize=ReleaseFast -Dcpu=baseline
 
       - name: Package (Unix)
         if: runner.os != 'Windows'

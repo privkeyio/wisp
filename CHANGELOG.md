@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The Nix package fetches StringZilla by commit (`7ca3964`, the commit tag v4.5.1 points to) instead of by tag, so every dependency is pinned by commit. The content hash is unchanged.
 
+### Fixed
+
+- The release binaries and the Docker image were compiled for the CPU of the machine that built them (`zig build` without `-Dcpu`), so they could use instructions other CPUs lack. The v0.9.0 linux-x86_64 binary, built on an AMD runner, crashed with an illegal instruction (SSE4a `insertq`) on an Intel CPU as soon as the spider opened a TLS connection. Earlier releases are built the same way. Both are now built for the baseline CPU of their architecture, as the Nix package and the StartOS package already were.
+
 ## [0.9.0] - 2026-10-06
 
 Serves NIP-17 / NIP-59 gift wraps only to their authenticated recipients, limits what the spider stores from upstream relays, and lets the NixOS module keep config values out of the Nix store. Clients reading gift wraps must now authenticate with NIP-42.

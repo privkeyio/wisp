@@ -20,7 +20,9 @@ RUN arch="$(uname -m)" && \
 
 WORKDIR /src
 COPY . .
-RUN zig build -Doptimize=ReleaseSafe
+# The image runs on other machines than the one that built it, so target the
+# baseline CPU rather than the builder's own.
+RUN zig build -Doptimize=ReleaseSafe -Dcpu=baseline
 
 FROM debian:bookworm-slim
 
