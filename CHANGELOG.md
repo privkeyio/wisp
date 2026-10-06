@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `[spider] mention_events_per_minute` (`WISP_SPIDER_MENTION_EVENTS_PER_MINUTE`, default 600): per upstream relay, a cap on events stored only because they p-tag a follow. Their authors are not followed, so anyone can create them in bulk; events by follows and the admin are never limited. Mentions dropped over the cap are not fetched again later. `0` removes the cap.
 - NIP-17 / NIP-59: gift wraps (kinds 1059 and the ephemeral 21059) are only served to a connection authenticated (NIP-42) as one of their p-tagged recipients, on REQ, live broadcast, COUNT and negentropy, and a REQ, COUNT or NEG-OPEN naming kind 1059 without authenticating is refused with `auth-required`. Anyone may still publish them, since they are signed by one-time keys. A gift wrap with no valid recipient `p` tag is rejected, since no one could ever read it. A recipient can delete a gift wrap addressed to them with a NIP-09 deletion; when every target is a wrap they received (or one an earlier deletion already removed), the deletion is applied but not stored or broadcast, so it does not publicly tie their key to the wraps. A deletion that also covers the signer's own events, or carries `a` tags, is kept as usual and so does reveal its targets. `17` and `59` are advertised in `supported_nips`. Hidden gift wraps still count toward a query's scan cap (as hidden NIP-78 events do), so a non-recipient can coarsely estimate how many wraps a key receives; NIP-59's randomized timestamps blunt the timing.
+- NixOS module: `services.wisp.settingsFile` takes the absolute path of an extra config file, outside the Nix store, for values that must stay secret. It is read through systemd `LoadCredential=`, so it can be root-only, and its keys override `settings`.
+
+### Changed
+
+- NixOS module: the generated config reaches wisp as a systemd credential, so the relay's command line names `/run/credentials/wisp.service/wisp.toml` rather than a Nix store path. Existing `settings` configurations need no change.
 
 ### Fixed
 
