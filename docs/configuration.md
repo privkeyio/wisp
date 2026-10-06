@@ -199,6 +199,7 @@ than being accepted and then matching nothing. The same applies to `trusted_prox
 | `admin` | `WISP_SPIDER_ADMIN` | hex | (empty) | Pubkey whose contact list seeds the follow set. |
 | `pubkeys` | `WISP_SPIDER_PUBKEYS` | csv | (empty) | Additional hex pubkeys to follow. |
 | `sync_interval` | `WISP_SPIDER_SYNC_INTERVAL` | u32 (seconds) | `300` | Seconds between sync passes. |
+| `mention_events_per_minute` | `WISP_SPIDER_MENTION_EVENTS_PER_MINUTE` | u32 | `600` | Per upstream relay, how many events per minute are stored that arrive only because they p-tag a follow (their authors are not followed, so anyone can create them). Events by follows and the admin are not limited. `0` removes the limit. |
 
 ### `[negentropy]` (NIP-77)
 

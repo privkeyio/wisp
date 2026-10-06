@@ -83,6 +83,8 @@ relays = "wss://relay.damus.io,wss://nos.lol,wss://relay.nostr.band"
 sync_interval = 300
 admin = ""  # your hex pubkey (use `zig-out/bin/wisp help` for npub support via CLI)
 # pubkeys = ""  # additional hex pubkeys to follow
+# Events from authors you don't follow that mention a follow, per upstream relay.
+# mention_events_per_minute = 600
 
 [negentropy]
 enabled = true
