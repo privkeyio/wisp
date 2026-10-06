@@ -544,3 +544,208 @@ pub const Server = struct {
         self.trusted_proxy_filter.deinit();
     }
 };
+
+const testing = std.testing;
+
+// WsConn's lifecycle without an httpz worker: a socketpair stands in for the
+// upgraded client socket so afterInit's writes have somewhere to go.
+const TestPeer = struct {
+    fds: [2]std.c.fd_t,
+    ws: websocket.Conn,
+
+    fn init(self: *TestPeer) !void {
+        if (std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &self.fds) != 0) return error.SocketPair;
+        self.ws = .{
+            .io = nostr.io.io(),
+            ._closed = false,
+            .started = 0,
+            .stream = .{ .socket = .{ .handle = self.fds[0], .address = try std.Io.net.IpAddress.parse("127.0.0.1", 0) } },
+            .address = try std.Io.net.IpAddress.parse("127.0.0.1", 0),
+        };
+    }
+
+    fn deinit(self: *TestPeer) void {
+        _ = std.c.close(self.fds[0]);
+        _ = std.c.close(self.fds[1]);
+    }
+
+    // Non-blocking read of whatever WsConn wrote to the client side.
+    fn received(self: *TestPeer, buf: []u8) []const u8 {
+        const n = std.c.recv(self.fds[1], buf.ptr, buf.len, std.c.MSG.DONTWAIT);
+        return if (n > 0) buf[0..@intCast(n)] else buf[0..0];
+    }
+};
+
+const TestRelay = struct {
+    config: Config,
+    subs: Subscriptions,
+    limiter: rate_limiter.ConnectionLimiter,
+    next_id: std.atomic.Value(u64),
+
+    fn init(self: *TestRelay, max_connections: u32, max_per_ip: u32) void {
+        self.config = Config.defaults();
+        self.config.max_connections = max_connections;
+        self.subs = Subscriptions.init(testing.allocator);
+        self.limiter = rate_limiter.ConnectionLimiter.init(testing.allocator, max_per_ip);
+        self.next_id = .init(0);
+    }
+
+    fn deinit(self: *TestRelay) void {
+        self.subs.deinit();
+        self.limiter.deinit();
+    }
+
+    fn ctx(self: *TestRelay, ip: []const u8) WsContext {
+        var c = WsContext{
+            .app = .{
+                .allocator = testing.allocator,
+                .config = &self.config,
+                .msg_handler = undefined,
+                .subs = &self.subs,
+                .shutdown = undefined,
+                .nip86_handler = undefined,
+                .conn_limiter = &self.limiter,
+                .ip_filter = undefined,
+                .trusted_proxies = undefined,
+                .next_id = &self.next_id,
+            },
+            .client_ip = undefined,
+            .client_ip_len = 0,
+        };
+        c.setIp(ip);
+        return c;
+    }
+};
+
+test "WsConn init registers the connection and close releases the registry entry and per-IP slot" {
+    var relay: TestRelay = undefined;
+    relay.init(10, 1);
+    defer relay.deinit();
+    var peer: TestPeer = undefined;
+    try peer.init();
+    defer peer.deinit();
+
+    const ctx = relay.ctx("10.0.0.1");
+    var ws = try WsConn.init(&peer.ws, &ctx);
+    try testing.expectEqual(@as(usize, 1), relay.subs.connectionCount());
+    try testing.expectEqualStrings("10.0.0.1", ws.connection.getClientIp());
+    try testing.expect(ws.connection.ws_conn == &peer.ws);
+    try testing.expect(!relay.limiter.canConnect("10.0.0.1"));
+
+    ws.close();
+    try testing.expectEqual(@as(usize, 0), relay.subs.connectionCount());
+    try testing.expect(relay.limiter.canConnect("10.0.0.1"));
+
+    // The released slot is reusable, and each connection gets a fresh id.
+    var ws2 = try WsConn.init(&peer.ws, &ctx);
+    try testing.expectEqual(@as(u64, 1), ws2.connection.id);
+    ws2.close();
+    try testing.expectEqual(@as(usize, 0), relay.subs.connectionCount());
+}
+
+test "WsConn init per-IP rejection leaves the registry untouched" {
+    var relay: TestRelay = undefined;
+    relay.init(10, 1);
+    defer relay.deinit();
+    var peer: TestPeer = undefined;
+    try peer.init();
+    defer peer.deinit();
+
+    const ctx = relay.ctx("10.0.0.2");
+    var ws = try WsConn.init(&peer.ws, &ctx);
+    defer ws.close();
+    try testing.expectError(error.TooManyConnectionsPerIp, WsConn.init(&peer.ws, &ctx));
+    try testing.expectEqual(@as(usize, 1), relay.subs.connectionCount());
+}
+
+test "WsConn init global-limit rejection gives back the per-IP slot and frees the connection" {
+    var relay: TestRelay = undefined;
+    relay.init(1, 1);
+    defer relay.deinit();
+    var peer: TestPeer = undefined;
+    try peer.init();
+    defer peer.deinit();
+
+    const ctx_a = relay.ctx("10.0.0.3");
+    var ws = try WsConn.init(&peer.ws, &ctx_a);
+    defer ws.close();
+
+    // A different IP passes the per-IP check, then hits the global cap. Its
+    // bucket must be released, or that IP stays locked out after the rejection.
+    // testing.allocator flags the Connection if the errdefer chain leaks it.
+    const ctx_b = relay.ctx("10.0.0.4");
+    try testing.expectError(error.TooManyConnections, WsConn.init(&peer.ws, &ctx_b));
+    try testing.expect(relay.limiter.canConnect("10.0.0.4"));
+    try testing.expectEqual(@as(usize, 1), relay.subs.connectionCount());
+}
+
+test "WsConn afterInit sends the NIP-42 challenge only when auth is configured" {
+    var relay: TestRelay = undefined;
+    relay.init(10, 10);
+    defer relay.deinit();
+    var peer: TestPeer = undefined;
+    try peer.init();
+    defer peer.deinit();
+    var buf: [512]u8 = undefined;
+
+    const ctx = relay.ctx("10.0.0.5");
+    {
+        var ws = try WsConn.init(&peer.ws, &ctx);
+        defer ws.close();
+        try ws.afterInit();
+        try testing.expect(!ws.connection.challenge_sent);
+        try testing.expectEqual(@as(usize, 0), peer.received(&buf).len);
+    }
+
+    relay.config.auth_required = true;
+    {
+        var ws = try WsConn.init(&peer.ws, &ctx);
+        defer ws.close();
+        try ws.afterInit();
+        try testing.expect(ws.connection.challenge_sent);
+        var hex_buf: [64]u8 = undefined;
+        const challenge = std.fmt.bufPrint(&hex_buf, "{x}", .{&ws.connection.auth_challenge}) catch unreachable;
+        const frame = peer.received(&buf);
+        // A single unmasked text frame carrying ["AUTH","<challenge hex>"].
+        try testing.expect(frame.len > 2);
+        try testing.expectEqual(@as(u8, 0x81), frame[0]);
+        try testing.expect(std.mem.indexOf(u8, frame, "[\"AUTH\",\"") != null);
+        try testing.expect(std.mem.indexOf(u8, frame, challenge) != null);
+    }
+}
+
+test "WsConn concurrent init/close leaves no registry entries or per-IP slots behind" {
+    const threads = 8;
+    const iterations = 200;
+    var relay: TestRelay = undefined;
+    relay.init(threads, threads);
+    defer relay.deinit();
+    var peers: [threads]TestPeer = undefined;
+    for (&peers) |*p| try p.init();
+    defer for (&peers) |*p| p.deinit();
+
+    const Worker = struct {
+        fn run(r: *TestRelay, p: *TestPeer, failures: *std.atomic.Value(u32)) void {
+            const ctx = r.ctx("10.0.0.6");
+            for (0..iterations) |_| {
+                var ws = WsConn.init(&p.ws, &ctx) catch {
+                    _ = failures.fetchAdd(1, .monotonic);
+                    continue;
+                };
+                ws.close();
+            }
+        }
+    };
+    var failures = std.atomic.Value(u32).init(0);
+    var handles: [threads]std.Thread = undefined;
+    for (&handles, &peers) |*h, *p| h.* = try std.Thread.spawn(.{}, Worker.run, .{ &relay, p, &failures });
+    for (handles) |h| h.join();
+
+    // With per-IP and global limits both equal to the thread count, no init
+    // can be rejected unless a close failed to give its slot back.
+    try testing.expectEqual(@as(u32, 0), failures.load(.monotonic));
+    try testing.expectEqual(@as(usize, 0), relay.subs.connectionCount());
+    try testing.expectEqual(@as(u64, threads * iterations), relay.next_id.load(.monotonic));
+    for (0..threads) |_| try testing.expect(relay.limiter.tryAcquireConnection("10.0.0.6"));
+    try testing.expect(!relay.limiter.tryAcquireConnection("10.0.0.6"));
+}
