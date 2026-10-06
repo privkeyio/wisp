@@ -1031,7 +1031,7 @@ pub const Handler = struct {
 const testing = std.testing;
 
 test countLeadingZeroBits {
-    var id = [_]u8{0} ** 32;
+    var id: [32]u8 = @splat(0);
     try testing.expectEqual(@as(u8, 255), countLeadingZeroBits(&id));
 
     id[0] = 0xff;
@@ -1040,7 +1040,7 @@ test countLeadingZeroBits {
     id[0] = 0x01;
     try testing.expectEqual(@as(u8, 7), countLeadingZeroBits(&id));
 
-    id = [_]u8{0} ** 32;
+    id = @splat(0);
     id[1] = 0x0f;
     try testing.expectEqual(@as(u8, 12), countLeadingZeroBits(&id));
 }

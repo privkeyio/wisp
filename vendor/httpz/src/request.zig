@@ -1373,7 +1373,7 @@ fn zig016HackRead(source: anytype, buf: []u8) !usize {
 }
 
 const allowedHeaderValueByte = blk: {
-    var v = [_]bool{false} ** 256;
+    var v: [256]bool = @splat(false);
     for ("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_ :;.,/\"'?!(){}[]@<>=-+*#$&`|~^%\t\\") |b| {
         v[b] = true;
     }
@@ -2022,6 +2022,39 @@ test "body: multiFormData valid" {
         const field2 = formData.get("field2").?;
         try t.expectString("Value - 2", field2.value);
         try t.expectString("another.zip", field2.filename.?);
+    }
+
+    {
+        // repeated field names (e.g. <input type=file multiple>)
+        var r = try testParse(buildRequest(&.{ "POST /upload HTTP/1.1", "Content-Type: multipart/form-data; boundary=XYZ" }, &.{ "--XYZ\r\n", "Content-Disposition: form-data; name=\"name\"\r\n\r\n", "leto\r\n", "--XYZ\r\n", "Content-Disposition: form-data; name=\"files\"; filename=\"a.txt\"\r\n\r\n", "content a\r\n", "--XYZ\r\n", "Content-Disposition: form-data; name=\"files\"; filename=\"b.txt\"\r\n\r\n", "content b\r\n", "--XYZ\r\n", "Content-Disposition: form-data; name=\"files\"; filename=\"c.txt\"\r\n\r\n", "content c\r\n", "--XYZ--\r\n" }), .{ .max_multiform_count = 5 });
+
+        const formData = try r.multiFormData();
+        try t.expectEqual(4, formData.len);
+
+        // get returns the first
+        try t.expectString("a.txt", formData.get("files").?.filename.?);
+
+        var it = formData.getAll("files");
+        {
+            const f = it.next().?;
+            try t.expectString("a.txt", f.filename.?);
+            try t.expectString("content a", f.value);
+        }
+        {
+            const f = it.next().?;
+            try t.expectString("b.txt", f.filename.?);
+            try t.expectString("content b", f.value);
+        }
+        {
+            const f = it.next().?;
+            try t.expectString("c.txt", f.filename.?);
+            try t.expectString("content c", f.value);
+        }
+        try t.expectEqual(null, it.next());
+
+        var name_it = formData.getAll("name");
+        try t.expectString("leto", name_it.next().?.value);
+        try t.expectEqual(null, name_it.next());
     }
 
     {

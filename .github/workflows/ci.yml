@@ -23,9 +23,9 @@ jobs:
 
       - name: Setup Zig
         env:
-          ZIG_VERSION: 0.16.0
-          # sha256 of zig-x86_64-linux-0.16.0.tar.xz, from ziglang.org/download/index.json
-          ZIG_SHA256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+          ZIG_VERSION: 0.17.0
+          # sha256 of zig-x86_64-linux-0.17.0.tar.xz, from ziglang.org/download/index.json
+          ZIG_SHA256: 1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
         run: |
           set -euo pipefail
           tarball="zig-x86_64-linux-$ZIG_VERSION.tar.xz"
@@ -69,7 +69,7 @@ jobs:
       contents: read
     runs-on: ubuntu-latest
     # Bounds two things this job could otherwise hang on: a relay that will not
-    # exit, and a flake.lock bump landing on a nixpkgs rev where zig_0_16 is not
+    # exit, and a flake.lock bump landing on a nixpkgs rev where zig_0_17 is not
     # substitutable, which would start a source build of zig and LLVM. No job
     # here sets a timeout otherwise, so the default is 6 hours.
     timeout-minutes: 20
@@ -155,9 +155,9 @@ jobs:
 
       - name: Setup Zig
         env:
-          ZIG_VERSION: 0.16.0
-          # sha256 of zig-x86_64-linux-0.16.0.tar.xz, from ziglang.org/download/index.json
-          ZIG_SHA256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+          ZIG_VERSION: 0.17.0
+          # sha256 of zig-x86_64-linux-0.17.0.tar.xz, from ziglang.org/download/index.json
+          ZIG_SHA256: 1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
         run: |
           set -euo pipefail
           tarball="zig-x86_64-linux-$ZIG_VERSION.tar.xz"
@@ -172,7 +172,7 @@ jobs:
       - name: Build noz (nostr test client)
         env:
           # pinned by commit: a tag can be moved, a commit cannot
-          NOZ_COMMIT: 051f9843ffa0371609a281c92b2113e60d9f2a5e
+          NOZ_COMMIT: 538a3a1dac1949c2765145a7123b28c7c423c5a3
         run: |
           git clone --filter=blob:none https://github.com/privkeyio/noz "$RUNNER_TEMP/noz"
           git -C "$RUNNER_TEMP/noz" checkout --detach "$NOZ_COMMIT"

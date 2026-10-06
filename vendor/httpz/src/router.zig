@@ -542,8 +542,8 @@ test "route: root" {
     try t.expectEqual(null, router.route(.OTHER, "TEA", urls[1], &params));
 
     // test "all" route
-    inline for (@typeInfo(httpz.Method).@"enum".fields) |field| {
-        const m = @as(httpz.Method, @enumFromInt(field.value));
+    inline for (@typeInfo(httpz.Method).@"enum".field_values) |fvalue| {
+        const m = @as(httpz.Method, @enumFromInt(fvalue));
         if (m == .OTHER) {
             try t.expectEqual(null, router.route(m, "", urls[2], &params));
         } else {

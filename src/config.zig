@@ -500,7 +500,7 @@ test safeValue {
     try std.testing.expectEqualStrings("??[31m", safeValue("\r\x1b[31m", &buf));
     try std.testing.expectEqualStrings("a?b", safeValue("a\x00b", &buf));
     // Long values are truncated so one variable cannot flood the log.
-    const long = "x" ** 200;
+    const long = &@as([200]u8, @splat('x'));
     try std.testing.expectEqual(@as(usize, 64), safeValue(long, &buf).len);
     // The buffer sets the cap, so a larger one keeps more of a long field.
     var wide: [256]u8 = undefined;

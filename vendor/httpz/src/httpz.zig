@@ -245,7 +245,7 @@ pub fn Server(comptime H: type) type {
         else => @compileError("Server handler must be a struct, got: " ++ @tagName(@typeInfo(H))),
     };
 
-    const ActionArg = if (comptime std.meta.hasFn(Handler, "dispatch")) @typeInfo(@TypeOf(Handler.dispatch)).@"fn".params[1].type.? else Action(H);
+    const ActionArg = if (comptime std.meta.hasFn(Handler, "dispatch")) @typeInfo(@TypeOf(Handler.dispatch)).@"fn".param_types[1].? else Action(H);
 
     const has_websocket = Handler != void and @hasDecl(Handler, "WebsocketHandler");
     const WebsocketHandler = if (has_websocket) Handler.WebsocketHandler else DummyWebsocketHandler;
@@ -601,7 +601,7 @@ pub fn Server(comptime H: type) type {
 
             const m = try arena.create(M);
             errdefer arena.destroy(m);
-            switch (comptime @typeInfo(@TypeOf(M.init)).@"fn".params.len) {
+            switch (comptime @typeInfo(@TypeOf(M.init)).@"fn".param_types.len) {
                 1 => m.* = try M.init(config),
                 2 => m.* = try M.init(config, MiddlewareConfig{
                     .arena = arena,
@@ -678,7 +678,7 @@ pub fn upgradeWebsocket(comptime H: type, req: *Request, res: *Response, ctx: an
 
     // firefox will send multiple values for this header
     const connection = req.header("connection") orelse return false;
-    if (std.ascii.indexOfIgnoreCase(connection, "upgrade") == null) {
+    if (std.ascii.findIgnoreCase(connection, "upgrade") == null) {
         return false;
     }
 
@@ -707,7 +707,7 @@ pub fn upgradeWebsocket(comptime H: type, req: *Request, res: *Response, ctx: an
     try w.flush();
 
     if (comptime std.meta.hasFn(H, "afterInit")) {
-        const params = @typeInfo(@TypeOf(H.afterInit)).@"fn".params;
+        const params = @typeInfo(@TypeOf(H.afterInit)).@"fn".param_types;
         try if (comptime params.len == 1) hc.handler.?.afterInit() else hc.handler.?.afterInit(ctx);
     }
     try ws_worker.setupConnection(hc);
@@ -1041,6 +1041,60 @@ test "httpz: shutdown without listen" {
     server.stop();
     server.deinit();
 }
+
+// https://github.com/karlseguin/http.zig/issues/223
+// A handler that's still in-flight when the server is stopped completes during
+// deinit (thread_pool.stop() joins it), which puts its conn in handover_list
+// with the event loop already gone - so processSignal never applies the
+// handover. Shutting that list down has to respect the handover, or we close a
+// socket the application already owns (and here, already closed): .BADF, which
+// posix.close treats as unreachable.
+test "httpz: disowned connection still in handover at shutdown" {
+    const H = ShutdownDisownHandler;
+    H.in_handler.store(false, .release);
+    H.may_finish.store(false, .release);
+
+    var server = try Server(H).init(t.io, t.allocator, .{ .address = .localhost(6994) }, H{});
+    const thrd = try server.listenInNewThread();
+
+    {
+        const stream = testStream(6994);
+        defer stream.close(t.io);
+        var writer = stream.writer(t.io, &.{});
+        try writer.interface.writeAll("GET / HTTP/1.1\r\nContent-Length: 0\r\n\r\n");
+
+        while (H.in_handler.load(.acquire) == false) {
+            try t.io.sleep(.fromMilliseconds(5), .awake);
+        }
+
+        // The handler is parked inside the request. Stop the server out from
+        // under it, then let it finish and disown.
+        server.stop();
+        H.may_finish.store(true, .release);
+    }
+
+    thrd.join();
+    server.deinit();
+}
+
+const ShutdownDisownHandler = struct {
+    var in_handler: std.atomic.Value(bool) = .init(false);
+    var may_finish: std.atomic.Value(bool) = .init(false);
+
+    pub fn handle(_: ShutdownDisownHandler, _: *Request, res: *Response) void {
+        in_handler.store(true, .release);
+        while (may_finish.load(.acquire) == false) {
+            t.io.sleep(.fromMilliseconds(5), .awake) catch unreachable;
+        }
+
+        const socket = res.conn.stream.socket.handle;
+        res.disown() catch unreachable;
+
+        // We're the owner now, so we're the one that closes it. httpz must not
+        // close it again during shutdown.
+        posix.close(socket);
+    }
+};
 
 test "httpz: invalid request" {
     const stream = testStream(5992);
@@ -1987,7 +2041,7 @@ test "httpz: request body reader" {
         var writer = stream.writer(t.io, &.{});
         const w = &writer.interface;
 
-        try w.writeAll(std.fmt.comptimePrint("GET /test/req_reader HTTP/1.1\r\nContent-Length: {d}\r\n\r\n" ++ ("a" ** length), .{length}));
+        try w.writeAll(std.fmt.comptimePrint("GET /test/req_reader HTTP/1.1\r\nContent-Length: {d}\r\n\r\n" ++ @as([length]u8, @splat('a')), .{length}));
         try w.flush();
 
         var res = testReadParsed(stream);
@@ -2008,7 +2062,7 @@ test "httpz: request body reader" {
         var writer = stream.writer(t.io, &buf);
         const w = &writer.interface;
 
-        var req: []const u8 = std.fmt.comptimePrint("GET /test/req_reader HTTP/1.1\r\nContent-Length: {d}\r\n\r\n" ++ ("a" ** length), .{length});
+        var req: []const u8 = std.fmt.comptimePrint("GET /test/req_reader HTTP/1.1\r\nContent-Length: {d}\r\n\r\n" ++ @as([length]u8, @splat('a')), .{length});
         while (req.len > 0) {
             const len = random.uintAtMost(usize, req.len - 1) + 1;
             try w.writeAll(req[0..len]);
@@ -2229,12 +2283,12 @@ test "FallbackAllocator: nested arena survives node resize failure" {
 }
 
 test "ContentType: forX" {
-    inline for (@typeInfo(ContentType).@"enum".fields) |field| {
-        if (comptime std.mem.eql(u8, "BINARY", field.name)) continue;
-        if (comptime std.mem.eql(u8, "EVENTS", field.name)) continue;
-        try t.expectEqual(@field(ContentType, field.name), ContentType.forExtension(field.name));
-        try t.expectEqual(@field(ContentType, field.name), ContentType.forExtension("." ++ field.name));
-        try t.expectEqual(@field(ContentType, field.name), ContentType.forFile("some_file." ++ field.name));
+    inline for (@typeInfo(ContentType).@"enum".field_names) |fname| {
+        if (comptime std.mem.eql(u8, "BINARY", fname)) continue;
+        if (comptime std.mem.eql(u8, "EVENTS", fname)) continue;
+        try t.expectEqual(@field(ContentType, fname), ContentType.forExtension(fname));
+        try t.expectEqual(@field(ContentType, fname), ContentType.forExtension("." ++ fname));
+        try t.expectEqual(@field(ContentType, fname), ContentType.forFile("some_file." ++ fname));
     }
     // variations
     try t.expectEqual(ContentType.HTML, ContentType.forExtension(".htm"));

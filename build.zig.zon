@@ -7,33 +7,39 @@
         // worker-pool server. Upstream, includes the TLS read-readiness poll fix
         // (#103), the in-loop re-poll that stops quiet wss connections busy-spinning
         // a core (via #218/#219 pin bumps), and the bounded connect/TLS-handshake
-        // timeout (#108). Must match http.zig's websocket pin so the two resolve to
-        // one package.
+        // timeout (#108), the restored TLS buffered-record read fix (#111), the
+        // FallbackAllocator resize fix (#113), and Zig 0.17 support. Must match
+        // http.zig's websocket pin so the two resolve to one package.
         .websocket = .{
-            .url = "https://github.com/karlseguin/websocket.zig/archive/b70e733bc0d0ba0a98ff5fe5ef64d3017c85f369.tar.gz",
-            .hash = "websocket-0.1.0-ZPISdUoQBQC7zw1uSwbOEYdxZiTxNN4nf9RlWBsN0_Nd",
+            .url = "https://github.com/karlseguin/websocket.zig/archive/f2b3bad6875595e8dd42c726e8e914885a8b0ba0.tar.gz",
+            .hash = "websocket-0.1.0-ZPISdbERBQCnk2-UDVSJlOss6POs_aAJR2nrccYJ1wZm",
         },
         .nostr = .{
-            .url = "https://github.com/privkeyio/libnostr-z/archive/53d992dd85b7a6b649cbb1b457d5a79fae6041a0.tar.gz",
-            .hash = "nostr-0.4.0-JY6OcBj7DwCo8_pUT3jV1fEHNAJDz44_otpAsJK19Oqz",
+            .url = "https://github.com/privkeyio/libnostr-z/archive/5accad27a7ad71d503cd3c8152ea9540d2c23cda.tar.gz",
+            .hash = "nostr-0.5.0-JY6OcKMgEABIisCx3kmE4ybZbmnO5PyWyodAGjukxEJs",
         },
         // http.zig: HTTP routing (NIP-11/NIP-86) + WebSocket upgrade onto
         // websocket.zig's epoll worker pool.
         //
-        // Vendored (see vendor/httpz) from upstream commit dce2cb07f1cd, which
-        // now carries the timeout-sweep fix we previously patched locally: a
-        // sweep containing both expired and surviving connections dropped every
-        // survivor from the tracking list, so those connections never timed out
-        // and held a worker slot for the life of the process. That upstream
-        // commit also strengthens the acquireProcessing ordering to .acquire per
-        // a TSan report, which the local patch below depends on.
+        // Vendored (see vendor/httpz) from upstream commit 8aeb4e522b12 (Zig
+        // 0.17). Upstream now carries the timeout-sweep fix (a sweep containing
+        // both expired and surviving connections dropped every survivor from
+        // the tracking list), the .acquire ordering on acquireProcessing that
+        // the local patch below depends on, and the handover double-close fix:
+        // conns detached from handover_list are freed through release() rather
+        // than disown(), and shutdown no longer closes a socket that was
+        // disowned or upgraded. Its websocket pin matches the one above.
         //
         // What remains local, recorded in vendor/httpz.patch and enforced by
         // scripts/verify-vendored-httpz.sh in CI: reclaiming the per-worker slot
         // (self.len) and freeing the Conn wrapper when a WebSocket closes
-        // (accept-stall leak), guarding the handover union against a .websocket
-        // conn, routing every slot release through a guarded helper, and a
-        // connectionCount() accessor the watchdog reads as a liveness signal.
+        // (accept-stall leak), publishing a handover only after the HTTPConn
+        // mutex is released and waiting out a held mutex before recycling an
+        // HTTPConn, single-owner teardown in accept(), never calling
+        // handover_list.remove() on a detached node, guarding the handover and
+        // shutdown union reads against a .websocket conn, routing every slot
+        // release through a guarded helper, and a connectionCount() accessor
+        // the watchdog reads as a liveness signal.
         //
         // Kept as a path dependency so a clean `zig build` (incl. the StartOS
         // Docker fetch) builds this tree with no external fork.

@@ -243,7 +243,7 @@ fn Worker(comptime F: anytype) type {
 
                 // convert Args to FullArgs, i.e. inject buffer as the last argument
                 var full_args: FullArgs = undefined;
-                const ARG_COUNT = std.meta.fields(FullArgs).len - 1;
+                const ARG_COUNT = @typeInfo(FullArgs).@"struct".field_names.len - 1;
                 full_args[ARG_COUNT] = buffer;
                 inline for (0..ARG_COUNT) |i| {
                     full_args[i] = args[i];
@@ -287,7 +287,7 @@ fn Worker(comptime F: anytype) type {
 }
 
 fn SpawnArgs(FullArgs: anytype) type {
-    const full_fields = std.meta.fields(FullArgs);
+    const full_fields = @typeInfo(FullArgs).@"struct".field_types;
     const ARG_COUNT = full_fields.len - 1;
 
     // Args will be FullArgs[0..len-1], so in the above example, args would be
@@ -302,7 +302,7 @@ fn SpawnArgs(FullArgs: anytype) type {
 
     var field_types: [ARG_COUNT]type = undefined;
     inline for (full_fields[0..ARG_COUNT], 0..) |field, i| {
-        field_types[i] = field.type;
+        field_types[i] = field;
     }
     return @Tuple(&field_types);
 }

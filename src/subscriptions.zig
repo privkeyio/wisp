@@ -271,9 +271,9 @@ pub const Subscriptions = struct {
 const testing = std.testing;
 
 // 64- and 128-hex-char fields so Event.parse accepts the structure.
-const HID = "0" ** 63 ++ "1";
-const HPK = "0" ** 63 ++ "2";
-const HSIG = "0" ** 127 ++ "3";
+const HID = @as([63]u8, @splat('0')) ++ "1";
+const HPK = @as([63]u8, @splat('0')) ++ "2";
+const HSIG = @as([127]u8, @splat('0')) ++ "3";
 
 fn eventJson(comptime kind: []const u8) []const u8 {
     return "[\"EVENT\",{\"id\":\"" ++ HID ++ "\",\"pubkey\":\"" ++ HPK ++

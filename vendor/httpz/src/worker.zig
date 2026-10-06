@@ -527,7 +527,7 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
 
             self.shutdownList(&self.request_list);
             self.shutdownConcurrentList(&self.active_list);
-            self.shutdownConcurrentList(&self.handover_list);
+            self.shutdownHandoverList(&self.handover_list);
             self.shutdownConcurrentList(&self.keepalive_list);
 
             self.buffer_pool.deinit();
@@ -685,7 +685,7 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
             }
 
             // Publishing to handover_list hands this conn to the event-loop
-            // thread, which may release it (releaseHandover) before this call
+            // thread, which may release it (release()) before this call
             // even returns. So it MUST be the last thing that touches conn or
             // http_conn: doing it inside the critical section above meant the
             // deferred _mut.unlock() then wrote into an HTTPConn already
@@ -711,7 +711,7 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
                 // Logged rather than removed, because remove() is the dangerous
                 // option: on a non-member it rewrites the live list's head/tail
                 // from stale prev/next, which is exactly the connection-loss and
-                // core-pinning bug releaseHandover documents. That is not a
+                // core-pinning bug release() documents. That is not a
                 // "stale entry" degradation, so doing nothing is strictly safer,
                 // and the log makes a wrong analysis observable.
                 .handover => {
@@ -862,7 +862,7 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
                         // can deliver a .recv for the freed Conn.
                         loop.remove(conn);
                         conn.close();
-                        self.releaseHandover(conn, http_conn);
+                        self.release(conn, http_conn); // not disown! self.handover was already cleared
                     },
                     .disown => {
                         // When res.disown() was called, we immediately removed
@@ -871,14 +871,14 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
                         // before we get back here.
                         // https://github.com/karlseguin/http.zig/issues/129#issuecomment-3031411404
                         closed_bool.* = true;
-                        self.releaseHandover(conn, http_conn);
+                        self.release(conn, http_conn); // not disown! self.handover was already cleared
                     },
                     .websocket => |ptr| {
                         if (comptime WSH == httpz.DummyWebsocketHandler) {
                             std.debug.print("Your httpz handler must have a `WebsocketHandler` declaration. This must be the same type passed to `httpz.upgradeWebsocket`. Closing the connection.\n", .{});
                             closed_bool.* = true;
                             conn.close();
-                            self.releaseHandover(conn, http_conn);
+                            self.release(conn, http_conn); // not disown! self.handover was already cleared
                             continue;
                         }
 
@@ -888,7 +888,7 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
                         conn.protocol = .{ .websocket = hc };
                         // This node is in no list (the snapshot detached the
                         // chain and `c` was advanced above), but its links still
-                        // point at Conns that releaseHandover frees in this same
+                        // point at Conns that release() frees in this same
                         // pass. Nothing dereferences them today only because
                         // List.insert overwrites both fields; null them so that
                         // stays true without depending on it.
@@ -898,9 +898,10 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
                         loop.switchToOneShot(conn) catch {
                             metrics.internalError();
                             closed_bool.* = true;
-                            // protocol is now .websocket, so disown() (which
-                            // reads protocol.http) must not be used here. Tear
-                            // the ws connection down directly on the loop thread.
+                            // protocol is now .websocket, so disown() and
+                            // release() (which take the http conn) must not be
+                            // used here. Tear the ws connection down directly on
+                            // the loop thread.
                             conn.close();
                             self.websocket.cleanupConn(hc);
                             self.releaseSlot();
@@ -1039,18 +1040,37 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
             self.loop.signal() catch |err| log.err("failed to signal worker: {}", .{err});
         }
 
-        // Releases a connection that processSignal already detached by taking the
-        // handover_list snapshot (head taken, inner cleared). It must not go
-        // through disown(): that dispatches on _state, which is still .handover,
-        // so it calls handover_list.remove() on a node that is no longer a
-        // member.
+        fn disown(self: *Self, conn: *Conn(WSH)) void {
+            const io = self.io;
+            const http_conn = conn.protocol.http;
+            switch (http_conn._state) {
+                .request => self.request_list.remove(conn),
+                // Unreachable in practice: both callers (run()'s parse-error
+                // path and accept()'s errdefer) only ever hold .request or
+                // .keepalive conns, and .handover conns are released through
+                // release() instead. Do NOT route a handover-snapshot node
+                // here: remove() on a non-member rewrites the live list's
+                // head/tail from stale prev/next, the connection-loss bug
+                // documented on release(), so this arm removes nothing.
+                .handover => log.err("disown reached the unreachable .handover state; not touching any list", .{}),
+                .keepalive => self.keepalive_list.remove(io, conn),
+                .active => unreachable,
+            }
+            self.release(conn, http_conn);
+        }
+
+        // Frees a connection that is already in no list. processSignal's
+        // handover snapshot (head taken, inner cleared) and closeList's
+        // timed-out chain both hand it nodes like that, and neither may go
+        // through disown(): it dispatches on _state and calls List.remove on a
+        // node that is no longer a member.
         //
-        // The general rule is that a snapshot node's prev/next are stale with
+        // The general rule is that a detached node's prev/next are stale with
         // respect to the live list, so List.remove -- which rewrites head/tail
         // from exactly those two fields -- writes garbage into a list the node
-        // no longer belongs to. Worker threads keep inserting into that live
-        // list the whole time, so there is always something to corrupt. Two
-        // shapes, both reachable:
+        // no longer belongs to. Worker threads keep inserting into the live
+        // handover_list the whole time, so there is always something to
+        // corrupt. Two shapes, both reachable:
         //
         //   [A(.close)] alone: prev and next are both null, so remove(A) sets
         //   head = null and tail = null, wiping an entry that was inserted
@@ -1065,35 +1085,12 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
         // never released, the fd is never closed, and they are in no timeout
         // list, so nothing can ever reap them. They also keep the
         // level-triggered epoll registration from accept(), so the loop
-        // re-reports and skips them on every iteration, pinning a core. Same
-        // defect class as the upstream timeout-sweep fix in
-        // collectTimedOut/closeList.
+        // re-reports and skips them on every iteration, pinning a core.
         //
         // Note this cannot be fixed by clearing next/prev when snapshotting:
         // remove() would then null head/tail directly, which is precisely the
         // first shape above.
-        fn releaseHandover(self: *Self, conn: *Conn(WSH), http_conn: *HTTPConn) void {
-            self.releaseSlot();
-            self.http_conn_pool.release(http_conn);
-            self.conn_mem_pool.destroy(conn);
-        }
-
-        fn disown(self: *Self, conn: *Conn(WSH)) void {
-            const io = self.io;
-            const http_conn = conn.protocol.http;
-            switch (http_conn._state) {
-                .request => self.request_list.remove(conn),
-                // Unreachable in practice: both callers (run()'s parse-error
-                // path and accept()'s errdefer) only ever hold .request or
-                // .keepalive conns, and .handover conns are released through
-                // releaseHandover instead. Do NOT route a handover-snapshot node
-                // here: remove() on a non-member rewrites the live list's
-                // head/tail from stale prev/next, the connection-loss bug
-                // releaseHandover documents, so this arm removes nothing.
-                .handover => log.err("disown reached the unreachable .handover state; not touching any list", .{}),
-                .keepalive => self.keepalive_list.remove(io, conn),
-                .active => unreachable,
-            }
+        fn release(self: *Self, conn: *Conn(WSH), http_conn: *HTTPConn) void {
             self.releaseSlot();
             self.http_conn_pool.release(http_conn);
             self.conn_mem_pool.destroy(conn);
@@ -1167,22 +1164,50 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
         // `list` holds connections that collectTimedOut already detached from
         // request_list/keepalive_list, so they must not be removed from those
         // again. disown() would do exactly that, and List.remove rewrites head
-        // and tail from a node that is no longer a member.
+        // and tail from a node that is no longer a member. Hence release().
         fn closeList(self: *Self, list: List(Conn(WSH))) void {
             var conn = list.head;
             while (conn) |c| {
                 conn = c.next;
                 c.close();
-                self.releaseSlot();
-
-                self.http_conn_pool.release(c.protocol.http);
-                self.conn_mem_pool.destroy(c);
+                self.release(c, c.protocol.http);
             }
         }
 
         fn shutdownList(self: *Self, list: *List(Conn(WSH))) void {
             const allocator = self.allocator;
             var conn = list.head;
+            while (conn) |c| {
+                conn = c.next;
+                // Guard the union read; see shutdownHandoverList for why.
+                const http_conn = switch (c.protocol) {
+                    .http => |hc| hc,
+                    .websocket => {
+                        log.err("shutdownList found a .websocket conn in an http list; skipping", .{});
+                        continue;
+                    },
+                };
+                posix.close(http_conn.stream.socket.handle);
+                http_conn.deinit(allocator);
+            }
+        }
+
+        fn shutdownConcurrentList(self: *Self, list: *ConcurrentList(Conn(WSH))) void {
+            const io = self.io;
+            list.mut.lockUncancelable(io);
+            defer list.mut.unlock(io);
+            self.shutdownList(&list.inner);
+        }
+
+        // handover_list is the one list where we might not own the socket, so it
+        // can't use shutdownList's unconditional close.
+        fn shutdownHandoverList(self: *Self, list: *ConcurrentList(Conn(WSH))) void {
+            const io = self.io;
+            const allocator = self.allocator;
+            list.mut.lockUncancelable(io);
+            defer list.mut.unlock(io);
+
+            var conn = list.inner.head;
             while (conn) |c| {
                 conn = c.next;
                 // Guard the union read. This is unreachable today: handover_list
@@ -1205,20 +1230,19 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
                 const http_conn = switch (c.protocol) {
                     .http => |hc| hc,
                     .websocket => {
-                        log.err("shutdownList found a .websocket conn in an http list; skipping", .{});
+                        log.err("shutdownHandoverList found a .websocket conn; skipping", .{});
                         continue;
                     },
                 };
-                posix.close(http_conn.stream.socket.handle);
+                switch (http_conn.handover) {
+                    .disown, .websocket => {},
+                    .close, .unknown => posix.close(http_conn.stream.socket.handle),
+                    // processHTTPData sends keepalive conns to keepalive_list,
+                    // they never reach handover_list.
+                    .keepalive => unreachable,
+                }
                 http_conn.deinit(allocator);
             }
-        }
-
-        fn shutdownConcurrentList(self: *Self, list: *ConcurrentList(Conn(WSH))) void {
-            const io = self.io;
-            list.mut.lockUncancelable(io);
-            defer list.mut.unlock(io);
-            self.shutdownList(&list.inner);
         }
 
         inline fn enableListener(self: *Self, listener: posix.fd_t) void {
@@ -1724,7 +1748,7 @@ const HTTPConnPool = struct {
         // swapList holds _mut across its keepalive and request inserts, both of
         // which publish the conn to the event-loop thread, so that thread can
         // reach a free before the worker's deferred unlock lands. It gets there
-        // by three routes (disown, closeList, releaseHandover) and fencing them
+        // by three routes (disown, closeList, processSignal) and fencing them
         // individually already missed one, so the wait lives here instead: this
         // is the single point every free funnels through.
         //

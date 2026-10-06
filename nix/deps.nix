@@ -41,10 +41,10 @@ linkFarm "zig-packages" [
     };
   }
   {
-    name = "metrics-0.0.0-W7G4eIegAQD4XxA9Co7Atbw59u_2zvxYf406AZuoAHPM";
+    name = "metrics-0.0.0-W7G4eGWhAQC-C6tpIW3uxJp-vl6rLyfJvoqJRLzF1SuS";
     path = fetchzip {
-      url = "https://codeload.github.com/karlseguin/metrics.zig/tar.gz/6de29b83a750a06c438d268543e0e3c3c1b309da";
-      hash = "sha256-F0tnpGmcPtNIff+i9z9ZVWttLvAKQNXQzVAKnsSFV+o=";
+      url = "https://codeload.github.com/karlseguin/metrics.zig/tar.gz/ac167295b6a8fd84ca7af852c1032e6b246101f0";
+      hash = "sha256-8WmT4KIILQzRWYcDZa1uxXnrLWfqQnOxFy1T6FXAC5M=";
       extension = "tar.gz";
     };
   }
@@ -57,18 +57,18 @@ linkFarm "zig-packages" [
     };
   }
   {
-    name = "nostr-0.4.0-JY6OcBj7DwCo8_pUT3jV1fEHNAJDz44_otpAsJK19Oqz";
+    name = "nostr-0.5.0-JY6OcKMgEABIisCx3kmE4ybZbmnO5PyWyodAGjukxEJs";
     path = fetchzip {
-      url = "https://codeload.github.com/privkeyio/libnostr-z/tar.gz/53d992dd85b7a6b649cbb1b457d5a79fae6041a0";
-      hash = "sha256-YDFIRgNx0Dp7xNnlfTMBjOWJaGkjSwjYjJyKQODCqQ4=";
+      url = "https://codeload.github.com/privkeyio/libnostr-z/tar.gz/5accad27a7ad71d503cd3c8152ea9540d2c23cda";
+      hash = "sha256-IUlaSqrRE6TRK4v6oDw251y6Jm0pSjlmPW7IzQ48wd8=";
       extension = "tar.gz";
     };
   }
   {
-    name = "websocket-0.1.0-ZPISdUoQBQC7zw1uSwbOEYdxZiTxNN4nf9RlWBsN0_Nd";
+    name = "websocket-0.1.0-ZPISdbERBQCnk2-UDVSJlOss6POs_aAJR2nrccYJ1wZm";
     path = fetchzip {
-      url = "https://codeload.github.com/karlseguin/websocket.zig/tar.gz/b70e733bc0d0ba0a98ff5fe5ef64d3017c85f369";
-      hash = "sha256-R+N4XZfObDDTKD4b+cBgEyQ8yA1IetWxD3g9+wNrFlE=";
+      url = "https://codeload.github.com/karlseguin/websocket.zig/tar.gz/f2b3bad6875595e8dd42c726e8e914885a8b0ba0";
+      hash = "sha256-5wd+XSmD6fnO0keWsROtvvkq8oI3WMR3OjRN5HmfI2A=";
       extension = "tar.gz";
     };
   }

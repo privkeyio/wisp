@@ -29,7 +29,12 @@ jobs:
           persist-credentials: false
 
       - name: Clone nostr-bench
-        run: git clone --depth 1 --branch v0.2.1 https://github.com/privkeyio/nostr-bench ../nostr-bench
+        env:
+          # pinned by commit: the first nostr-bench that builds with Zig 0.17
+          NOSTR_BENCH_COMMIT: 9121d6d7d57c4879052067325be0df7800d0c45c
+        run: |
+          git clone --filter=blob:none https://github.com/privkeyio/nostr-bench ../nostr-bench
+          git -C ../nostr-bench checkout --detach "$NOSTR_BENCH_COMMIT"
 
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y liblmdb-dev libsecp256k1-dev libssl-dev netcat-openbsd
@@ -37,7 +42,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: 0.16.0
+          version: 0.17.0
 
       - name: Build wisp
         run: zig build -Doptimize=ReleaseSafe

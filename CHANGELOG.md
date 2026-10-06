@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Builds with Zig 0.17.0, which is now required. LMDB's header is translated through a `b.addTranslateC` module since 0.17 removes `@cImport`. The release binaries, Docker image (which now verifies the Zig download's sha256) and Nix package are built with 0.17.
+- libnostr-z 0.5.0, websocket.zig f2b3bad and the vendored http.zig at upstream 8aeb4e5 (the versions that support 0.17). Upstream http.zig now releases handed-over connections directly, which is the fix wisp carried locally since 0.6.0; the remaining local changes are kept on top and recorded in `vendor/httpz.patch`.
+
+### Fixed
+
+- A wss:// spider connection could leave a complete TLS record unread on a quiet socket until more bytes arrived, delaying delivery. Fixed upstream in websocket.zig.
+- A failed resize of a connection's per-message buffer handed memory it did not own to the fallback allocator. Fixed upstream in websocket.zig.
+
 ## [0.7.0] - 2026-10-06
 
 A security release. An AUTH event signed for another relay could authenticate here, and a single REQ or negentropy message could crash or hang the relay; both are fixed through libnostr-z 0.4.0. It also brings REQ handling in line with the current NIP-01 (`limit: 0`, multi-filter unions), adds NIP-78 private app data and the new NIP-86 methods, and applies the relay's policy to events the spider syncs.
