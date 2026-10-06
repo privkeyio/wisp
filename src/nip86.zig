@@ -534,3 +534,36 @@ test "nip86 ban and allow lists are exclusive and disallowkind is a deny list" {
     try testing.expectEqual(@as(u16, 200), handler.dispatch("banpubkey", "[\"" ++ pk_hex ++ "\"]").status);
     try testing.expectEqualStrings("blocked: pubkey is banned", mgmt.rejection(&event).?);
 }
+
+test "rejection refuses an event when the policy cannot be read" {
+    const Lmdb = @import("lmdb.zig").Lmdb;
+    const Store = @import("store.zig").Store;
+    const io = nostr.io.io();
+    const cwd = std.Io.Dir.cwd();
+    const db_path = "./test_nip86_policy_db";
+    defer {
+        cwd.deleteFile(io, db_path) catch {};
+        cwd.deleteFile(io, db_path ++ "-lock") catch {};
+    }
+
+    var lmdb = try Lmdb.init(testing.allocator, db_path, 10, .none);
+    defer lmdb.deinit();
+    var store = try Store.init(testing.allocator, &lmdb);
+    defer store.deinit();
+    var mgmt = try ManagementStore.init(testing.allocator, &lmdb);
+
+    var event = try nostr.Event.parseWithAllocator(
+        \\{"id":"00000000000000000000000000000000000000000000000000000000000000ee","pubkey":"00000000000000000000000000000000000000000000000000000000000000bb","sig":"00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000","kind":1,"created_at":1700000000,"content":"","tags":[]}
+    , testing.allocator);
+    defer event.deinit();
+    try testing.expectEqual(@as(?[]const u8, null), mgmt.rejection(&event));
+
+    // LMDB allows one transaction per thread, so while a store read is open on
+    // this thread the policy cannot be read and the event must be refused.
+    const filters = [_]nostr.Filter{.{}};
+    var iter = try store.queryFull(&filters, 10);
+    _ = try iter.next();
+    try testing.expectEqualStrings("error: relay policy unavailable", mgmt.rejection(&event).?);
+    iter.deinit();
+    try testing.expectEqual(@as(?[]const u8, null), mgmt.rejection(&event));
+}

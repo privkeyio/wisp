@@ -3,6 +3,7 @@ const nostr = @import("nostr.zig");
 const isPrivateKind = @import("connection.zig").isPrivateKind;
 const Store = @import("store.zig").Store;
 const ManagementStore = @import("management_store.zig").ManagementStore;
+const handler = @import("handler.zig");
 const Broadcaster = @import("broadcaster.zig").Broadcaster;
 const Config = @import("config.zig").Config;
 const websocket = @import("websocket");
@@ -577,22 +578,28 @@ pub const Spider = struct {
             .{ .authors_bytes = pubkeys },
         };
 
-        var iter = self.store.queryFull(&filters, 100000) catch {
-            log.err("{s}: Failed to query local events for negentropy", .{relay_url});
-            return true;
-        };
-        defer iter.deinit();
-
+        // Enumerate in its own block so the read transaction closes before the
+        // exchange: events fetched below are stored on this thread, and their
+        // policy check needs a read transaction LMDB will not open while this
+        // thread still holds one.
         var local_count: usize = 0;
-        while (iter.next() catch null) |json| {
-            if (local_count % 1000 == 0 and !self.shouldRun()) return false;
-            var event = nostr.Event.parse(json) catch continue;
-            defer event.deinit();
-            // NIP-78 app data is private to its author: its ids must not reach
-            // the upstream relay through reconciliation.
-            if (isPrivateKind(event.kind())) continue;
-            local_storage.insert(@intCast(event.createdAt()), event.id()) catch continue;
-            local_count += 1;
+        {
+            var iter = self.store.queryFull(&filters, 100000) catch {
+                log.err("{s}: Failed to query local events for negentropy", .{relay_url});
+                return true;
+            };
+            defer iter.deinit();
+
+            while (iter.next() catch null) |json| {
+                if (local_count % 1000 == 0 and !self.shouldRun()) return false;
+                var event = nostr.Event.parse(json) catch continue;
+                defer event.deinit();
+                // NIP-78 app data is private to its author: its ids must not reach
+                // the upstream relay through reconciliation.
+                if (isPrivateKind(event.kind())) continue;
+                local_storage.insert(@intCast(event.createdAt()), event.id()) catch continue;
+                local_count += 1;
+            }
         }
         local_storage.seal();
 
@@ -993,7 +1000,12 @@ pub const Spider = struct {
         defer event.deinit();
 
         event.validate() catch return;
-        // Synced events are subject to the same NIP-86 policy as published ones.
+        // Synced events meet the same limits and NIP-86 policy as published ones.
+        // Protected (NIP-70) events may only be published by their author, so
+        // they are never copied from another relay.
+        if (handler.limitRejection(self.config, &event) != null) return;
+        if (handler.powRejection(self.config, &event) != null) return;
+        if (nostr.isProtected(&event) or nostr.isExpired(&event)) return;
         if (self.mgmt_store.rejection(&event) != null) return;
 
         const result = self.store.store(&event, event_json) catch return;
