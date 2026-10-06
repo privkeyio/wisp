@@ -33,6 +33,8 @@ const Processed = struct {
     // Persisted to disk. Distinct from `broadcast`: ephemeral events (NIP-16) broadcast
     // but are never stored, so they must not count as stored or invalidate the query cache.
     stored: bool = false,
+    // Deleted events without storing anything, so the cache is stale after commit.
+    invalidates: bool = false,
 };
 
 pub const Writer = struct {
@@ -158,7 +160,7 @@ pub const Writer = struct {
                 fatal = true;
                 break;
             };
-            if (p.stored) stored_any = true;
+            if (p.stored or p.invalidates) stored_any = true;
             processed[n] = p;
             n += 1;
         }
@@ -205,8 +207,7 @@ pub const Writer = struct {
             // A recipient deleting gift wraps sent to them: publishing that
             // deletion would tie their key to the wraps, so it is not kept.
             if (Store.onlyReceivedWraps(outcomes, event)) {
-                self.store.query_cache.invalidate();
-                return .{ .conn_id = job.conn_id, .event = event.*, .success = true, .message = "", .broadcast = false };
+                return .{ .conn_id = job.conn_id, .event = event.*, .success = true, .message = "", .broadcast = false, .invalidates = true };
             }
             _ = try self.store.storeInTxn(txn, event, job.json);
             return .{ .conn_id = job.conn_id, .event = event.*, .success = true, .message = "", .broadcast = true, .stored = true };
