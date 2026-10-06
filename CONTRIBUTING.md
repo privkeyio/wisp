@@ -278,8 +278,8 @@ If you need to change the vendored sources:
    the PR. `vendor/httpz.patch` is the reviewable record of everything we changed, so keep it small
    and prefer upstreaming fixes.
 
-To move to a new upstream commit, update `UPSTREAM_COMMIT` in both scripts and the comment in
-`build.zig.zon`, re-vendor the tree, then regenerate the patch.
+To move to a new upstream commit, write its full SHA to `vendor/httpz.commit` (both scripts read it
+from there), re-vendor the tree, then regenerate the patch.
 
 Verify locally with `./scripts/verify-vendored-httpz.sh`.
 
