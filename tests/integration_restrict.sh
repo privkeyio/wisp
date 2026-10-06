@@ -87,6 +87,8 @@ case "$MODE" in
       "$(timeout 10 noz send "$R" "[\"COUNT\",\"c\",{\"authors\":[\"$(noz key public $SEC1)\"]}]" 2>/dev/null | grep -oE '"count":[0-9]+')"
     chk "NIP-78 app data is counted for its author" '"count":1' \
       "$(timeout 10 noz send "$R" '["COUNT","c",{"kinds":[30078]}]' --sec $SEC1 --auth 2>/dev/null | grep -oE '"count":[0-9]+')"
+    chk "NIP-78 NEG-OPEN without auth is refused" 1 \
+      "$(timeout 10 noz send "$R" '["NEG-OPEN","n",{"kinds":[30078]},"6100"]' 2>/dev/null | grep -c '^\["NEG-ERR","n","auth-required:')"
     chk "NIP-78 app data is served to its authenticated author" 1 \
       "$(timeout 10 noz send "$R" '["REQ","a",{"kinds":[30078]}]' --sec $SEC1 --auth 2>/dev/null | grep -c '^\["EVENT"')"
     chk "NIP-78 app data is hidden from another authenticated user" 0 \

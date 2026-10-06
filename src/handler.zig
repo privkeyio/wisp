@@ -851,6 +851,12 @@ pub const Handler = struct {
         };
         defer filter.deinit();
 
+        if (!conn.isAuthenticated() and requestsPrivateKinds(&.{filter})) {
+            self.sendAuthChallenge(conn);
+            self.sendNegErr(conn, sub_id, "auth-required: app data is only synced with its authenticated author");
+            return;
+        }
+
         var payload_buf: [65536]u8 = undefined;
         const payload = msg.getNegPayload(&payload_buf) catch {
             self.sendNegErr(conn, sub_id, "error: invalid negentropy payload");

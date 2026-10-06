@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- NIP-78: kind 78 and 30078 app data is only accepted from, and only served to, a connection authenticated (NIP-42) as its author, on REQ, live broadcast, COUNT and negentropy. Hidden events do not count toward a filter's `limit`. A REQ or COUNT that names these kinds without authenticating gets `CLOSED auth-required` and an AUTH challenge, and the spider leaves them out of the negentropy sets it reconciles with upstream relays. `78` is advertised in `supported_nips`.
+- NIP-78: kind 78 and 30078 app data is only accepted from, and only served to, a connection authenticated (NIP-42) as its author, on REQ, live broadcast, COUNT and negentropy. Hidden events do not count toward a filter's `limit`. A REQ, COUNT or NEG-OPEN that names these kinds without authenticating gets `CLOSED auth-required` and an AUTH challenge, and the spider leaves them out of the negentropy sets it reconciles with upstream relays. `78` is advertised in `supported_nips`.
 - NIP-86: `unbanpubkey`, `unallowpubkey`, `unbanevent`, `unallowevent`, `listallowedevents` and `listdisallowedkinds`.
 
 ### Changed
