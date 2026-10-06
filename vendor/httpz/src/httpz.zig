@@ -420,12 +420,19 @@ pub fn Server(comptime H: type) type {
                     workers[i].deinit();
                 };
 
-                errdefer for (0..started) |i| {
-                    workers[i].stop();
-                };
-
                 var ready_sem = Io.Semaphore{};
                 const threads = try self.arena.alloc(Thread, workers.len);
+
+                // Started workers must have exited run() before the deinit
+                // above frees their loop and pools, and before the listener
+                // errdefer closes a fd they monitor. Each run() posts ready_sem
+                // once it is far enough along to be stopped, as on success.
+                errdefer {
+                    for (0..started) |_| ready_sem.waitUncancelable(io);
+                    for (workers[0..started]) |*w| w.stop();
+                    for (threads[0..started]) |thrd| thrd.join();
+                }
+
                 for (0..workers.len) |i| {
                     workers[i] = try Worker.init(io, allocator, self, &config);
                     errdefer {
@@ -484,6 +491,7 @@ pub fn Server(comptime H: type) type {
                     posix.shutdown(l, .recv) catch {};
                 }
                 posix.close(l);
+                self._listener = null;
             }
         }
 
@@ -1040,6 +1048,16 @@ test "httpz: shutdown without listen" {
     var server = try Server(void).init(t.io, t.allocator, .{ .address = .localhost(6992) }, {});
     server.stop();
     server.deinit();
+}
+
+test "wisp: a second stop does not close the listener again" {
+    var server = try Server(void).init(t.io, t.allocator, .{ .address = .localhost(0), .workers = .{ .count = 1 } }, {});
+    defer server.deinit();
+    const thrd = try server.listenInNewThread();
+    server.stop();
+    thrd.join();
+    try t.expectEqual(null, server._listener);
+    server.stop();
 }
 
 // https://github.com/karlseguin/http.zig/issues/223

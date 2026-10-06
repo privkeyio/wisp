@@ -15,6 +15,55 @@ diff -ruN upstream/src/httpz.zig vendor/src/httpz.zig
  pub const Protocol = enum {
      HTTP10,
      HTTP11,
+@@ -413,12 +420,19 @@
+                     workers[i].deinit();
+                 };
+ 
+-                errdefer for (0..started) |i| {
+-                    workers[i].stop();
+-                };
+-
+                 var ready_sem = Io.Semaphore{};
+                 const threads = try self.arena.alloc(Thread, workers.len);
++
++                // Started workers must have exited run() before the deinit
++                // above frees their loop and pools, and before the listener
++                // errdefer closes a fd they monitor. Each run() posts ready_sem
++                // once it is far enough along to be stopped, as on success.
++                errdefer {
++                    for (0..started) |_| ready_sem.waitUncancelable(io);
++                    for (workers[0..started]) |*w| w.stop();
++                    for (threads[0..started]) |thrd| thrd.join();
++                }
++
+                 for (0..workers.len) |i| {
+                     workers[i] = try Worker.init(io, allocator, self, &config);
+                     errdefer {
+@@ -477,6 +491,7 @@
+                     posix.shutdown(l, .recv) catch {};
+                 }
+                 posix.close(l);
++                self._listener = null;
+             }
+         }
+ 
+@@ -1035,6 +1050,16 @@
+     server.deinit();
+ }
+ 
++test "wisp: a second stop does not close the listener again" {
++    var server = try Server(void).init(t.io, t.allocator, .{ .address = .localhost(0), .workers = .{ .count = 1 } }, {});
++    defer server.deinit();
++    const thrd = try server.listenInNewThread();
++    server.stop();
++    thrd.join();
++    try t.expectEqual(null, server._listener);
++    server.stop();
++}
++
+ // https://github.com/karlseguin/http.zig/issues/223
+ // A handler that's still in-flight when the server is stopped completes during
+ // deinit (thread_pool.stop() joins it), which puts its conn in handover_list
 diff -ruN upstream/src/metrics.zig vendor/src/metrics.zig
 --- upstream/src/metrics.zig
 +++ vendor/src/metrics.zig
@@ -60,7 +109,16 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
                  .keepalive_list = .{},
                  .buffer_pool = buffer_pool,
                  .conn_mem_pool = conn_mem_pool,
-@@ -668,14 +678,46 @@
+@@ -539,6 +549,8 @@
+ 
+             self.loop.start() catch |err| {
+                 log.err("Failed to start event loop: {}", .{err});
++                // listen() waits for one post per started worker.
++                ready_sem.post(io);
+                 return;
+             };
+ 
+@@ -668,14 +680,46 @@
          fn swapList(self: *Self, conn: *Conn(WSH), new_state: HTTPConn.State) void {
              const io = self.io;
              const http_conn = conn.protocol.http;
@@ -111,7 +169,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
              }
  
              http_conn.setState(new_state);
-@@ -684,7 +726,8 @@
+@@ -684,7 +728,8 @@
                  .active => self.active_list.insert(io, conn),
                  .keepalive => self.keepalive_list.insert(io, conn),
                  .request => self.request_list.insert(conn),
@@ -121,7 +179,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
              }
          }
  
-@@ -719,7 +762,18 @@
+@@ -719,7 +764,18 @@
                      // Linux can wake up multiple epoll fds for a single connection.
                      return if (err == error.WouldBlock) {} else err;
                  };
@@ -141,7 +199,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
                  metrics.connection();
  
                  const socket_flags = try posix.fcntl(socket, posix.F.GETFL, 0);
-@@ -727,7 +781,7 @@
+@@ -727,7 +783,7 @@
                  std.debug.assert(socket_flags & nonblocking == nonblocking);
  
                  const conn = try self.conn_mem_pool.create(self.allocator);
@@ -150,7 +208,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
  
                  const ip_address = address.toIOAddress();
  
-@@ -741,13 +795,20 @@
+@@ -741,13 +797,20 @@
                  http_conn.stream = .{ .socket = .{ .handle = socket, .address = ip_address } };
                  http_conn.timeout = now + self.timeout_request;
  
@@ -172,7 +230,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
                  errdefer {
                      conn.close();
                      self.disown(conn);
-@@ -782,7 +843,15 @@
+@@ -782,7 +845,15 @@
  
              while (c) |conn| {
                  c = conn.next;
@@ -189,7 +247,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
                  switch (http_conn.handover) {
                      .close, .unknown => {
                          closed_bool.* = true;
-@@ -817,13 +886,25 @@
+@@ -817,13 +888,25 @@
  
                          const hc: *ws.HandlerConn(WSH) = @ptrCast(@alignCast(ptr));
                          conn.protocol = .{ .websocket = hc };
@@ -216,7 +274,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
                              self.conn_mem_pool.destroy(conn);
                              continue;
                          };
-@@ -831,6 +912,45 @@
+@@ -831,6 +914,45 @@
                      .keepalive => unreachable,
                  }
              }
@@ -262,7 +320,17 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
          }
  
          // Entry-point of our thread pool. `thread_buf` is a thread-specific buffer
-@@ -887,10 +1007,10 @@
+@@ -856,6 +978,9 @@
+                 // nonblocking mode. Rare, but safer to close the connection
+                 // at this point.
+                 handover = .close;
++                // processSignal dispatches on http_conn.handover, not on the
++                // local, and .keepalive is unreachable there.
++                if (http_conn.handover == .keepalive) http_conn.handover = .close;
+             };
+ 
+             switch (handover) {
+@@ -887,10 +1012,10 @@
              if (success == false) {
                  ws_conn.close(.{ .code = 4997, .reason = "wsz" }) catch {};
                  self.websocket.cleanupConn(hc);
@@ -275,7 +343,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
              } else {
                  // Release `processing` before re-arming. With EPOLLONESHOT, re-arming
                  // while still holding `processing` loses a read that arrives in the
-@@ -905,24 +1025,73 @@
+@@ -905,24 +1030,82 @@
                      log.debug("({f}) failed to add read event monitor: {}", .{ ws_conn.address, err });
                      ws_conn.close(.{ .code = 4998, .reason = "wsz" }) catch {};
                      self.websocket.cleanupConn(hc);
@@ -296,7 +364,17 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
 +
          fn disown(self: *Self, conn: *Conn(WSH)) void {
              const io = self.io;
-             const http_conn = conn.protocol.http;
+-            const http_conn = conn.protocol.http;
++            // Guarded like shutdownList. A .websocket conn's slot and socket
++            // belong to the websocket close path (reapClosedWebsockets), so
++            // releasing it here as well would free its slot twice.
++            const http_conn = switch (conn.protocol) {
++                .http => |hc| hc,
++                .websocket => {
++                    log.err("disown found a .websocket conn; not releasing it", .{});
++                    return;
++                },
++            };
              switch (http_conn._state) {
                  .request => self.request_list.remove(conn),
 -                .handover => self.handover_list.remove(io, conn),
@@ -351,7 +429,49 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
              self.http_conn_pool.release(http_conn);
              self.conn_mem_pool.destroy(conn);
          }
-@@ -1010,7 +1179,14 @@
+@@ -974,7 +1157,22 @@
+             var timed_out: List(Conn(WSH)) = .{};
+ 
+             while (conn) |c| {
+-                const timeout = c.protocol.http.timeout;
++                // Unreachable today: request_list and keepalive_list only ever
++                // hold .http conns. Guarded because closeList would otherwise
++                // hand a *ws.HandlerConn to http_conn_pool.release, so a later
++                // connection would inherit it as its HTTPConn. A .websocket
++                // conn is dropped from the list but not counted or released:
++                // the websocket close path owns its slot and socket, so slot
++                // accounting stays exactly-once.
++                const http_conn = switch (c.protocol) {
++                    .http => |hc| hc,
++                    .websocket => {
++                        log.err("collectTimedOut found a .websocket conn in an http list; dropping it from the list", .{});
++                        conn = c.next;
++                        continue;
++                    },
++                };
++                const timeout = http_conn.timeout;
+                 if (timeout > now) {
+                     // The expired connections ahead of this one were moved into
+                     // `timed_out` and are about to be destroyed, so this node
+@@ -1000,8 +1198,16 @@
+             var conn = list.head;
+             while (conn) |c| {
+                 conn = c.next;
++                // See collectTimedOut, which already filters these out.
++                const http_conn = switch (c.protocol) {
++                    .http => |hc| hc,
++                    .websocket => {
++                        log.err("closeList found a .websocket conn; not releasing it", .{});
++                        continue;
++                    },
++                };
+                 c.close();
+-                self.release(c, c.protocol.http);
++                self.release(c, http_conn);
+             }
+         }
+ 
+@@ -1010,7 +1216,14 @@
              var conn = list.head;
              while (conn) |c| {
                  conn = c.next;
@@ -367,7 +487,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
                  posix.close(http_conn.stream.socket.handle);
                  http_conn.deinit(allocator);
              }
-@@ -1034,7 +1210,30 @@
+@@ -1034,7 +1247,30 @@
              var conn = list.inner.head;
              while (conn) |c| {
                  conn = c.next;
@@ -399,7 +519,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
                  switch (http_conn.handover) {
                      .disown, .websocket => {},
                      .close, .unknown => posix.close(http_conn.stream.socket.handle),
-@@ -1536,6 +1735,38 @@
+@@ -1536,6 +1772,38 @@
      }
  
      fn release(self: *HTTPConnPool, conn: *HTTPConn) void {
@@ -438,7 +558,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
          const conns = self.conns;
          self.lock();
          const available = self.available;
-@@ -1543,7 +1774,6 @@
+@@ -1543,7 +1811,6 @@
              self.unlock();
              conn.deinit(self.allocator);
  
@@ -446,3 +566,89 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
              self.http_mem_pool_mut.lockUncancelable(io);
              self.http_mem_pool.destroy(conn);
              self.http_mem_pool_mut.unlock(io);
+@@ -1993,6 +2260,85 @@
+     p.release(s4);
+ }
+ 
++test "wisp: timeout sweep and disown skip a .websocket conn in an http list" {
++    const WSH = httpz.DummyWebsocketHandler;
++    const W = NonBlocking(*httpz.Server(void), WSH);
++    const C = Conn(WSH);
++
++    var expired: HTTPConn = undefined;
++    expired.timeout = 5;
++    var alive: HTTPConn = undefined;
++    alive.timeout = 20;
++    var hc: ws.HandlerConn(WSH) = undefined;
++
++    var c1 = C{ .protocol = .{ .http = &expired }, .next = null, .prev = null };
++    var c2 = C{ .protocol = .{ .websocket = &hc }, .next = null, .prev = null };
++    var c3 = C{ .protocol = .{ .http = &alive }, .next = null, .prev = null };
++
++    var list: List(C) = .{};
++    list.insert(&c1);
++    list.insert(&c2);
++    list.insert(&c3);
++
++    const timed_out, const count, const next = W.collectTimedOut(&list, 10);
++    try t.expectEqual(1, count);
++    try t.expectEqual(20, next.?);
++    try t.expectEqual(&c1, timed_out.head.?);
++    try t.expectEqual(&c1, timed_out.tail.?);
++    try t.expectEqual(&c3, list.head.?);
++    try t.expectEqual(&c3, list.tail.?);
++    try t.expectEqual(null, c3.prev);
++
++    // Touching the worker, the pool or the undefined HandlerConn would crash,
++    // so these only pass if the .websocket conn is skipped outright.
++    var w: W = undefined;
++    var ws_only: List(C) = .{};
++    ws_only.insert(&c2);
++    w.closeList(ws_only);
++    w.disown(&c2);
++}
++
++test "wisp: swapList publishes to handover_list only after releasing the conn lock" {
++    // Once a conn is in handover_list the event-loop thread may release it, so
++    // swapList must not touch http_conn._mut after publishing. Hold
++    // handover_list's mutex so swapList parks inside the publish, then check
++    // that the conn lock is already free at that point.
++    const WSH = httpz.DummyWebsocketHandler;
++    const W = NonBlocking(*httpz.Server(void), WSH);
++    const C = Conn(WSH);
++
++    var w: W = undefined;
++    w.io = t.io;
++    w.active_list = .{};
++    w.handover_list = .{};
++
++    var http_conn: HTTPConn = undefined;
++    http_conn._mut = .init;
++    http_conn._state = .active;
++    var conn = C{ .protocol = .{ .http = &http_conn }, .next = null, .prev = null };
++    w.active_list.insert(t.io, &conn);
++
++    const hl_mut = &w.handover_list.mut;
++    hl_mut.lockUncancelable(t.io);
++    const thread = try std.Thread.spawn(.{}, W.swapList, .{ &w, &conn, HTTPConn.State.handover });
++
++    var waited_ms: usize = 0;
++    while (hl_mut.state.load(.acquire) != .contended and waited_ms < 10_000) : (waited_ms += 1) {
++        t.io.sleep(.fromMilliseconds(1), .awake) catch {};
++    }
++    const parked = hl_mut.state.load(.acquire) == .contended;
++    const conn_lock_at_publish = http_conn._mut.state.load(.acquire);
++
++    hl_mut.unlock(t.io);
++    thread.join();
++
++    try t.expectEqual(true, parked);
++    try t.expectEqual(Io.Mutex.State.unlocked, conn_lock_at_publish);
++    try t.expectEqual(&conn, w.handover_list.inner.head.?);
++    try t.expectEqual(null, w.active_list.inner.head);
++    try t.expectEqual(HTTPConn.State.handover, http_conn.getState());
++}
++
+ test "List: insert & remove" {
+     var list = List(TestNode){};
+     try expectList(&.{}, list);

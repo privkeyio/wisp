@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The spider stored any validly signed event an upstream relay sent, whether or not it matched what the spider subscribed to, so a hostile or misbehaving upstream could fill the relay with unrelated events. Synced events are now stored only if their author is followed, they p-tag a follow, or they are the admin's own.
 - Refreshing the spider's follow list emptied it first and then rebuilt it, which could take tens of seconds while bootstrapping, so the relay threads dropped follows' events in that window. The new list is built aside and swapped in. Catch-up and subscription setup no longer hold the follow-list lock across network reads, writes and the pauses between subscription batches.
+- If a keep-alive connection's socket could not be switched back to non-blocking mode after a response, the vendored HTTP server reached an unreachable state, which aborts the ReleaseSafe build (Docker, StartOS) and is undefined behavior on the ReleaseFast release binaries. The connection is now closed instead.
+- If the HTTP server failed partway through startup (out of memory or a thread that could not be spawned), it freed the worker threads it had already started while they were still running, which could crash the process instead of reporting the startup error. Started workers are now stopped and joined first.
 
 ## [0.8.0] - 2026-10-06
 
