@@ -380,6 +380,11 @@ pub const Handler = struct {
             return;
         }
 
+        if (connection.isRecipientPrivateKind(event.kind()) and !connection.hasRecipient(&event)) {
+            self.sendOk(conn, id, false, "invalid: gift wrap must p-tag a recipient");
+            return;
+        }
+
         if (!conn.mayPublish(event.kind(), event.pubkey())) {
             self.sendAuthChallenge(conn);
             self.sendOk(conn, id, false, "auth-required: app data may only be published by its authenticated author");

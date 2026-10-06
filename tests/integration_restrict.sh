@@ -95,6 +95,7 @@ case "$MODE" in
     WRAPKEY=$(noz key generate | head -1 | awk '{print $NF}')
     WRAP=$(timeout 12 noz event --sec "$WRAPKEY" -k 1059 -p "$PK2" -c sealed "$R" 2>/dev/null | grep -oE '"id":"[a-f0-9]{64}"' | head -1 | cut -d'"' -f4)
     chk "NIP-59 gift wrap is accepted without auth" 64 "${#WRAP}"
+    chk "NIP-59 gift wrap without a recipient is rejected" reject "$(pubres --sec "$WRAPKEY" -k 1059 -c nobody)"
     chk "NIP-17 gift wraps are not served without auth" 1 \
       "$(timeout 10 noz send "$R" '["REQ","g",{"kinds":[1059]}]' 2>/dev/null | grep -c '^\["CLOSED","g","auth-required:')"
     chk "NIP-17 gift wrap is hidden from a kindless REQ" 0 \

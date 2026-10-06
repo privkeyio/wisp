@@ -115,8 +115,13 @@ pub const Connection = struct {
         if (isAuthorPrivateKind(kind)) return self.isPubkeyAuthenticated(event.pubkey());
         if (!isRecipientPrivateKind(kind)) return true;
         const recipients = event.tags.get('p') orelse return false;
+        // One lock for every p-tag: broadcast runs this for each subscriber.
+        const io = nostr.io.io();
+        self.auth_mutex.lockUncancelable(io);
+        defer self.auth_mutex.unlock(io);
+        if (self.authenticated_pubkeys.count() == 0) return false;
         for (recipients) |tag| switch (tag) {
-            .binary => |pk| if (self.isPubkeyAuthenticated(&pk)) return true,
+            .binary => |pk| if (self.authenticated_pubkeys.contains(pk)) return true,
             .string => {},
         };
         return false;
@@ -273,6 +278,16 @@ pub fn isAuthorPrivateKind(kind: i32) bool {
 /// NIP-59 gift wraps, stored (1059) and ephemeral (21059).
 pub fn isRecipientPrivateKind(kind: i32) bool {
     return kind == 1059 or kind == 21059;
+}
+
+/// A gift wrap no recipient could read (no valid p tag) is refused at ingest.
+pub fn hasRecipient(event: *const nostr.Event) bool {
+    const recipients = event.tags.get('p') orelse return false;
+    for (recipients) |tag| switch (tag) {
+        .binary => return true,
+        .string => {},
+    };
+    return false;
 }
 
 pub const Subscription = struct {
