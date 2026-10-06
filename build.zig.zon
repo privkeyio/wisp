@@ -21,14 +21,15 @@
         // http.zig: HTTP routing (NIP-11/NIP-86) + WebSocket upgrade onto
         // websocket.zig's epoll worker pool.
         //
-        // Vendored (see vendor/httpz) from upstream commit 8aeb4e522b12 (Zig
-        // 0.17). Upstream now carries the timeout-sweep fix (a sweep containing
-        // both expired and surviving connections dropped every survivor from
-        // the tracking list), the .acquire ordering on acquireProcessing that
-        // the local patch below depends on, and the handover double-close fix:
-        // conns detached from handover_list are freed through release() rather
-        // than disown(), and shutdown no longer closes a socket that was
-        // disowned or upgraded. Its websocket pin matches the one above.
+        // Vendored (see vendor/httpz) from the upstream commit recorded in
+        // vendor/httpz.commit (Zig 0.17). Upstream now carries the
+        // timeout-sweep fix (a sweep containing both expired and surviving
+        // connections dropped every survivor from the tracking list), the
+        // .acquire ordering on acquireProcessing that the local patch below
+        // depends on, and the handover double-close fix: conns detached from
+        // handover_list are freed through release() rather than disown(), and
+        // shutdown no longer closes a socket that was disowned or upgraded. Its
+        // websocket pin matches the one above.
         //
         // What remains local, recorded in vendor/httpz.patch and enforced by
         // scripts/verify-vendored-httpz.sh in CI: reclaiming the per-worker slot

@@ -7,9 +7,13 @@
 set -euo pipefail
 
 UPSTREAM_REPO="https://github.com/karlseguin/http.zig"
-UPSTREAM_COMMIT="8aeb4e522b122fd2d9ba6731480b5d3878d2845f"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# A full SHA only: a branch, tag or short prefix could resolve differently later.
+UPSTREAM_COMMIT="$(tr -d '[:space:]' < "$repo_root/vendor/httpz.commit")"
+[[ "$UPSTREAM_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
+    || { echo "vendor/httpz.commit must hold a full 40-character commit SHA" >&2; exit 1; }
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
