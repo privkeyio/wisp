@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `[spider] mention_events_per_minute` (`WISP_SPIDER_MENTION_EVENTS_PER_MINUTE`, default 600): per upstream relay, a cap on events stored only because they p-tag a follow. Their authors are not followed, so anyone can create them in bulk; events by follows and the admin are never limited. `0` removes the cap.
+- `[spider] mention_events_per_minute` (`WISP_SPIDER_MENTION_EVENTS_PER_MINUTE`, default 600): per upstream relay, a cap on events stored only because they p-tag a follow. Their authors are not followed, so anyone can create them in bulk; events by follows and the admin are never limited. Mentions dropped over the cap are not fetched again later. `0` removes the cap.
 
 ### Fixed
 

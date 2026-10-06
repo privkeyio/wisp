@@ -1055,12 +1055,15 @@ pub const Spider = struct {
         if (nostr.isProtected(&event) or nostr.isExpired(&event)) return;
         // Only what the spider asked for: an upstream relay can send any signed
         // event, and storing it would let that relay fill this one.
-        switch (self.relevance(&event)) {
-            .followed => {},
-            .mention => if (!self.mention_limiter.checkAndRecord(relay_url)) return,
-            .unrequested => return,
-        }
+        const rel = self.relevance(&event);
+        if (rel == .unrequested) return;
         if (self.mgmt_store.rejection(&event) != null) return;
+        // Charged only for new, admitted mentions so redelivered or rejected
+        // events do not use up the budget.
+        if (rel == .mention) {
+            if ((self.store.get(event.id()) catch null) != null) return;
+            if (!self.mention_limiter.checkAndRecord(relay_url)) return;
+        }
 
         const result = self.store.store(&event, event_json) catch return;
 
@@ -1386,6 +1389,21 @@ test "synced events go through the NIP-86 policy and are stored only when admitt
     var mention_three_id: [32]u8 = undefined;
     _ = try std.fmt.hexToBytes(&mention_three_id, "24b0b58f35366ae0e9fd2d65511afec383fc2a6b2712bbc3142a76d1189ecc5b");
     try testing.expect((try store.get(&mention_three_id)) == null);
+
+    // Follows are not limited once the mention budget is spent.
+    const followed =
+        \\["EVENT","s",{"id":"f7645d79abd4f2a9f80a164ffba396e9a29be6ae3c991d021f868330c93ee267","pubkey":"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798","created_at":1700000000,"kind":1,"tags":[],"content":"follow after cap","sig":"d22156b06f44c05a73d79213b38513624a4947f10647e2501209a95c3e16ad645e04c04b70fb0d24046ce80e5964d9425fcaa5e90236097163db6a558bd4903d"}]
+    ;
+    spider.handleRelayMessage(followed, "wss://other", &received);
+    try testing.expectEqual(@as(u64, 4), received);
+
+    // Each relay has its own budget, and a redelivered event does not spend it.
+    spider.handleRelayMessage(mention_two, "wss://third", &received);
+    const mention_five =
+        \\["EVENT","s",{"id":"8f2403b2cf3797cccf89ad5324e6117d685bbaacff770e36ffe3ae316ca1a945","pubkey":"1ebe578791125a06885b92f743a313976f63e96bbd90b10de2124391917c308a","created_at":1700000000,"kind":1,"tags":[["p","79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"]],"content":"mention five","sig":"2ae34707be9e2245c956fc0304ac7ab9b7268be42199a8a9c5d4b8cc7a2600ca5b613c02e312ab5fd7d3e654d21b1d8cdab009de794a1e797b40077a19d5696d"}]
+    ;
+    spider.handleRelayMessage(mention_five, "wss://third", &received);
+    try testing.expectEqual(@as(u64, 5), received);
 }
 
 test parseAdmin {
