@@ -15,7 +15,7 @@ diff -ruN upstream/src/httpz.zig vendor/src/httpz.zig
  pub const Protocol = enum {
      HTTP10,
      HTTP11,
-@@ -413,12 +420,19 @@
+@@ -413,12 +420,20 @@
                      workers[i].deinit();
                  };
  
@@ -24,6 +24,7 @@ diff -ruN upstream/src/httpz.zig vendor/src/httpz.zig
 -                };
 -
                  var ready_sem = Io.Semaphore{};
++                var ready: usize = 0;
                  const threads = try self.arena.alloc(Thread, workers.len);
 +
 +                // Started workers must have exited run() before the deinit
@@ -31,7 +32,7 @@ diff -ruN upstream/src/httpz.zig vendor/src/httpz.zig
 +                // errdefer closes a fd they monitor. Each run() posts ready_sem
 +                // once it is far enough along to be stopped, as on success.
 +                errdefer {
-+                    for (0..started) |_| ready_sem.waitUncancelable(io);
++                    while (ready < started) : (ready += 1) ready_sem.waitUncancelable(io);
 +                    for (workers[0..started]) |*w| w.stop();
 +                    for (threads[0..started]) |thrd| thrd.join();
 +                }
@@ -39,7 +40,19 @@ diff -ruN upstream/src/httpz.zig vendor/src/httpz.zig
                  for (0..workers.len) |i| {
                      workers[i] = try Worker.init(io, allocator, self, &config);
                      errdefer {
-@@ -477,6 +491,7 @@
+@@ -429,9 +444,10 @@
+                     started += 1;
+                 }
+ 
+-                for (0..workers.len) |_| {
++                while (ready < workers.len) : (ready += 1) {
+                     ready_sem.waitUncancelable(io);
+                 }
++                for (workers) |*w| if (w.start_failed) return error.WorkerStartFailed;
+ 
+                 // incase listenInNewThread was used and is waiting for us to start
+                 self._cond.signal(io);
+@@ -477,6 +493,7 @@
                      posix.shutdown(l, .recv) catch {};
                  }
                  posix.close(l);
@@ -47,7 +60,7 @@ diff -ruN upstream/src/httpz.zig vendor/src/httpz.zig
              }
          }
  
-@@ -1035,6 +1050,16 @@
+@@ -1035,6 +1052,16 @@
      server.deinit();
  }
  
@@ -85,7 +98,17 @@ diff -ruN upstream/src/metrics.zig vendor/src/metrics.zig
 diff -ruN upstream/src/worker.zig vendor/src/worker.zig
 --- upstream/src/worker.zig
 +++ vendor/src/worker.zig
-@@ -408,6 +408,15 @@
+@@ -371,6 +371,9 @@
+         // whether or not the worker is full (len == max_conn)
+         full: bool,
+ 
++        // Set before run() posts ready_sem if it returned without serving.
++        start_failed: bool = false,
++
+         config: *const Config,
+ 
+         websocket: *ws.Worker(WSH),
+@@ -408,6 +411,15 @@
          // that alone) and the worker thread will process it.
          handover_list: ConcurrentList(Conn(WSH)),
  
@@ -101,7 +124,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
          // A pool of HTTPConn objects. The pool maintains a configured min # of these.
          // An HTTPConn is relatively expensive, since we pre-allocate all types
          // of things (a Request.State and Response.State).
-@@ -487,6 +496,7 @@
+@@ -487,6 +499,7 @@
                  .active_list = .{},
                  .request_list = .{},
                  .handover_list = .{},
@@ -109,16 +132,25 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
                  .keepalive_list = .{},
                  .buffer_pool = buffer_pool,
                  .conn_mem_pool = conn_mem_pool,
-@@ -539,6 +549,8 @@
+@@ -539,6 +552,9 @@
  
              self.loop.start() catch |err| {
                  log.err("Failed to start event loop: {}", .{err});
 +                // listen() waits for one post per started worker.
++                self.start_failed = true;
 +                ready_sem.post(io);
                  return;
              };
  
-@@ -668,14 +680,46 @@
+@@ -546,6 +562,7 @@
+             // that we're ready enough to be stopped in necessary.
+             self.loop.monitorAccept(listener) catch |err| {
+                 log.err("Failed to add monitor to listening socket: {}", .{err});
++                self.start_failed = true;
+                 ready_sem.post(io);
+                 return;
+             };
+@@ -668,14 +685,46 @@
          fn swapList(self: *Self, conn: *Conn(WSH), new_state: HTTPConn.State) void {
              const io = self.io;
              const http_conn = conn.protocol.http;
@@ -169,7 +201,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
              }
  
              http_conn.setState(new_state);
-@@ -684,7 +728,8 @@
+@@ -684,7 +733,8 @@
                  .active => self.active_list.insert(io, conn),
                  .keepalive => self.keepalive_list.insert(io, conn),
                  .request => self.request_list.insert(conn),
@@ -179,7 +211,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
              }
          }
  
-@@ -719,7 +764,18 @@
+@@ -719,7 +769,18 @@
                      // Linux can wake up multiple epoll fds for a single connection.
                      return if (err == error.WouldBlock) {} else err;
                  };
@@ -199,7 +231,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
                  metrics.connection();
  
                  const socket_flags = try posix.fcntl(socket, posix.F.GETFL, 0);
-@@ -727,7 +783,7 @@
+@@ -727,7 +788,7 @@
                  std.debug.assert(socket_flags & nonblocking == nonblocking);
  
                  const conn = try self.conn_mem_pool.create(self.allocator);
@@ -208,7 +240,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
  
                  const ip_address = address.toIOAddress();
  
-@@ -741,13 +797,20 @@
+@@ -741,13 +802,20 @@
                  http_conn.stream = .{ .socket = .{ .handle = socket, .address = ip_address } };
                  http_conn.timeout = now + self.timeout_request;
  
@@ -230,7 +262,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
                  errdefer {
                      conn.close();
                      self.disown(conn);
-@@ -782,7 +845,15 @@
+@@ -782,7 +850,15 @@
  
              while (c) |conn| {
                  c = conn.next;
@@ -247,7 +279,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
                  switch (http_conn.handover) {
                      .close, .unknown => {
                          closed_bool.* = true;
-@@ -817,13 +888,25 @@
+@@ -817,13 +893,25 @@
  
                          const hc: *ws.HandlerConn(WSH) = @ptrCast(@alignCast(ptr));
                          conn.protocol = .{ .websocket = hc };
@@ -274,7 +306,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
                              self.conn_mem_pool.destroy(conn);
                              continue;
                          };
-@@ -831,6 +914,45 @@
+@@ -831,6 +919,45 @@
                      .keepalive => unreachable,
                  }
              }
@@ -320,7 +352,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
          }
  
          // Entry-point of our thread pool. `thread_buf` is a thread-specific buffer
-@@ -856,6 +978,9 @@
+@@ -856,6 +983,9 @@
                  // nonblocking mode. Rare, but safer to close the connection
                  // at this point.
                  handover = .close;
@@ -330,7 +362,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
              };
  
              switch (handover) {
-@@ -887,10 +1012,10 @@
+@@ -887,10 +1017,10 @@
              if (success == false) {
                  ws_conn.close(.{ .code = 4997, .reason = "wsz" }) catch {};
                  self.websocket.cleanupConn(hc);
@@ -343,7 +375,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
              } else {
                  // Release `processing` before re-arming. With EPOLLONESHOT, re-arming
                  // while still holding `processing` loses a read that arrives in the
-@@ -905,24 +1030,82 @@
+@@ -905,24 +1035,82 @@
                      log.debug("({f}) failed to add read event monitor: {}", .{ ws_conn.address, err });
                      ws_conn.close(.{ .code = 4998, .reason = "wsz" }) catch {};
                      self.websocket.cleanupConn(hc);
@@ -429,7 +461,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
              self.http_conn_pool.release(http_conn);
              self.conn_mem_pool.destroy(conn);
          }
-@@ -974,7 +1157,22 @@
+@@ -974,7 +1162,22 @@
              var timed_out: List(Conn(WSH)) = .{};
  
              while (conn) |c| {
@@ -453,7 +485,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
                  if (timeout > now) {
                      // The expired connections ahead of this one were moved into
                      // `timed_out` and are about to be destroyed, so this node
-@@ -1000,8 +1198,16 @@
+@@ -1000,8 +1203,16 @@
              var conn = list.head;
              while (conn) |c| {
                  conn = c.next;
@@ -471,7 +503,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
              }
          }
  
-@@ -1010,7 +1216,14 @@
+@@ -1010,7 +1221,14 @@
              var conn = list.head;
              while (conn) |c| {
                  conn = c.next;
@@ -487,7 +519,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
                  posix.close(http_conn.stream.socket.handle);
                  http_conn.deinit(allocator);
              }
-@@ -1034,7 +1247,30 @@
+@@ -1034,7 +1252,30 @@
              var conn = list.inner.head;
              while (conn) |c| {
                  conn = c.next;
@@ -519,7 +551,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
                  switch (http_conn.handover) {
                      .disown, .websocket => {},
                      .close, .unknown => posix.close(http_conn.stream.socket.handle),
-@@ -1536,6 +1772,38 @@
+@@ -1536,6 +1777,38 @@
      }
  
      fn release(self: *HTTPConnPool, conn: *HTTPConn) void {
@@ -558,7 +590,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
          const conns = self.conns;
          self.lock();
          const available = self.available;
-@@ -1543,7 +1811,6 @@
+@@ -1543,7 +1816,6 @@
              self.unlock();
              conn.deinit(self.allocator);
  
@@ -566,7 +598,7 @@ diff -ruN upstream/src/worker.zig vendor/src/worker.zig
              self.http_mem_pool_mut.lockUncancelable(io);
              self.http_mem_pool.destroy(conn);
              self.http_mem_pool_mut.unlock(io);
-@@ -1993,6 +2260,85 @@
+@@ -1993,6 +2265,85 @@
      p.release(s4);
  }
  

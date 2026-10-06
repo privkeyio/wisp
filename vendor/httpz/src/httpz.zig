@@ -421,6 +421,7 @@ pub fn Server(comptime H: type) type {
                 };
 
                 var ready_sem = Io.Semaphore{};
+                var ready: usize = 0;
                 const threads = try self.arena.alloc(Thread, workers.len);
 
                 // Started workers must have exited run() before the deinit
@@ -428,7 +429,7 @@ pub fn Server(comptime H: type) type {
                 // errdefer closes a fd they monitor. Each run() posts ready_sem
                 // once it is far enough along to be stopped, as on success.
                 errdefer {
-                    for (0..started) |_| ready_sem.waitUncancelable(io);
+                    while (ready < started) : (ready += 1) ready_sem.waitUncancelable(io);
                     for (workers[0..started]) |*w| w.stop();
                     for (threads[0..started]) |thrd| thrd.join();
                 }
@@ -443,9 +444,10 @@ pub fn Server(comptime H: type) type {
                     started += 1;
                 }
 
-                for (0..workers.len) |_| {
+                while (ready < workers.len) : (ready += 1) {
                     ready_sem.waitUncancelable(io);
                 }
+                for (workers) |*w| if (w.start_failed) return error.WorkerStartFailed;
 
                 // incase listenInNewThread was used and is waiting for us to start
                 self._cond.signal(io);

@@ -371,6 +371,9 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
         // whether or not the worker is full (len == max_conn)
         full: bool,
 
+        // Set before run() posts ready_sem if it returned without serving.
+        start_failed: bool = false,
+
         config: *const Config,
 
         websocket: *ws.Worker(WSH),
@@ -550,6 +553,7 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
             self.loop.start() catch |err| {
                 log.err("Failed to start event loop: {}", .{err});
                 // listen() waits for one post per started worker.
+                self.start_failed = true;
                 ready_sem.post(io);
                 return;
             };
@@ -558,6 +562,7 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
             // that we're ready enough to be stopped in necessary.
             self.loop.monitorAccept(listener) catch |err| {
                 log.err("Failed to add monitor to listening socket: {}", .{err});
+                self.start_failed = true;
                 ready_sem.post(io);
                 return;
             };
