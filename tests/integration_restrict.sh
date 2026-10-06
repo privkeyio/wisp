@@ -104,9 +104,11 @@ case "$MODE" in
       "$(timeout 10 noz send "$R" '["REQ","g",{"kinds":[1059]}]' --sec $SEC1 --auth 2>/dev/null | grep -c '^\["EVENT"')"
     chk "NIP-17 gift wrap is served to its authenticated recipient" 1 \
       "$(timeout 10 noz send "$R" '["REQ","g",{"kinds":[1059]}]' --sec $SEC2 --auth 2>/dev/null | grep -c '^\["EVENT"')"
-    pubres --sec $SEC2 -k 5 -e "$WRAP" -c "" >/dev/null
+    DEL=$(timeout 12 noz event --sec $SEC2 -k 5 -e "$WRAP" -c "" "$R" 2>/dev/null | grep -oE '"id":"[a-f0-9]{64}"' | head -1 | cut -d'"' -f4)
     chk "NIP-59 recipient can delete a gift wrap" 0 \
       "$(timeout 10 noz send "$R" '["REQ","g",{"kinds":[1059]}]' --sec $SEC2 --auth 2>/dev/null | grep -c '^\["EVENT"')"
+    chk "a recipient's gift wrap deletion is not kept or served" 0 \
+      "$(timeout 10 noz send "$R" "[\"REQ\",\"d\",{\"ids\":[\"$DEL\"]}]" 2>/dev/null | grep -c '^\["EVENT"')"
     chk "NIP-78 app data is served to its authenticated author" 1 \
       "$(timeout 10 noz send "$R" '["REQ","a",{"kinds":[30078]}]' --sec $SEC1 --auth 2>/dev/null | grep -c '^\["EVENT"')"
     chk "NIP-78 app data is hidden from another authenticated user" 0 \

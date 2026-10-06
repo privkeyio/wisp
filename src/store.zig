@@ -317,32 +317,49 @@ pub const Store = struct {
         }
     }
 
+    /// How a deletion request was applied. `recipient` means the requester was a
+    /// p-tagged recipient of a gift wrap rather than its (one-time key) author.
+    pub const DeleteOutcome = enum { none, own, recipient };
+
     pub fn delete(self: *Store, event_id: *const [32]u8, requester_pubkey: *const [32]u8) !bool {
+        return try self.deleteOutcome(event_id, requester_pubkey) != .none;
+    }
+
+    pub fn deleteOutcome(self: *Store, event_id: *const [32]u8, requester_pubkey: *const [32]u8) !DeleteOutcome {
         var txn = try self.lmdb.beginTxn(false);
         errdefer txn.abort();
-        const ok = try self.deleteInTxn(&txn, event_id, requester_pubkey);
+        const outcome = try self.deleteOutcomeInTxn(&txn, event_id, requester_pubkey);
         try txn.commit();
-        if (ok) self.query_cache.invalidate();
-        return ok;
+        if (outcome != .none) self.query_cache.invalidate();
+        return outcome;
+    }
+
+    pub fn deleteInTxn(self: *Store, txn: *Txn, event_id: *const [32]u8, requester_pubkey: *const [32]u8) !bool {
+        return try self.deleteOutcomeInTxn(txn, event_id, requester_pubkey) != .none;
     }
 
     // Delete within a caller-provided write transaction (no abort, no commit). The
     // requester must own the event, or be a p-tagged recipient of a gift wrap
-    // (NIP-59: its signer is a one-time key, so only the recipient can ask). Returns false if the event is absent or not
-    // owned, leaving the shared transaction untouched.
-    pub fn deleteInTxn(self: *Store, txn: *Txn, event_id: *const [32]u8, requester_pubkey: *const [32]u8) !bool {
-        const json = try txn.get(self.events, event_id) orelse return false;
+    // (NIP-59: its signer is a one-time key, so only the recipient can ask).
+    // Leaves the shared transaction untouched when nothing is deleted.
+    pub fn deleteOutcomeInTxn(self: *Store, txn: *Txn, event_id: *const [32]u8, requester_pubkey: *const [32]u8) !DeleteOutcome {
+        const json = try txn.get(self.events, event_id) orelse return .none;
 
         var event = try nostr.Event.parse(json);
         defer event.deinit();
 
-        if (!std.mem.eql(u8, event.pubkey(), requester_pubkey) and !isGiftWrapRecipient(&event, requester_pubkey)) return false;
+        const outcome: DeleteOutcome = if (std.mem.eql(u8, event.pubkey(), requester_pubkey))
+            .own
+        else if (isGiftWrapRecipient(&event, requester_pubkey))
+            .recipient
+        else
+            return .none;
 
         try self.deleteEventInternal(txn, &event);
         const now = nostr.io.timestamp();
         const now_bytes = std.mem.asBytes(&now);
         try txn.put(self.deleted, event_id, now_bytes);
-        return true;
+        return outcome;
     }
 
     pub fn cleanupDeletedEntries(self: *Store, max_age_seconds: i64) !u64 {
@@ -1145,4 +1162,36 @@ test "storedFieldStart reads only top-level members and stops at the first" {
     try testing.expectEqual(@as(?i32, null), storedInt("{\"kind\":1.5}", "kind"));
     try testing.expectEqual(@as(?i32, null), storedInt("[1]", "kind"));
     try testing.expectEqual(@as(?usize, null), storedFieldStart("{\"a\":", "kind"));
+}
+
+test "deleteOutcome lets a gift wrap's recipient delete it and reports how" {
+    const alloc = testing.allocator;
+    const io = nostr.io.io();
+    const dir = "./.test-gift-wrap-delete";
+    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+
+    var lmdb = try Lmdb.init(alloc, dir ++ "/db.mdb", 256, .none);
+    defer lmdb.deinit();
+    var s = try Store.init(alloc, &lmdb);
+    defer s.deinit();
+
+    const json =
+        \\{"id":"00000000000000000000000000000000000000000000000000000000000000ee","pubkey":"00000000000000000000000000000000000000000000000000000000000000aa","sig":"00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000","kind":1059,"created_at":1700000000,"content":"x","tags":[["p","00000000000000000000000000000000000000000000000000000000000000bb"]]}
+    ;
+    var event = try nostr.Event.parse(json);
+    defer event.deinit();
+    _ = try s.store(&event, json);
+
+    var id: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&id, "00000000000000000000000000000000000000000000000000000000000000ee");
+    var stranger: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&stranger, "00000000000000000000000000000000000000000000000000000000000000cc");
+    var recipient: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&recipient, "00000000000000000000000000000000000000000000000000000000000000bb");
+
+    try testing.expectEqual(Store.DeleteOutcome.none, try s.deleteOutcome(&id, &stranger));
+    try testing.expect((try s.get(&id)) != null);
+    try testing.expectEqual(Store.DeleteOutcome.recipient, try s.deleteOutcome(&id, &recipient));
+    try testing.expect((try s.get(&id)) == null);
 }

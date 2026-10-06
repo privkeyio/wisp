@@ -478,8 +478,17 @@ pub const Handler = struct {
             return;
         }
 
+        var only_received_wraps = ids_to_delete.len > 0;
         for (ids_to_delete) |target_id| {
-            _ = self.store.delete(&target_id, pubkey) catch {};
+            const outcome = self.store.deleteOutcome(&target_id, pubkey) catch .none;
+            if (outcome != .recipient) only_received_wraps = false;
+        }
+
+        // A recipient deleting gift wraps sent to them: publishing that deletion
+        // would tie their key to the wraps, so it is applied but not kept.
+        if (only_received_wraps) {
+            self.replyOk(conn, id, true, "");
+            return;
         }
 
         const stored = if (self.store.store(event, json)) |r| r.stored else |_| false;
