@@ -172,7 +172,7 @@ jobs:
       - name: Build noz (nostr test client)
         env:
           # pinned by commit: a tag can be moved, a commit cannot
-          NOZ_COMMIT: 051f9843ffa0371609a281c92b2113e60d9f2a5e
+          NOZ_COMMIT: 538a3a1dac1949c2765145a7123b28c7c423c5a3
         run: |
           git clone --filter=blob:none https://github.com/privkeyio/noz "$RUNNER_TEMP/noz"
           git -C "$RUNNER_TEMP/noz" checkout --detach "$NOZ_COMMIT"
