@@ -113,8 +113,10 @@ in_flight=0
 for _ in $(seq 1 80); do grep -q '^frame \["REQ","bootstrap"' "$tmpdir/upstream.log" && { in_flight=1; break; }; sleep 0.1; done
 chk "bootstrap REQ reached the slow upstream" 1 "$in_flight"
 
+# The spider starts before the listener binds (and before the signal handler is
+# installed), so allow a moment for both rather than probing once.
 listening=0
-nc -z 127.0.0.1 "$SPIDER_PORT" 2>/dev/null && listening=1
+for _ in $(seq 1 30); do nc -z 127.0.0.1 "$SPIDER_PORT" 2>/dev/null && { listening=1; break; }; sleep 0.1; done
 chk "relay listens while the bootstrap is in flight" 1 "$listening"
 
 start=$(date +%s%N)

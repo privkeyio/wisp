@@ -32,9 +32,11 @@ neg_open() { # sub_id filter-json
   timeout 8 noz send "$R" "[\"NEG-OPEN\",\"$1\",$2,\"61\"]" 2>/dev/null
 }
 
-timeout 6 noz event --sec $SEC1 --ts 1700000001 -c "old match" "$R" >/dev/null 2>&1
+# Relative timestamps: fixed ones would age past max_event_age and stop storing.
+base=$(($(date +%s) - 1000))
+timeout 6 noz event --sec $SEC1 --ts "$base" -c "old match" "$R" >/dev/null 2>&1
 for i in 1 2 3 4; do
-  timeout 6 noz event --sec $SEC2 --ts $((1700000010 + i)) -c "newer $i" "$R" >/dev/null 2>&1
+  timeout 6 noz event --sec $SEC2 --ts $((base + 10 + i)) -c "newer $i" "$R" >/dev/null 2>&1
 done
 sleep 1
 
