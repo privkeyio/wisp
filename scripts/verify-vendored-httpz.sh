@@ -56,12 +56,16 @@ cp -a "$vendor_dir" "$tmp/vendor"
 # each path's type, executable bit and symlink target separately. The executable
 # bit is the only permission git records; the rest follow the local umask.
 # f = file, x = executable file, d = directory, l = symlink with its target.
+# POSIX find only (no -printf) so this also runs with BSD find on macOS.
 manifest() {
-    ( cd "$1" && find . -path ./.git -prune \
-        -o -type f -perm -u+x -printf '%p\tx\n' \
-        -o -type f -printf '%p\tf\n' \
-        -o -type l -printf '%p\tl -> %l\n' \
-        -o -printf '%p\t%y\n' ) | LC_ALL=C sort
+    ( cd "$1" && find . -path ./.git -prune -o -print | while IFS= read -r p; do
+        if [ -L "$p" ]; then printf '%s\tl -> %s\n' "$p" "$(readlink "$p")"
+        elif [ -f "$p" ] && [ -n "$(find "$p" -prune -perm -u+x)" ]; then printf '%s\tx\n' "$p"
+        elif [ -f "$p" ]; then printf '%s\tf\n' "$p"
+        elif [ -d "$p" ]; then printf '%s\td\n' "$p"
+        else printf '%s\t?\n' "$p"
+        fi
+    done ) | LC_ALL=C sort
 }
 manifest "$tmp/upstream" > "$tmp/upstream.manifest"
 manifest "$tmp/vendor" > "$tmp/vendor.manifest"
