@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-06
+
+Moves the build to Zig 0.17, which is now required, and picks up two upstream WebSocket fixes. No protocol or configuration changes from 0.7.0.
+
 ### Changed
 
 - Builds with Zig 0.17.0, which is now required. LMDB's header is translated through a `b.addTranslateC` module since 0.17 removes `@cImport`. The release binaries, Docker image (which now verifies the Zig download's sha256) and Nix package are built with 0.17.
