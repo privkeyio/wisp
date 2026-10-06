@@ -4,6 +4,7 @@ const isPrivateKind = @import("connection.zig").isPrivateKind;
 const Store = @import("store.zig").Store;
 const ManagementStore = @import("management_store.zig").ManagementStore;
 const handler = @import("handler.zig");
+const EventRateLimiter = @import("rate_limiter.zig").EventRateLimiter;
 const Broadcaster = @import("broadcaster.zig").Broadcaster;
 const Config = @import("config.zig").Config;
 const websocket = @import("websocket");
@@ -48,6 +49,9 @@ pub const Spider = struct {
     follow_mutex: std.Io.Mutex,
     // spider_admin parsed once; null when unset or not a valid 64-char hex key.
     admin_pubkey: ?[32]u8,
+    // Per upstream relay, events stored only because they p-tag a follow. Their
+    // authors are not followed, so anyone can mint them.
+    mention_limiter: EventRateLimiter,
     threads: std.ArrayListUnmanaged(std.Thread),
     ca_bundle: std.crypto.Certificate.Bundle,
 
@@ -72,6 +76,7 @@ pub const Spider = struct {
             .follow_set = .empty,
             .follow_mutex = .init,
             .admin_pubkey = parseAdmin(config.spider_admin),
+            .mention_limiter = EventRateLimiter.init(allocator, config.spider_mention_events_per_minute),
             .threads = .empty,
             .ca_bundle = .empty,
         };
@@ -99,6 +104,7 @@ pub const Spider = struct {
         self.relays.deinit(self.allocator);
         self.follow_pubkeys.deinit(self.allocator);
         self.follow_set.deinit(self.allocator);
+        self.mention_limiter.deinit();
         self.threads.deinit(self.allocator);
     }
 
@@ -256,20 +262,22 @@ pub const Spider = struct {
         log.warn("Failed to bootstrap kind 3 from any relay", .{});
     }
 
+    const Relevance = enum { followed, mention, unrequested };
+
     /// The spider subscribes to its follows' events, events that p-tag a follow,
     /// and the admin's own events (bootstrap). Set lookups keep the lock brief
     /// however many p-tags an upstream event carries.
-    fn isRequested(self: *Spider, event: *const nostr.Event) bool {
-        if (self.admin_pubkey) |admin| if (std.mem.eql(u8, &admin, event.pubkey())) return true;
+    fn relevance(self: *Spider, event: *const nostr.Event) Relevance {
+        if (self.admin_pubkey) |admin| if (std.mem.eql(u8, &admin, event.pubkey())) return .followed;
         const p_tags = event.tags.get('p') orelse &.{};
         self.follow_mutex.lockUncancelable(nostr.io.io());
         defer self.follow_mutex.unlock(nostr.io.io());
-        if (self.follow_set.contains(event.pubkey().*)) return true;
+        if (self.follow_set.contains(event.pubkey().*)) return .followed;
         for (p_tags) |tag| switch (tag) {
-            .binary => |pk| if (self.follow_set.contains(pk)) return true,
+            .binary => |pk| if (self.follow_set.contains(pk)) return .mention,
             .string => {},
         };
-        return false;
+        return .unrequested;
     }
 
     // Whether the admin's contact list is now in the store, rather than trusting
@@ -1047,7 +1055,11 @@ pub const Spider = struct {
         if (nostr.isProtected(&event) or nostr.isExpired(&event)) return;
         // Only what the spider asked for: an upstream relay can send any signed
         // event, and storing it would let that relay fill this one.
-        if (!self.isRequested(&event)) return;
+        switch (self.relevance(&event)) {
+            .followed => {},
+            .mention => if (!self.mention_limiter.checkAndRecord(relay_url)) return,
+            .unrequested => return,
+        }
         if (self.mgmt_store.rejection(&event) != null) return;
 
         const result = self.store.store(&event, event_json) catch return;
@@ -1352,6 +1364,28 @@ test "synced events go through the NIP-86 policy and are stored only when admitt
     ;
     spider.handleRelayMessage(mention, "wss://upstream", &received);
     try testing.expectEqual(@as(u64, 2), received);
+
+    // Mentions from unfollowed authors are rate limited per upstream relay;
+    // follows are not.
+    spider.mention_limiter.events_per_minute = 1;
+    const mention_two =
+        \\["EVENT","s",{"kind":1,"id":"941dfaf868cccad1a82089faa46b4477f9ed61a63caccb43fceed6211a50cff3","pubkey":"f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9","created_at":1700000000,"tags":[["p","79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"]],"content":"mention two","sig":"acceb321159b48bd12d9ffccb9c8973d10583127eb2662c4aad908a9d5bafa5d746675515fa4a6246e910b4b64aa2cb4626645ad7c9b26038bc32f31220c8ed6"}]
+    ;
+    spider.handleRelayMessage(mention_two, "wss://other", &received);
+    try testing.expectEqual(@as(u64, 3), received);
+    var mention_two_id: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&mention_two_id, "941dfaf868cccad1a82089faa46b4477f9ed61a63caccb43fceed6211a50cff3");
+    try testing.expect((try store.get(&mention_two_id)) != null);
+
+    // A second mention from the same relay within the minute is refused.
+    const mention_three =
+        \\["EVENT","s",{"kind":1,"id":"24b0b58f35366ae0e9fd2d65511afec383fc2a6b2712bbc3142a76d1189ecc5b","pubkey":"e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13","created_at":1700000000,"tags":[["p","79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"]],"content":"mention three","sig":"ce34b786a2d54a2ed99170a2022e18efaef2df9298fd1c9b314fe5601527b7a91094bbc16cc8b8164c6a5d8386994a7450c57757d0178bb20e5771a112c49ca8"}]
+    ;
+    spider.handleRelayMessage(mention_three, "wss://other", &received);
+    try testing.expectEqual(@as(u64, 3), received);
+    var mention_three_id: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&mention_three_id, "24b0b58f35366ae0e9fd2d65511afec383fc2a6b2712bbc3142a76d1189ecc5b");
+    try testing.expect((try store.get(&mention_three_id)) == null);
 }
 
 test parseAdmin {
