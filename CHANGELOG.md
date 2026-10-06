@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-06
+
+Serves NIP-17 / NIP-59 gift wraps only to their authenticated recipients, limits what the spider stores from upstream relays, and lets the NixOS module keep config values out of the Nix store. Clients reading gift wraps must now authenticate with NIP-42.
+
 ### Added
 
 - `[spider] mention_events_per_minute` (`WISP_SPIDER_MENTION_EVENTS_PER_MINUTE`, default 600): per upstream relay, a cap on events stored only because they p-tag a follow. Their authors are not followed, so anyone can create them in bulk; events by follows and the admin are never limited. Mentions dropped over the cap are not fetched again later. `0` removes the cap.
@@ -314,7 +318,10 @@ rolling out.
 - Import/export to JSONL format
 - Configuration via TOML file or environment variables
 
-[Unreleased]: https://github.com/privkeyio/wisp/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/privkeyio/wisp/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/privkeyio/wisp/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/privkeyio/wisp/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/privkeyio/wisp/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/privkeyio/wisp/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/privkeyio/wisp/compare/v0.5.15...v0.6.0
 [0.5.15]: https://github.com/privkeyio/wisp/compare/v0.5.14...v0.5.15

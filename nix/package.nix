@@ -20,7 +20,7 @@ let
 in
 stdenv.mkDerivation (finalAttrs: {
   pname = "wisp";
-  version = "0.8.0"; # keep in sync with build.zig.zon .version
+  version = "0.9.0"; # keep in sync with build.zig.zon .version
   inherit src;
 
   nativeBuildInputs = [ zig_0_17 ];
