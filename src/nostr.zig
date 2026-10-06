@@ -35,3 +35,4 @@ pub const negentropy = nostr_lib.negentropy;
 pub const ws = nostr_lib.ws;
 pub const nip86 = nostr_lib.nip86;
 pub const hex = nostr_lib.hex;
+pub const utils = nostr_lib.utils;

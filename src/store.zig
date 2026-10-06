@@ -5,6 +5,59 @@ const Dbi = @import("lmdb.zig").Dbi;
 const Cursor = @import("lmdb.zig").Cursor;
 const nostr = @import("nostr.zig");
 const QueryCache = @import("query_cache.zig").QueryCache;
+const isPrivateKind = @import("connection.zig").isPrivateKind;
+
+/// Who is reading: decides whether a private (NIP-78) event may be returned.
+/// Checked inside the iterators so a hidden event never counts toward `limit`.
+pub const Visibility = struct {
+    ctx: *anyopaque,
+    allowsFn: *const fn (ctx: *anyopaque, kind: i32, author: *const [32]u8) bool,
+
+    fn allows(self: Visibility, kind: i32, author: *const [32]u8) bool {
+        return !isPrivateKind(kind) or self.allowsFn(self.ctx, kind, author);
+    }
+
+    // For stored JSON that has not been parsed. Fails closed.
+    fn allowsJson(self: Visibility, json: []const u8) bool {
+        const kind = storedInt(json, "kind") orelse return false;
+        if (!isPrivateKind(kind)) return true;
+        const author = nostr.utils.hexFieldAt(json, storedFieldStart(json, "pubkey") orelse return false, 32) orelse return false;
+        return self.allowsFn(self.ctx, kind, &author);
+    }
+};
+
+fn skipWs(json: []const u8, start: usize) usize {
+    var pos = start;
+    while (pos < json.len and (json[pos] == ' ' or json[pos] == '\n' or json[pos] == '\r' or json[pos] == '\t')) : (pos += 1) {}
+    return pos;
+}
+
+/// Start of `key`'s value among the top-level members of a stored event,
+/// stopping at the first match instead of walking the whole object. Stored
+/// events were parsed with duplicate keys rejected when accepted, so the early
+/// exit finds the member the parser used. Nested values are never searched.
+fn storedFieldStart(json: []const u8, key: []const u8) ?usize {
+    var pos = skipWs(json, 0);
+    if (pos >= json.len or json[pos] != '{') return null;
+    pos = skipWs(json, pos + 1);
+    while (pos < json.len and json[pos] == '"') {
+        const key_end = nostr.utils.skipJsonValue(json, pos) orelse return null;
+        const name = json[pos + 1 .. key_end - 1];
+        pos = skipWs(json, key_end);
+        if (pos >= json.len or json[pos] != ':') return null;
+        const value = skipWs(json, pos + 1);
+        if (value >= json.len) return null;
+        if (std.mem.eql(u8, name, key)) return value;
+        pos = skipWs(json, nostr.utils.skipJsonValue(json, value) orelse return null);
+        if (pos >= json.len or json[pos] != ',') return null;
+        pos = skipWs(json, pos + 1);
+    }
+    return null;
+}
+
+fn storedInt(json: []const u8, key: []const u8) ?i32 {
+    return nostr.utils.intFieldAt(json, storedFieldStart(json, key) orelse return null, i32);
+}
 
 pub const Store = struct {
     lmdb: *Lmdb,
@@ -377,7 +430,11 @@ pub const Store = struct {
         return if (multiplier == 0) 0 else limit *| multiplier;
     }
 
-    pub fn queryMultiKind(self: *Store, kinds: []const i32, limit: u32) !MultiKindResult {
+    /// Newest-first scan of the created index for a filter whose only index-able
+    /// constraint is a set of kinds. The kind is checked before the event is
+    /// parsed; the rest of the filter and expiry are checked after.
+    pub fn queryMultiKind(self: *Store, filter: *const nostr.Filter, limit: u32, visibility: ?Visibility) !MultiKindResult {
+        const kinds = filter.kinds() orelse &.{};
         var txn = try self.lmdb.beginTxn(true);
         errdefer txn.abort();
 
@@ -397,7 +454,15 @@ pub const Store = struct {
         var cursor = try txn.cursor(self.idx_created);
         defer cursor.close();
 
-        var entry = try cursor.get(.last);
+        // Start at the newest key at or below `until`, like the indexed paths, so
+        // paging back through a multi-kind feed is not cut off by the scan cap.
+        var entry = if (filter.until() > 0) blk: {
+            var seek_key: [40]u8 = undefined;
+            const until_be = @byteSwap(@as(u64, @bitCast(filter.until())));
+            @memcpy(seek_key[0..8], std.mem.asBytes(&until_be));
+            @memset(seek_key[8..], 0xFF);
+            break :blk if (try cursor.seek(&seek_key)) |_| try cursor.get(.prev) else try cursor.get(.last);
+        } else try cursor.get(.last);
         var collected: u32 = 0;
         var scanned: u32 = 0;
         const max_scan = scanCap(limit, self.query_scan_multiplier);
@@ -411,23 +476,25 @@ pub const Store = struct {
             const event_id: *const [32]u8 = @ptrCast(e.key[8..40]);
             const ts_bytes: *const [8]u8 = @ptrCast(e.key[0..8]);
             const timestamp = @byteSwap(@as(u64, @bitCast(ts_bytes.*)));
+            if (filter.since() > 0 and timestamp < @as(u64, @intCast(filter.since()))) break;
 
             const json = try txn.get(self.events, event_id) orelse continue;
-            const kind_opt = extractKindFromJson(json);
+            const kind_opt = storedInt(json, "kind");
             if (kind_opt) |kind| {
                 const matches = if (kind >= 0 and kind < 256)
                     kind_set[@intCast(kind)]
-                else if (has_large_kind)
-                    blk: {
-                        for (kinds) |k| {
-                            if (k == kind) break :blk true;
-                        }
-                        break :blk false;
+                else if (has_large_kind) blk: {
+                    for (kinds) |k| {
+                        if (k == kind) break :blk true;
                     }
-                else
-                    false;
+                    break :blk false;
+                } else false;
 
                 if (matches) {
+                    var event = nostr.Event.parse(json) catch continue;
+                    defer event.deinit();
+                    if (nostr.isExpired(&event) or !filter.matches(&event)) continue;
+                    if (visibility) |v| if (!v.allows(event.kind(), event.pubkey())) continue;
                     try results.append(self.allocator, .{
                         .id = event_id.*,
                         .timestamp = timestamp,
@@ -445,32 +512,6 @@ pub const Store = struct {
             .limit = results.items.len,
         };
     }
-
-    fn extractKindFromJson(json: []const u8) ?i32 {
-        const pattern = "\"kind\":";
-        if (std.mem.indexOf(u8, json, pattern)) |idx| {
-            var pos = idx + pattern.len;
-            while (pos < json.len and (json[pos] == ' ' or json[pos] == '\t')) {
-                pos += 1;
-            }
-            if (pos >= json.len) return null;
-
-            var num: i32 = 0;
-            var found_digit = false;
-            while (pos < json.len) {
-                const c = json[pos];
-                if (c >= '0' and c <= '9') {
-                    num = num * 10 + @as(i32, @intCast(c - '0'));
-                    found_digit = true;
-                } else {
-                    break;
-                }
-                pos += 1;
-            }
-            if (found_digit) return num;
-        }
-        return null;
-    }
 };
 
 const EventRef = struct {
@@ -484,6 +525,10 @@ pub const MultiKindResult = struct {
     results: std.ArrayListUnmanaged(EventRef),
     index: usize,
     limit: usize,
+
+    pub fn lastId(self: *const MultiKindResult) *const [32]u8 {
+        return &self.results.items[self.index - 1].id;
+    }
 
     pub fn next(self: *MultiKindResult) !?[]const u8 {
         while (self.index < self.limit) {
@@ -529,7 +574,12 @@ pub const QueryIterator = struct {
     // apart from a match set that ended exactly at the cap.
     truncated: bool = false,
 
-    const IdHit = struct { json: []const u8, created_at: i64 };
+    // The reader, when the results leave the relay. Null for internal callers.
+    visibility: ?Visibility = null,
+    // Id of the event most recently returned by next().
+    last_id: [32]u8 = undefined,
+
+    const IdHit = struct { json: []const u8, created_at: i64, id: [32]u8 };
 
     const IndexType = enum { created, kind, pubkey, tag, ids };
 
@@ -541,7 +591,10 @@ pub const QueryIterator = struct {
             .max_scan = Store.scanCap(limit, scan_multiplier),
         };
 
-        if (filters.len > 0) {
+        // An index can only narrow a single filter: with several, the match set is
+        // their union, so anything but the full created-index scan would miss
+        // matches from all but filters[0].
+        if (filters.len == 1) {
             const f = filters[0];
 
             // Direct point lookups by id are inherently bounded (id list is
@@ -721,9 +774,10 @@ pub const QueryIterator = struct {
                 defer event.deinit();
 
                 if (nostr.isExpired(&event)) continue;
+                if (self.visibility) |v| if (!v.allows(event.kind(), event.pubkey())) continue;
 
                 if (self.filters.len == 0 or nostr.filtersMatch(self.filters, &event)) {
-                    try hits.append(self.store.allocator, .{ .json = json, .created_at = event.createdAt() });
+                    try hits.append(self.store.allocator, .{ .json = json, .created_at = event.createdAt(), .id = id.* });
                 }
             }
 
@@ -739,10 +793,15 @@ pub const QueryIterator = struct {
         const hits = &self.ids_hits.?;
         if (self.ids_hits_index >= hits.items.len) return null;
 
-        const json = hits.items[self.ids_hits_index].json;
+        const hit = hits.items[self.ids_hits_index];
         self.ids_hits_index += 1;
         self.returned += 1;
-        return json;
+        self.last_id = hit.id;
+        return hit.json;
+    }
+
+    pub fn lastId(self: *const QueryIterator) *const [32]u8 {
+        return &self.last_id;
     }
 
     const Entry = @import("lmdb.zig").Entry;
@@ -770,7 +829,9 @@ pub const QueryIterator = struct {
         const json = try self.txn.?.get(self.store.events, event_id) orelse return null;
 
         if (self.skip_filter) {
+            if (self.visibility) |v| if (!v.allowsJson(json)) return null;
             self.returned += 1;
+            @memcpy(&self.last_id, event_id);
             return json;
         }
 
@@ -778,9 +839,11 @@ pub const QueryIterator = struct {
         defer event.deinit();
 
         if (nostr.isExpired(&event)) return null;
+        if (self.visibility) |v| if (!v.allows(event.kind(), event.pubkey())) return null;
 
         if (self.filters.len == 0 or nostr.filtersMatch(self.filters, &event)) {
             self.returned += 1;
+            @memcpy(&self.last_id, event_id);
             return json;
         }
 
@@ -1058,4 +1121,14 @@ test "queryFull and ids fast-path bypass the scan cap for old matches" {
         while (try by_id.next()) |_| id_count += 1;
         try testing.expectEqual(@as(u32, 1), id_count);
     }
+}
+
+test "storedFieldStart reads only top-level members and stops at the first" {
+    const json =
+        \\{"content":"\"kind\":3","x":{"kind":5},"kind":7,"pubkey":"ab","kind":9}
+    ;
+    try testing.expectEqual(@as(?i32, 7), storedInt(json, "kind"));
+    try testing.expectEqual(@as(?i32, null), storedInt("{\"kind\":1.5}", "kind"));
+    try testing.expectEqual(@as(?i32, null), storedInt("[1]", "kind"));
+    try testing.expectEqual(@as(?usize, null), storedFieldStart("{\"a\":", "kind"));
 }

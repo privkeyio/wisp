@@ -12,7 +12,9 @@ pub const ManagementStore = struct {
     banned_pubkeys: Dbi,
     allowed_pubkeys: Dbi,
     banned_events: Dbi,
+    allowed_events: Dbi,
     allowed_kinds: Dbi,
+    disallowed_kinds: Dbi,
     blocked_ips: Dbi,
     relay_settings: Dbi,
 
@@ -25,7 +27,9 @@ pub const ManagementStore = struct {
         const banned_pubkeys = try lmdb.openDbi(&txn, "mgmt:banned_pubkeys");
         const allowed_pubkeys = try lmdb.openDbi(&txn, "mgmt:allowed_pubkeys");
         const banned_events = try lmdb.openDbi(&txn, "mgmt:banned_events");
+        const allowed_events = try lmdb.openDbi(&txn, "mgmt:allowed_events");
         const allowed_kinds = try lmdb.openDbi(&txn, "mgmt:allowed_kinds");
+        const disallowed_kinds = try lmdb.openDbi(&txn, "mgmt:disallowed_kinds");
         const blocked_ips = try lmdb.openDbi(&txn, "mgmt:blocked_ips");
         const relay_settings = try lmdb.openDbi(&txn, "mgmt:relay_settings");
 
@@ -37,22 +41,48 @@ pub const ManagementStore = struct {
             .banned_pubkeys = banned_pubkeys,
             .allowed_pubkeys = allowed_pubkeys,
             .banned_events = banned_events,
+            .allowed_events = allowed_events,
             .allowed_kinds = allowed_kinds,
+            .disallowed_kinds = disallowed_kinds,
             .blocked_ips = blocked_ips,
             .relay_settings = relay_settings,
             .mutex = .init,
         };
     }
 
-    pub fn banPubkey(self: *ManagementStore, pubkey: *const [32]u8, reason: []const u8) !void {
+    /// Writes `key` to `put_dbi` and removes it from `clear_dbi` in one
+    /// transaction. NIP-86 ban and allow lists are mutually exclusive.
+    fn putExclusive(self: *ManagementStore, put_dbi: Dbi, clear_dbi: Dbi, key: []const u8, value: []const u8) !void {
         const io = nostr.io.io();
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
         var txn = try self.lmdb.beginTxn(false);
         errdefer txn.abort();
-        try txn.put(self.banned_pubkeys, pubkey, reason);
+        try txn.put(put_dbi, key, value);
+        txn.delete(clear_dbi, key) catch {};
         try txn.commit();
+    }
+
+    fn remove(self: *ManagementStore, dbi: Dbi, key: []const u8) !void {
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+
+        var txn = try self.lmdb.beginTxn(false);
+        errdefer txn.abort();
+        txn.delete(dbi, key) catch {};
+        try txn.commit();
+    }
+
+    fn contains(self: *ManagementStore, dbi: Dbi, key: []const u8) bool {
+        var txn = self.lmdb.beginTxn(true) catch return false;
+        defer txn.abort();
+        return txn.get(dbi, key) catch null != null;
+    }
+
+    pub fn banPubkey(self: *ManagementStore, pubkey: *const [32]u8, reason: []const u8) !void {
+        try self.putExclusive(self.banned_pubkeys, self.allowed_pubkeys, pubkey, reason);
     }
 
     pub fn unbanPubkey(self: *ManagementStore, pubkey: *const [32]u8) !void {
@@ -104,14 +134,7 @@ pub const ManagementStore = struct {
     }
 
     pub fn allowPubkey(self: *ManagementStore, pubkey: *const [32]u8, reason: []const u8) !void {
-        const io = nostr.io.io();
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-
-        var txn = try self.lmdb.beginTxn(false);
-        errdefer txn.abort();
-        try txn.put(self.allowed_pubkeys, pubkey, reason);
-        try txn.commit();
+        try self.putExclusive(self.allowed_pubkeys, self.banned_pubkeys, pubkey, reason);
     }
 
     pub fn disallowPubkey(self: *ManagementStore, pubkey: *const [32]u8) !void {
@@ -171,14 +194,19 @@ pub const ManagementStore = struct {
     }
 
     pub fn banEvent(self: *ManagementStore, event_id: *const [32]u8, reason: []const u8) !void {
-        const io = nostr.io.io();
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
+        try self.putExclusive(self.banned_events, self.allowed_events, event_id, reason);
+    }
 
-        var txn = try self.lmdb.beginTxn(false);
-        errdefer txn.abort();
-        try txn.put(self.banned_events, event_id, reason);
-        try txn.commit();
+    pub fn allowEvent(self: *ManagementStore, event_id: *const [32]u8, reason: []const u8) !void {
+        try self.putExclusive(self.allowed_events, self.banned_events, event_id, reason);
+    }
+
+    pub fn disallowEvent(self: *ManagementStore, event_id: *const [32]u8) !void {
+        try self.remove(self.allowed_events, event_id);
+    }
+
+    pub fn isEventAllowed(self: *ManagementStore, event_id: *const [32]u8) bool {
+        return self.contains(self.allowed_events, event_id);
     }
 
     pub fn unbanEvent(self: *ManagementStore, event_id: *const [32]u8) !void {
@@ -199,10 +227,18 @@ pub const ManagementStore = struct {
     }
 
     pub fn listBannedEvents(self: *ManagementStore, allocator: std.mem.Allocator) ![]EventEntry {
+        return self.listEvents(self.banned_events, allocator);
+    }
+
+    pub fn listAllowedEvents(self: *ManagementStore, allocator: std.mem.Allocator) ![]EventEntry {
+        return self.listEvents(self.allowed_events, allocator);
+    }
+
+    fn listEvents(self: *ManagementStore, dbi: Dbi, allocator: std.mem.Allocator) ![]EventEntry {
         var txn = try self.lmdb.beginTxn(true);
         defer txn.abort();
 
-        var cursor = try txn.cursor(self.banned_events);
+        var cursor = try txn.cursor(dbi);
         defer cursor.close();
 
         var list: std.ArrayListUnmanaged(EventEntry) = .empty;
@@ -230,17 +266,11 @@ pub const ManagementStore = struct {
     }
 
     pub fn allowKind(self: *ManagementStore, kind: i32) !void {
-        const io = nostr.io.io();
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-
-        var txn = try self.lmdb.beginTxn(false);
-        errdefer txn.abort();
-        const key = std.mem.asBytes(&kind);
-        try txn.put(self.allowed_kinds, key, "");
-        try txn.commit();
+        try self.putExclusive(self.allowed_kinds, self.disallowed_kinds, std.mem.asBytes(&kind), "");
     }
 
+    /// Denies the kind outright. The allowlist is left alone: removing the kind
+    /// from it could empty it, which would admit every kind.
     pub fn disallowKind(self: *ManagementStore, kind: i32) !void {
         const io = nostr.io.io();
         self.mutex.lockUncancelable(io);
@@ -248,17 +278,14 @@ pub const ManagementStore = struct {
 
         var txn = try self.lmdb.beginTxn(false);
         errdefer txn.abort();
-        const key = std.mem.asBytes(&kind);
-        txn.delete(self.allowed_kinds, key) catch {};
+        try txn.put(self.disallowed_kinds, std.mem.asBytes(&kind), "");
         try txn.commit();
     }
 
     pub fn isKindAllowed(self: *ManagementStore, kind: i32) bool {
+        if (self.contains(self.disallowed_kinds, std.mem.asBytes(&kind))) return false;
         if (!self.hasAllowedKinds()) return true;
-        var txn = self.lmdb.beginTxn(true) catch return true;
-        defer txn.abort();
-        const key = std.mem.asBytes(&kind);
-        return txn.get(self.allowed_kinds, key) catch null != null;
+        return self.contains(self.allowed_kinds, std.mem.asBytes(&kind));
     }
 
     pub fn hasAllowedKinds(self: *ManagementStore) bool {
@@ -270,10 +297,18 @@ pub const ManagementStore = struct {
     }
 
     pub fn listAllowedKinds(self: *ManagementStore, allocator: std.mem.Allocator) ![]i32 {
+        return self.listKinds(self.allowed_kinds, allocator);
+    }
+
+    pub fn listDisallowedKinds(self: *ManagementStore, allocator: std.mem.Allocator) ![]i32 {
+        return self.listKinds(self.disallowed_kinds, allocator);
+    }
+
+    fn listKinds(self: *ManagementStore, dbi: Dbi, allocator: std.mem.Allocator) ![]i32 {
         var txn = try self.lmdb.beginTxn(true);
         defer txn.abort();
 
-        var cursor = try txn.cursor(self.allowed_kinds);
+        var cursor = try txn.cursor(dbi);
         defer cursor.close();
 
         var list: std.ArrayListUnmanaged(i32) = .empty;

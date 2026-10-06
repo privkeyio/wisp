@@ -87,22 +87,28 @@ pub const Nip86Handler = struct {
 
         return switch (m) {
             .supportedmethods => nip86.Response.ok(
-                \\{"result":["supportedmethods","banpubkey","listbannedpubkeys","allowpubkey","listallowedpubkeys","listeventsneedingmoderation","allowevent","banevent","listbannedevents","changerelayname","changerelaydescription","changerelayicon","allowkind","disallowkind","listallowedkinds","blockip","unblockip","listblockedips"]}
+                \\{"result":["supportedmethods","banpubkey","unbanpubkey","listbannedpubkeys","allowpubkey","unallowpubkey","listallowedpubkeys","listeventsneedingmoderation","allowevent","unallowevent","listallowedevents","banevent","unbanevent","listbannedevents","changerelayname","changerelaydescription","changerelayicon","allowkind","disallowkind","listallowedkinds","listdisallowedkinds","blockip","unblockip","listblockedips"]}
             ),
             .banpubkey => self.banPubkey(params),
+            .unbanpubkey => self.unbanPubkey(params),
             .listbannedpubkeys => self.listBannedPubkeys(),
             .allowpubkey => self.allowPubkey(params),
+            .unallowpubkey => self.unallowPubkey(params),
             .listallowedpubkeys => self.listAllowedPubkeys(),
             .banevent => self.banEvent(params),
+            .unbanevent => self.unbanEvent(params),
             .allowevent => self.allowEvent(params),
-            .listbannedevents => self.listBannedEvents(),
+            .unallowevent => self.unallowEvent(params),
+            .listbannedevents => self.listEvents(.banned),
+            .listallowedevents => self.listEvents(.allowed),
             .listeventsneedingmoderation => nip86.Response.ok("{\"result\":[]}"),
             .changerelayname => self.changeRelayName(params),
             .changerelaydescription => self.changeRelayDescription(params),
             .changerelayicon => self.changeRelayIcon(params),
             .allowkind => self.allowKind(params),
             .disallowkind => self.disallowKind(params),
-            .listallowedkinds => self.listAllowedKinds(),
+            .listallowedkinds => self.listKinds(.allowed),
+            .listdisallowedkinds => self.listKinds(.disallowed),
             .blockip => self.blockIp(params),
             .unblockip => self.unblockIp(params),
             .listblockedips => self.listBlockedIps(),
@@ -167,12 +173,63 @@ pub const Nip86Handler = struct {
         if (!parsed.parseEventId(&event_id)) {
             return nip86.Response.badRequest("{\"error\":\"missing or invalid event_id parameter\"}");
         }
+        self.mgmt_store.allowEvent(&event_id, parsed.values[1] orelse "") catch return nip86.Response.internalError();
+        return nip86.Response.ok("{\"result\":true}");
+    }
+
+    fn unbanEvent(self: *Nip86Handler, params: []const u8) nip86.Response {
+        const event_id = parseEventIdParam(params, self.allocator) orelse return badEventId();
         self.mgmt_store.unbanEvent(&event_id) catch return nip86.Response.internalError();
         return nip86.Response.ok("{\"result\":true}");
     }
 
-    fn listBannedEvents(self: *Nip86Handler) nip86.Response {
-        const entries = self.mgmt_store.listBannedEvents(self.allocator) catch return nip86.Response.internalError();
+    fn unallowEvent(self: *Nip86Handler, params: []const u8) nip86.Response {
+        const event_id = parseEventIdParam(params, self.allocator) orelse return badEventId();
+        self.mgmt_store.disallowEvent(&event_id) catch return nip86.Response.internalError();
+        return nip86.Response.ok("{\"result\":true}");
+    }
+
+    fn unbanPubkey(self: *Nip86Handler, params: []const u8) nip86.Response {
+        const pubkey = parsePubkeyParam(params, self.allocator) orelse return badPubkey();
+        self.mgmt_store.unbanPubkey(&pubkey) catch return nip86.Response.internalError();
+        return nip86.Response.ok("{\"result\":true}");
+    }
+
+    fn unallowPubkey(self: *Nip86Handler, params: []const u8) nip86.Response {
+        const pubkey = parsePubkeyParam(params, self.allocator) orelse return badPubkey();
+        self.mgmt_store.disallowPubkey(&pubkey) catch return nip86.Response.internalError();
+        return nip86.Response.ok("{\"result\":true}");
+    }
+
+    fn parsePubkeyParam(params: []const u8, allocator: std.mem.Allocator) ?[32]u8 {
+        var parsed = nip86.ParsedParams.parseStrings(params, 2, allocator);
+        defer parsed.deinit();
+        var pubkey: [32]u8 = undefined;
+        return if (parsed.parsePubkey(&pubkey)) pubkey else null;
+    }
+
+    fn parseEventIdParam(params: []const u8, allocator: std.mem.Allocator) ?[32]u8 {
+        var parsed = nip86.ParsedParams.parseStrings(params, 2, allocator);
+        defer parsed.deinit();
+        var event_id: [32]u8 = undefined;
+        return if (parsed.parseEventId(&event_id)) event_id else null;
+    }
+
+    fn badPubkey() nip86.Response {
+        return nip86.Response.badRequest("{\"error\":\"missing or invalid pubkey parameter\"}");
+    }
+
+    fn badEventId() nip86.Response {
+        return nip86.Response.badRequest("{\"error\":\"missing or invalid event_id parameter\"}");
+    }
+
+    const List = enum { banned, allowed };
+
+    fn listEvents(self: *Nip86Handler, which: List) nip86.Response {
+        const entries = switch (which) {
+            .banned => self.mgmt_store.listBannedEvents(self.allocator),
+            .allowed => self.mgmt_store.listAllowedEvents(self.allocator),
+        } catch return nip86.Response.internalError();
         defer ManagementStore.freeEventEntries(entries, self.allocator);
 
         var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -241,8 +298,11 @@ pub const Nip86Handler = struct {
         return nip86.Response.ok("{\"result\":true}");
     }
 
-    fn listAllowedKinds(self: *Nip86Handler) nip86.Response {
-        const kinds = self.mgmt_store.listAllowedKinds(self.allocator) catch return nip86.Response.internalError();
+    fn listKinds(self: *Nip86Handler, which: enum { allowed, disallowed }) nip86.Response {
+        const kinds = switch (which) {
+            .allowed => self.mgmt_store.listAllowedKinds(self.allocator),
+            .disallowed => self.mgmt_store.listDisallowedKinds(self.allocator),
+        } catch return nip86.Response.internalError();
         defer self.allocator.free(kinds);
 
         var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -402,4 +462,64 @@ test "nip86 dispatch routing, param guards, and store round-trip" {
     var pk: [32]u8 = undefined;
     _ = try std.fmt.hexToBytes(&pk, pk_hex);
     try testing.expect(mgmt.isPubkeyBanned(&pk));
+}
+
+test "nip86 ban and allow lists are exclusive and disallowkind is a deny list" {
+    const Lmdb = @import("lmdb.zig").Lmdb;
+    const io = nostr.io.io();
+    const cwd = std.Io.Dir.cwd();
+    const db_path = "./test_nip86_lists_db";
+    defer {
+        cwd.deleteFile(io, db_path) catch {};
+        cwd.deleteFile(io, db_path ++ "-lock") catch {};
+    }
+
+    var lmdb = try Lmdb.init(testing.allocator, db_path, 10, .none);
+    defer lmdb.deinit();
+    var mgmt = try ManagementStore.init(testing.allocator, &lmdb);
+
+    var config = Config.defaults();
+    var handler = Nip86Handler.init(testing.allocator, &config, &mgmt);
+    defer handler.deinit();
+
+    const pk_hex = "00000000000000000000000000000000000000000000000000000000000000bb";
+    var pk: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&pk, pk_hex);
+    const id_hex = "00000000000000000000000000000000000000000000000000000000000000ee";
+    var id: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&id, id_hex);
+
+    try testing.expectEqual(@as(u16, 200), handler.dispatch("banpubkey", "[\"" ++ pk_hex ++ "\"]").status);
+    try testing.expectEqual(@as(u16, 200), handler.dispatch("allowpubkey", "[\"" ++ pk_hex ++ "\"]").status);
+    try testing.expect(!mgmt.isPubkeyBanned(&pk));
+    try testing.expect(mgmt.isPubkeyAllowed(&pk));
+    try testing.expectEqual(@as(u16, 200), handler.dispatch("unallowpubkey", "[\"" ++ pk_hex ++ "\"]").status);
+    try testing.expect(!mgmt.hasAllowedPubkeys());
+    try testing.expectEqual(@as(u16, 200), handler.dispatch("banpubkey", "[\"" ++ pk_hex ++ "\"]").status);
+    try testing.expectEqual(@as(u16, 200), handler.dispatch("unbanpubkey", "[\"" ++ pk_hex ++ "\"]").status);
+    try testing.expect(!mgmt.isPubkeyBanned(&pk));
+
+    try testing.expectEqual(@as(u16, 200), handler.dispatch("banevent", "[\"" ++ id_hex ++ "\"]").status);
+    try testing.expectEqual(@as(u16, 200), handler.dispatch("allowevent", "[\"" ++ id_hex ++ "\"]").status);
+    try testing.expect(!mgmt.isEventBanned(&id));
+    try testing.expect(mgmt.isEventAllowed(&id));
+    try testing.expectEqual(@as(u16, 200), handler.dispatch("unallowevent", "[\"" ++ id_hex ++ "\"]").status);
+    try testing.expect(!mgmt.isEventAllowed(&id));
+    try testing.expectEqual(@as(u16, 400), handler.dispatch("unbanevent", "[\"nothex\"]").status);
+
+    try testing.expect(mgmt.isKindAllowed(7));
+    try testing.expectEqual(@as(u16, 200), handler.dispatch("disallowkind", "[7]").status);
+    try testing.expect(!mgmt.isKindAllowed(7));
+    try testing.expect(mgmt.isKindAllowed(1));
+    const denied = handler.dispatch("listdisallowedkinds", "[]");
+    defer if (denied.owned) testing.allocator.free(denied.body);
+    try testing.expectEqualStrings("{\"result\":[7]}", denied.body);
+    try testing.expectEqual(@as(u16, 200), handler.dispatch("allowkind", "[7]").status);
+    try testing.expect(mgmt.isKindAllowed(7));
+    try testing.expect(!mgmt.isKindAllowed(1));
+
+    // Denying the only allowlisted kind must not open the relay to every kind.
+    try testing.expectEqual(@as(u16, 200), handler.dispatch("disallowkind", "[7]").status);
+    try testing.expect(!mgmt.isKindAllowed(7));
+    try testing.expect(!mgmt.isKindAllowed(1));
 }

@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- An AUTH event signed for another relay could authenticate on wisp. The library located the AUTH tags by searching for the first `"tags"` anywhere in the event while the signature covered the real `tags` member, so anyone holding a user's AUTH event from another relay (within the 10 minute window) could add a decoy member carrying wisp's challenge and relay URL and be authenticated as that user. The same flaw let NIP-98 auth for the management API be redirected from another service within its 60 second window, let a third party republish a signed event with `-` stripped (NIP-70) or with injected `expiration`, `d` or `e` tags, and let the PoW nonce check read a decoy. Event fields are now read only from the event's top-level members, through libnostr-z 0.4.0.
+- A REQ with an out-of-range `limit` or `kinds` value (for example `"limit": 99999999999`) aborted the process on the ReleaseSafe build (Docker, StartOS) and was undefined behavior on the ReleaseFast release binaries. A NEG-OPEN or NEG-MSG with an unknown mode byte did the same, and one with a malformed varint pinned a worker thread in an endless loop.
+
+### Added
+
+- NIP-78: kind 78 and 30078 app data is only accepted from, and only served to, a connection authenticated (NIP-42) as its author, on REQ, live broadcast, COUNT and negentropy. Hidden events do not count toward a filter's `limit`. A REQ, COUNT or NEG-OPEN that names these kinds without authenticating gets `CLOSED auth-required` and an AUTH challenge, and the spider leaves them out of the negentropy sets it reconciles with upstream relays. `78` is advertised in `supported_nips`.
+- NIP-86: `unbanpubkey`, `unallowpubkey`, `unbanevent`, `unallowevent`, `listallowedevents` and `listdisallowedkinds`.
+
+### Changed
+
+- NIP-86 ban and allow lists are now mutually exclusive as the spec asks: banning a pubkey or event removes it from the allow list and allowing it removes the ban. `allowevent` adds the event to an allow list (it used to only lift a ban), and an allowed event is accepted past the pubkey and kind allowlists; a pubkey ban still applies. `disallowkind` adds the kind to a deny list that blocks it even when no allowlist is set, and no longer touches the allowlist. It used to only remove the kind from the allowlist, which did nothing on a relay without one and opened the relay to every kind when it removed the last entry. `allowkind` lifts a deny.
+- An addressable event whose `d` tag is longer than 250 bytes is now keyed by that `d`. Such events used to be keyed as if `d` were empty, and ones already stored that way keep their old key.
+- Events with duplicate top-level fields, malformed `tags` or non-integer `kind`/`created_at` are rejected as invalid.
+
+### Fixed
+
+- `limit: 0` returned stored events. NIP-01 now requires it to return none and keep the subscription open for new events; it does.
+- A REQ with several filters only used the first filter to pick an index and a limit, so matches for the other filters were silently missing (for example `[{"authors":[A]},{"kinds":[7]}]` returned only A's events). Each filter is now queried with its own `limit` and the results are merged without duplicates. `query_limit_max` still bounds the total a single REQ can return.
+- A REQ for several kinds ignored `since`, `until` and expiration, and always scanned from the newest event, so paging back with `until` past the scan window returned an empty set.
+- COUNT counted an event once per filter it matched.
+- A REQ whose query failed was reported closed but left registered, so it kept receiving live events.
+- The spider ended kind 3 bootstrap from a relay as soon as any message from it contained the text `"kind":3` (including `"kind":30023`), so a non-matching event could stop it before the contact list arrived. It now checks that the admin's contact list was actually stored.
+
 ## [0.6.1] - 2026-08-12
 
 Two ways a remote peer could crash or wedge the relay, a third that needs the kernel to refuse a socket registration, and a packaging build that had been failing since 0.5.12.

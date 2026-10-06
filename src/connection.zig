@@ -32,6 +32,9 @@ pub const Connection = struct {
     client_ip_len: u8 = 0,
     auth_challenge: [32]u8 = undefined,
     authenticated_pubkeys: std.AutoHashMap([32]u8, void) = undefined,
+    // Broadcast threads read the authenticated set (to gate private kinds) while
+    // this connection's own thread may be adding to it.
+    auth_mutex: std.Io.Mutex = .init,
     challenge_sent: bool = false,
 
     backing_allocator: std.mem.Allocator,
@@ -58,6 +61,7 @@ pub const Connection = struct {
         self.ws_conn = null;
         nostr.io.randomBytes(&self.auth_challenge);
         self.authenticated_pubkeys = std.AutoHashMap([32]u8, void).init(self.arena.allocator());
+        self.auth_mutex = .init;
         self.challenge_sent = false;
         self.deinitialized = false;
     }
@@ -76,16 +80,32 @@ pub const Connection = struct {
         return self.client_ip[0..self.client_ip_len];
     }
 
-    pub fn isAuthenticated(self: *const Connection) bool {
+    pub fn isAuthenticated(self: *Connection) bool {
+        const io = nostr.io.io();
+        self.auth_mutex.lockUncancelable(io);
+        defer self.auth_mutex.unlock(io);
         return self.authenticated_pubkeys.count() > 0;
     }
 
-    pub fn isPubkeyAuthenticated(self: *const Connection, pubkey: *const [32]u8) bool {
+    pub fn isPubkeyAuthenticated(self: *Connection, pubkey: *const [32]u8) bool {
+        const io = nostr.io.io();
+        self.auth_mutex.lockUncancelable(io);
+        defer self.auth_mutex.unlock(io);
         return self.authenticated_pubkeys.contains(pubkey.*);
     }
 
     pub fn addAuthenticatedPubkey(self: *Connection, pubkey: *const [32]u8) !void {
+        const io = nostr.io.io();
+        self.auth_mutex.lockUncancelable(io);
+        defer self.auth_mutex.unlock(io);
         try self.authenticated_pubkeys.put(pubkey.*, {});
+    }
+
+    /// NIP-78 app data (kinds 78 and 30078) is private to its author: it is only
+    /// accepted from, and only served to, a connection authenticated as that
+    /// author.
+    pub fn mayAccessPrivate(self: *Connection, kind: i32, author: *const [32]u8) bool {
+        return !isPrivateKind(kind) or self.isPubkeyAuthenticated(author);
     }
 
     /// Thread-safe write of a complete relay message (text frame). Used by both
@@ -224,8 +244,11 @@ pub const Connection = struct {
             std.Io.sleep(nostr.io.io(), .{ .nanoseconds = std.time.ns_per_ms }, .awake) catch {};
         }
     }
-
 };
+
+pub fn isPrivateKind(kind: i32) bool {
+    return kind == 78 or kind == 30078;
+}
 
 pub const Subscription = struct {
     id: []const u8,

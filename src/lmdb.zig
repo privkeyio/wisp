@@ -64,7 +64,7 @@ pub const Lmdb = struct {
             return error.EnvSetMapSize;
         }
 
-        if (c.mdb_env_set_maxdbs(env, 16) != 0) {
+        if (c.mdb_env_set_maxdbs(env, 32) != 0) {
             return error.EnvSetMaxDbs;
         }
 

@@ -238,6 +238,7 @@ pub const Subscriptions = struct {
         conn: *Connection,
         event: *const nostr.Event,
     ) void {
+        if (!conn.mayAccessPrivate(event.kind(), event.pubkey())) return;
         const sub_id = conn.matchesEvent(event) orelse return;
         _ = conn.write_guard.fetchAdd(1, .acquire);
         pending.append(self.allocator, .{ .conn = conn, .sub_id = sub_id }) catch {

@@ -192,6 +192,45 @@ chk "NIP-01 limit caps to N" 2 "$(req -k 1 -a "$PK3" -l 2)"
 chk "NIP-01 limit returns newest first" "lim3" \
   "$(timeout 10 noz req -k 1 -a "$PK3" -l 2 "$R" 2>/dev/null | grep -o 'lim[0-9]' | head -1)"
 
+# --- Raw multi-filter REQ/COUNT semantics (noz send prints relay replies verbatim) ---
+snd() { timeout 10 noz send "$R" "$1" 2>/dev/null; }
+evs() { grep -c '^\["EVENT"'; }
+SEC4=0000000000000000000000000000000000000000000000000000000000000004
+PK4=$(noz key public $SEC4)
+pub --sec $SEC4 -k 7 -c "+"
+sleep 0.3
+chk "NIP-01 limit 0 returns no stored events, only EOSE" '["EOSE","z"]' \
+  "$(snd "[\"REQ\",\"z\",{\"authors\":[\"$PK3\"],\"limit\":0}]")"
+chk "multi-filter REQ returns the union of every filter" 4 \
+  "$(snd "[\"REQ\",\"m\",{\"authors\":[\"$PK3\"]},{\"authors\":[\"$PK4\"],\"kinds\":[7]}]" | evs)"
+chk "limit applies per filter" 2 \
+  "$(snd "[\"REQ\",\"m\",{\"authors\":[\"$PK3\"],\"limit\":1},{\"authors\":[\"$PK4\"],\"limit\":5}]" | evs)"
+chk "an event matching two filters is sent once" 3 \
+  "$(snd "[\"REQ\",\"m\",{\"authors\":[\"$PK3\"]},{\"authors\":[\"$PK3\"],\"kinds\":[1]}]" | evs)"
+chk "limit 0 filter beside a normal one" 1 \
+  "$(snd "[\"REQ\",\"m\",{\"authors\":[\"$PK3\"],\"limit\":0},{\"authors\":[\"$PK4\"]}]" | evs)"
+chk "multi-kind REQ honors since" 0 \
+  "$(snd "[\"REQ\",\"s\",{\"kinds\":[1,7],\"authors\":[\"$PK4\"],\"since\":9999999999}]" | evs)"
+chk "multi-kind REQ (kinds only) honors until" 0 "$(snd '["REQ","s",{"kinds":[1,7],"until":1}]' | evs)"
+SEC5=0000000000000000000000000000000000000000000000000000000000000005
+old_ts=$(($(date +%s) - 50000))
+pub --sec $SEC5 -k 7 --ts $old_ts -c "old"
+sleep 0.3
+# limit 1 caps the scan at 20 entries; every other event here is newer, so this
+# only finds it if the scan starts at `until` rather than at the newest event
+chk "multi-kind REQ pages back past the scan window via until" 1 \
+  "$(snd "[\"REQ\",\"p\",{\"kinds\":[1,7],\"until\":$((old_ts + 10)),\"limit\":1}]" | evs)"
+chk "multi-kind REQ stops at since" 0 \
+  "$(snd "[\"REQ\",\"p\",{\"kinds\":[1,7],\"since\":$((old_ts + 1)),\"until\":$((old_ts + 10))}]" | evs)"
+chk "COUNT counts an event matching two filters once" 3 \
+  "$(snd "[\"COUNT\",\"c\",{\"authors\":[\"$PK3\"]},{\"kinds\":[1],\"authors\":[\"$PK3\"]}]" | grep -oE '"count":[0-9]+' | cut -d: -f2)"
+chk "oversized limit is clamped, not fatal" 1 \
+  "$(snd "[\"REQ\",\"h\",{\"kinds\":[7],\"authors\":[\"$PK4\"],\"limit\":99999999999}]" | evs)"
+chk "out-of-range kind matches nothing" 0 "$(snd '["REQ","h",{"kinds":[99999999999999999999]}]' | evs)"
+snd '["NEG-OPEN","n1",{},"61000003"]' >/dev/null
+snd '["NEG-OPEN","n2",{},"61ffffffffffffffffff02"]' >/dev/null
+chk "relay survives malformed negentropy payloads" 1 "$(req -k 7 -a "$PK4")"
+
 # --- NIP-40 expiration: expired rejected at publish, future-expiry kept ---
 now=$(date +%s)
 pub --sec $SEC1 -c "exp40past" -t expiration=$((now - 100))
