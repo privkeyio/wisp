@@ -92,5 +92,15 @@ pub fn build(b: *std.Build) void {
     unit_tests.root_module.link_libc = true;
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
-    b.step("test", "Run unit tests").dependOn(&run_unit_tests.step);
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&run_unit_tests.step);
+
+    // The regression tests wisp added to vendor/httpz. Upstream's own suite
+    // starts servers on fixed ports, so it is left to manual runs.
+    const httpz_tests = b.addTest(.{
+        .root_module = httpz.module("httpz"),
+        .filters = &.{"wisp: "},
+        .test_runner = .{ .path = httpz.path("test_runner.zig"), .mode = .simple },
+    });
+    test_step.dependOn(&b.addRunArtifact(httpz_tests).step);
 }

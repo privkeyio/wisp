@@ -371,6 +371,9 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
         // whether or not the worker is full (len == max_conn)
         full: bool,
 
+        // Set before run() posts ready_sem if it returned without serving.
+        start_failed: bool = false,
+
         config: *const Config,
 
         websocket: *ws.Worker(WSH),
@@ -549,6 +552,9 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
 
             self.loop.start() catch |err| {
                 log.err("Failed to start event loop: {}", .{err});
+                // listen() waits for one post per started worker.
+                self.start_failed = true;
+                ready_sem.post(io);
                 return;
             };
 
@@ -556,6 +562,7 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
             // that we're ready enough to be stopped in necessary.
             self.loop.monitorAccept(listener) catch |err| {
                 log.err("Failed to add monitor to listening socket: {}", .{err});
+                self.start_failed = true;
                 ready_sem.post(io);
                 return;
             };
@@ -976,6 +983,9 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
                 // nonblocking mode. Rare, but safer to close the connection
                 // at this point.
                 handover = .close;
+                // processSignal dispatches on http_conn.handover, not on the
+                // local, and .keepalive is unreachable there.
+                if (http_conn.handover == .keepalive) http_conn.handover = .close;
             };
 
             switch (handover) {
@@ -1042,7 +1052,16 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
 
         fn disown(self: *Self, conn: *Conn(WSH)) void {
             const io = self.io;
-            const http_conn = conn.protocol.http;
+            // Guarded like shutdownList. A .websocket conn's slot and socket
+            // belong to the websocket close path (reapClosedWebsockets), so
+            // releasing it here as well would free its slot twice.
+            const http_conn = switch (conn.protocol) {
+                .http => |hc| hc,
+                .websocket => {
+                    log.err("disown found a .websocket conn; not releasing it", .{});
+                    return;
+                },
+            };
             switch (http_conn._state) {
                 .request => self.request_list.remove(conn),
                 // Unreachable in practice: both callers (run()'s parse-error
@@ -1143,7 +1162,22 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
             var timed_out: List(Conn(WSH)) = .{};
 
             while (conn) |c| {
-                const timeout = c.protocol.http.timeout;
+                // Unreachable today: request_list and keepalive_list only ever
+                // hold .http conns. Guarded because closeList would otherwise
+                // hand a *ws.HandlerConn to http_conn_pool.release, so a later
+                // connection would inherit it as its HTTPConn. A .websocket
+                // conn is dropped from the list but not counted or released:
+                // the websocket close path owns its slot and socket, so slot
+                // accounting stays exactly-once.
+                const http_conn = switch (c.protocol) {
+                    .http => |hc| hc,
+                    .websocket => {
+                        log.err("collectTimedOut found a .websocket conn in an http list; dropping it from the list", .{});
+                        conn = c.next;
+                        continue;
+                    },
+                };
+                const timeout = http_conn.timeout;
                 if (timeout > now) {
                     // The expired connections ahead of this one were moved into
                     // `timed_out` and are about to be destroyed, so this node
@@ -1169,8 +1203,16 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
             var conn = list.head;
             while (conn) |c| {
                 conn = c.next;
+                // See collectTimedOut, which already filters these out.
+                const http_conn = switch (c.protocol) {
+                    .http => |hc| hc,
+                    .websocket => {
+                        log.err("closeList found a .websocket conn; not releasing it", .{});
+                        continue;
+                    },
+                };
                 c.close();
-                self.release(c, c.protocol.http);
+                self.release(c, http_conn);
             }
         }
 
@@ -2221,6 +2263,85 @@ test "HTTPConnPool" {
     p.release(s1);
     p.release(s3);
     p.release(s4);
+}
+
+test "wisp: timeout sweep and disown skip a .websocket conn in an http list" {
+    const WSH = httpz.DummyWebsocketHandler;
+    const W = NonBlocking(*httpz.Server(void), WSH);
+    const C = Conn(WSH);
+
+    var expired: HTTPConn = undefined;
+    expired.timeout = 5;
+    var alive: HTTPConn = undefined;
+    alive.timeout = 20;
+    var hc: ws.HandlerConn(WSH) = undefined;
+
+    var c1 = C{ .protocol = .{ .http = &expired }, .next = null, .prev = null };
+    var c2 = C{ .protocol = .{ .websocket = &hc }, .next = null, .prev = null };
+    var c3 = C{ .protocol = .{ .http = &alive }, .next = null, .prev = null };
+
+    var list: List(C) = .{};
+    list.insert(&c1);
+    list.insert(&c2);
+    list.insert(&c3);
+
+    const timed_out, const count, const next = W.collectTimedOut(&list, 10);
+    try t.expectEqual(1, count);
+    try t.expectEqual(20, next.?);
+    try t.expectEqual(&c1, timed_out.head.?);
+    try t.expectEqual(&c1, timed_out.tail.?);
+    try t.expectEqual(&c3, list.head.?);
+    try t.expectEqual(&c3, list.tail.?);
+    try t.expectEqual(null, c3.prev);
+
+    // Touching the worker, the pool or the undefined HandlerConn would crash,
+    // so these only pass if the .websocket conn is skipped outright.
+    var w: W = undefined;
+    var ws_only: List(C) = .{};
+    ws_only.insert(&c2);
+    w.closeList(ws_only);
+    w.disown(&c2);
+}
+
+test "wisp: swapList publishes to handover_list only after releasing the conn lock" {
+    // Once a conn is in handover_list the event-loop thread may release it, so
+    // swapList must not touch http_conn._mut after publishing. Hold
+    // handover_list's mutex so swapList parks inside the publish, then check
+    // that the conn lock is already free at that point.
+    const WSH = httpz.DummyWebsocketHandler;
+    const W = NonBlocking(*httpz.Server(void), WSH);
+    const C = Conn(WSH);
+
+    var w: W = undefined;
+    w.io = t.io;
+    w.active_list = .{};
+    w.handover_list = .{};
+
+    var http_conn: HTTPConn = undefined;
+    http_conn._mut = .init;
+    http_conn._state = .active;
+    var conn = C{ .protocol = .{ .http = &http_conn }, .next = null, .prev = null };
+    w.active_list.insert(t.io, &conn);
+
+    const hl_mut = &w.handover_list.mut;
+    hl_mut.lockUncancelable(t.io);
+    const thread = try std.Thread.spawn(.{}, W.swapList, .{ &w, &conn, HTTPConn.State.handover });
+
+    var waited_ms: usize = 0;
+    while (hl_mut.state.load(.acquire) != .contended and waited_ms < 10_000) : (waited_ms += 1) {
+        t.io.sleep(.fromMilliseconds(1), .awake) catch {};
+    }
+    const parked = hl_mut.state.load(.acquire) == .contended;
+    const conn_lock_at_publish = http_conn._mut.state.load(.acquire);
+
+    hl_mut.unlock(t.io);
+    thread.join();
+
+    try t.expectEqual(true, parked);
+    try t.expectEqual(Io.Mutex.State.unlocked, conn_lock_at_publish);
+    try t.expectEqual(&conn, w.handover_list.inner.head.?);
+    try t.expectEqual(null, w.active_list.inner.head);
+    try t.expectEqual(HTTPConn.State.handover, http_conn.getState());
 }
 
 test "List: insert & remove" {
