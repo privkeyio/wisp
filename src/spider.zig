@@ -499,13 +499,20 @@ pub const Spider = struct {
         conn.last_connect = now;
         conn.clearRateLimit();
 
-        const subscribed_hash = blk: {
+        // Subscribe from a snapshot so the lock is not held across the batched
+        // writes and pauses below; the hash comes from the same snapshot.
+        const pubkeys = blk: {
             self.follow_mutex.lockUncancelable(nostr.io.io());
             defer self.follow_mutex.unlock(nostr.io.io());
-            break :blk std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(self.follow_pubkeys.items));
+            break :blk self.allocator.dupe([32]u8, self.follow_pubkeys.items) catch {
+                log.err("{s}: Out of memory copying the follow list", .{relay_url});
+                return false;
+            };
         };
+        defer self.allocator.free(pubkeys);
+        const subscribed_hash = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(pubkeys));
 
-        self.sendSubscriptions(&client, relay_url) catch |err| {
+        self.sendSubscriptions(&client, relay_url, pubkeys) catch |err| {
             log.err("{s}: Failed to send subscriptions: {}", .{ relay_url, err });
             return false;
         };
@@ -843,11 +850,8 @@ pub const Spider = struct {
         return true;
     }
 
-    fn sendSubscriptions(self: *Spider, client: *websocket.Client, relay_url: []const u8) !void {
-        self.follow_mutex.lockUncancelable(nostr.io.io());
-        defer self.follow_mutex.unlock(nostr.io.io());
-
-        if (self.follow_pubkeys.items.len == 0) {
+    fn sendSubscriptions(self: *Spider, client: *websocket.Client, relay_url: []const u8, pubkeys: []const [32]u8) !void {
+        if (pubkeys.len == 0) {
             log.warn("{s}: No pubkeys to subscribe to", .{relay_url});
             return;
         }
@@ -855,11 +859,11 @@ pub const Spider = struct {
         var batch_idx: usize = 0;
         var i: usize = 0;
 
-        while (i < self.follow_pubkeys.items.len) {
+        while (i < pubkeys.len) {
             if (!self.shouldRun()) return error.Shutdown;
 
-            const end = @min(i + BATCH_SIZE, self.follow_pubkeys.items.len);
-            const batch = self.follow_pubkeys.items[i..end];
+            const end = @min(i + BATCH_SIZE, pubkeys.len);
+            const batch = pubkeys[i..end];
 
             var msg_buf: [65536]u8 = undefined;
             const msg = buildReqMessage(&msg_buf, batch_idx, batch) catch |err| {
@@ -877,7 +881,7 @@ pub const Spider = struct {
             batch_idx += 1;
             i = end;
 
-            if (i < self.follow_pubkeys.items.len) {
+            if (i < pubkeys.len) {
                 std.Io.sleep(nostr.io.io(), .{ .nanoseconds = @intCast(BATCH_CREATION_DELAY_MS * std.time.ns_per_ms) }, .awake) catch {};
             }
         }
@@ -899,8 +903,8 @@ pub const Spider = struct {
         while (self.shouldRun()) {
             // Re-subscribe when the follow list changes (added, removed, or
             // replaced pubkeys): exit so the relay loop reconnects, re-subscribes
-            // with the current pubkeys, and catches up. The non-empty guard skips
-            // the transient empty state while refreshFollowList re-bootstraps.
+            // with the current pubkeys, and catches up. An empty list is ignored:
+            // there would be nothing to subscribe to.
             const changed = blk: {
                 self.follow_mutex.lockUncancelable(nostr.io.io());
                 defer self.follow_mutex.unlock(nostr.io.io());
@@ -1176,7 +1180,7 @@ fn parseAdmin(hex: []const u8) ?[32]u8 {
     return key;
 }
 
-fn buildReqMessage(buf: []u8, batch_idx: usize, pubkeys: [][32]u8) ![]u8 {
+fn buildReqMessage(buf: []u8, batch_idx: usize, pubkeys: []const [32]u8) ![]u8 {
     var writer = std.Io.Writer.fixed(buf);
 
     try writer.print("[\"REQ\",\"spider-batch-{d}\",", .{batch_idx});
