@@ -1,9 +1,7 @@
 const std = @import("std");
 const nostr = @import("nostr.zig");
 
-const c = @cImport({
-    @cInclude("lmdb.h");
-});
+const c = @import("lmdb_c");
 
 pub const LmdbError = error{
     EnvCreate,
@@ -77,7 +75,7 @@ pub const Lmdb = struct {
             cwd.createDirPath(io, parent) catch {};
         }
 
-        const path_z = try allocator.dupeZ(u8, path);
+        const path_z = try allocator.dupeSentinel(u8, path, 0);
         defer allocator.free(path_z);
 
         const flags = flagsFor(sync_mode);
@@ -130,7 +128,7 @@ pub const Lmdb = struct {
     pub fn openDbi(self: *Lmdb, txn: *Txn, name: []const u8) !Dbi {
         var dbi: c.MDB_dbi = undefined;
 
-        const name_z = try self.allocator.dupeZ(u8, name);
+        const name_z = try self.allocator.dupeSentinel(u8, name, 0);
         defer self.allocator.free(name_z);
 
         const flags: c_uint = c.MDB_CREATE;

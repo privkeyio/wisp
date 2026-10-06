@@ -24,7 +24,7 @@ docker run -d --restart unless-stopped -p 7777:7777 -v wisp-data:/data ghcr.io/p
 Download the [latest release](https://github.com/privkeyio/wisp/releases) or build from source:
 
 ```sh
-# 1. Install dependencies (requires Zig 0.16.0)
+# 1. Install dependencies (requires Zig 0.17.0)
 sudo apt install -y liblmdb-dev libsecp256k1-dev libssl-dev
 
 # 2. Build

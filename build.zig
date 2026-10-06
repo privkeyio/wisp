@@ -19,6 +19,14 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const lmdb_c = b.addTranslateC(.{
+        .root_source_file = b.path("src/lmdb_c.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lmdb_c.linkSystemLibrary("lmdb", .{});
+    const lmdb_c_mod = lmdb_c.createModule();
+
     const exe = b.addExecutable(.{
         .name = "wisp",
         .root_module = b.createModule(.{
@@ -29,11 +37,12 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "nostr", .module = nostr.module("nostr") },
                 .{ .name = "websocket", .module = websocket.module("websocket") },
                 .{ .name = "httpz", .module = httpz.module("httpz") },
+                .{ .name = "lmdb_c", .module = lmdb_c_mod },
             },
         }),
     });
 
-    exe.root_module.strip = optimize == .ReleaseSmall or optimize == .ReleaseFast;
+    exe.root_module.strip = optimize == .small or optimize == .fast;
 
 
     // System libraries
@@ -44,7 +53,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    run_cmd.addPassthruArgs();
     b.step("run", "Run the relay").dependOn(&run_cmd.step);
 
     const test_lmdb = b.addExecutable(.{
@@ -53,6 +62,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tests/test_lmdb.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "lmdb_c", .module = lmdb_c_mod },
+            },
         }),
     });
     test_lmdb.root_module.linkSystemLibrary("lmdb", .{});
@@ -72,6 +84,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "nostr", .module = nostr.module("nostr") },
                 .{ .name = "websocket", .module = websocket.module("websocket") },
                 .{ .name = "httpz", .module = httpz.module("httpz") },
+                .{ .name = "lmdb_c", .module = lmdb_c_mod },
             },
         }),
     });

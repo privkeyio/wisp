@@ -1,4 +1,4 @@
-# Hermetic Zig 0.16 build of the wisp relay. build.zig.zon declares two fetched dependencies
+# Hermetic Zig 0.17 build of the wisp relay. build.zig.zon declares two fetched dependencies
 # (websocket, nostr) plus a path dependency on vendor/httpz, and deps.nix pins that whole transitive
 # closure by URL+hash, fetches each as a fixed-output derivation, and links them into Zig's global
 # package cache, so the build needs no network. deps.nix is maintained BY HAND and cannot be
@@ -9,7 +9,7 @@
   lib,
   stdenv,
   callPackage,
-  zig_0_16,
+  zig_0_17,
   lmdb,
   secp256k1,
   openssl,
@@ -23,7 +23,7 @@ stdenv.mkDerivation (finalAttrs: {
   version = "0.7.0"; # keep in sync with build.zig.zon .version
   inherit src;
 
-  nativeBuildInputs = [ zig_0_16 ];
+  nativeBuildInputs = [ zig_0_17 ];
   buildInputs = [
     lmdb
     secp256k1

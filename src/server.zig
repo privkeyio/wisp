@@ -388,7 +388,7 @@ test "safeIp" {
     // Non-hex letters are scrubbed; hex digits (a-f/A-F) are allowed.
     try std.testing.expectEqualStrings("?eef??", App.safeIp("xeefgz", &buf));
     // Over-length input is truncated to the 64-byte buffer, no overflow.
-    const long = "1" ** 100;
+    const long = &@as([100]u8, @splat('1'));
     try std.testing.expectEqual(@as(usize, 64), App.safeIp(long, &buf).len);
 }
 

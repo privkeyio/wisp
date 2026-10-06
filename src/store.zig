@@ -441,7 +441,7 @@ pub const Store = struct {
         var results: std.ArrayListUnmanaged(EventRef) = .empty;
         errdefer results.deinit(self.allocator);
 
-        var kind_set: [256]bool = .{false} ** 256;
+        var kind_set: [256]bool = @splat(false);
         var has_large_kind = false;
         for (kinds) |kind| {
             if (kind >= 0 and kind < 256) {
@@ -865,7 +865,7 @@ fn testIdHex(n: u32, buf: *[64]u8) void {
 }
 
 fn storeTestEvent(s: *Store, alloc: std.mem.Allocator, id_hex: []const u8, pubkey_hex: []const u8, created_at: i64) !void {
-    const sig_hex = "0" ** 128;
+    const sig_hex = &@as([128]u8, @splat('0'));
     const json = try std.fmt.allocPrint(
         alloc,
         "{{\"id\":\"{s}\",\"pubkey\":\"{s}\",\"sig\":\"{s}\",\"kind\":1,\"created_at\":{d},\"content\":\"x\",\"tags\":[]}}",
@@ -896,7 +896,7 @@ test "query scan cap stops at limit times multiplier" {
     defer s.deinit();
 
     const base = nostr.io.timestamp() - 100000;
-    const filler_pk = "aa" ** 32;
+    const filler_pk = &@as([64]u8, @splat('a'));
     var i: u32 = 0;
     while (i < 20) : (i += 1) {
         var idb: [64]u8 = undefined;
@@ -905,7 +905,7 @@ test "query scan cap stops at limit times multiplier" {
     }
 
     s.query_scan_multiplier = 3;
-    var authors = [_][32]u8{ [_]u8{0xcc} ** 32, [_]u8{0xdd} ** 32 };
+    var authors = [_][32]u8{ @splat(0xcc), @splat(0xdd) };
     const filters = [_]nostr.Filter{.{ .authors_bytes = &authors }};
     var iter = try s.query(&filters, 5);
     defer iter.deinit();
@@ -931,7 +931,7 @@ test "query scan cap not flagged truncated when match set ends at the cap" {
     defer s.deinit();
 
     const base = nostr.io.timestamp() - 100000;
-    const filler_pk = "aa" ** 32;
+    const filler_pk = &@as([64]u8, @splat('a'));
     // Exactly max_scan (limit 5 * multiplier 3 = 15) entries, none matching.
     var i: u32 = 0;
     while (i < 15) : (i += 1) {
@@ -941,7 +941,7 @@ test "query scan cap not flagged truncated when match set ends at the cap" {
     }
 
     s.query_scan_multiplier = 3;
-    var authors = [_][32]u8{ [_]u8{0xcc} ** 32, [_]u8{0xdd} ** 32 };
+    var authors = [_][32]u8{ @splat(0xcc), @splat(0xdd) };
     const filters = [_]nostr.Filter{.{ .authors_bytes = &authors }};
     var iter = try s.query(&filters, 5);
     defer iter.deinit();
@@ -967,7 +967,7 @@ test "ids fast-path returns newest matches first under limit" {
     defer s.deinit();
 
     const base = nostr.io.timestamp() - 100000;
-    const pk = "cc" ** 32;
+    const pk = &@as([64]u8, @splat('c'));
 
     // created_at rises with id index, so the id array below (oldest-first) does
     // not match age order; the fast-path must still return newest-first.
@@ -1018,8 +1018,8 @@ test "a multi-filter REQ is not narrowed to the ids in filters[0]" {
     defer s.deinit();
 
     const base = nostr.io.timestamp() - 100000;
-    const pk_ids = "aa" ** 32;
-    const pk_other = "bb" ** 32;
+    const pk_ids = &@as([64]u8, @splat('a'));
+    const pk_other = &@as([64]u8, @splat('b'));
 
     // Two events addressed by id, and one that only the second filter can reach.
     var ids: [2][32]u8 = undefined;
@@ -1071,8 +1071,8 @@ test "queryFull and ids fast-path bypass the scan cap for old matches" {
     defer s.deinit();
 
     const base = nostr.io.timestamp() - 100000;
-    const target_pk = "bb" ** 32;
-    const filler_pk = "aa" ** 32;
+    const target_pk = &@as([64]u8, @splat('b'));
+    const filler_pk = &@as([64]u8, @splat('a'));
 
     var target_id_hex: [64]u8 = undefined;
     testIdHex(999, &target_id_hex);
@@ -1089,7 +1089,7 @@ test "queryFull and ids fast-path bypass the scan cap for old matches" {
 
     var target_pk_bytes: [32]u8 = undefined;
     _ = try std.fmt.hexToBytes(&target_pk_bytes, target_pk);
-    var authors = [_][32]u8{ target_pk_bytes, [_]u8{0xcc} ** 32 };
+    var authors = [_][32]u8{ target_pk_bytes, @splat(0xcc) };
     const filters = [_]nostr.Filter{.{ .authors_bytes = &authors }};
 
     // LMDB is opened without MDB_NOTLS, so a thread may hold only one read txn

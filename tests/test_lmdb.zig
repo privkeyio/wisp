@@ -1,8 +1,6 @@
 const std = @import("std");
 
-const c = @cImport({
-    @cInclude("lmdb.h");
-});
+const c = @import("lmdb_c");
 
 pub fn main() !void {
     std.debug.print("=== LMDB Test ===\n", .{});
