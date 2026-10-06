@@ -119,7 +119,7 @@ pub const App = struct {
             return;
         }
 
-        if (app.config.admin_pubkeys.len == 0) {
+        if (app.nip86_handler.admins.items.len == 0) {
             res.status = 404;
             res.content_type = .JSON;
             res.body = "{\"error\":\"management API not enabled\"}";

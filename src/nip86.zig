@@ -47,7 +47,7 @@ pub const Nip86Handler = struct {
             _ = std.fmt.hexToBytes(&key, entry) catch return null;
             return key;
         }
-        if (!std.mem.startsWith(u8, entry, "npub1")) return null;
+        if (entry.len != 63 or !std.mem.startsWith(u8, entry, "npub1")) return null;
         var hrp: [8]u8 = undefined;
         var data: [40]u8 = undefined;
         const decoded = nostr.bech32.decode(entry, &hrp, &data) catch return null;
