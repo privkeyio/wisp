@@ -33,7 +33,31 @@ in
       };
     };
 
+  # settingsFile: a root-only file read through LoadCredential and appended after `settings`.
+  nodes.secret =
+    { ... }:
+    {
+      imports = [ self.nixosModules.wisp ];
+      environment.etc."wisp/secrets.toml" = {
+        mode = "0600";
+        # The leading top-level key must not land in the generated file's last section ([storage]);
+        # if it did, storage.path would point at a missing directory and the relay would not start.
+        text = ''
+          path = "/nonexistent/wisp.mdb"
+          [relay]
+          name = "secret relay"
+          description = "from settingsFile"
+        '';
+      };
+      services.wisp = {
+        enable = true;
+        settings.relay.name = "test relay";
+        settingsFile = "/etc/wisp/secrets.toml";
+      };
+    };
+
   testScript = ''
+    start_all()
     relay.wait_for_unit("wisp.service")
     relay.wait_for_open_port(7777)
 
@@ -51,5 +75,24 @@ in
     relay.succeed("test -d /var/lib/wisp")
     relay.succeed("systemctl show wisp.service | grep -qx 'ProtectSystem=strict'")
     relay.succeed("systemctl show wisp.service | grep -qx 'DynamicUser=yes'")
+
+    # The config reaches wisp as a credential, so the command line names no Nix store path.
+    relay.succeed(
+        "tr '\\0' ' ' < /proc/$(systemctl show -p MainPID --value wisp.service)/cmdline "
+        + "| grep -q ' relay /run/credentials/wisp.service/wisp.toml'"
+    )
+
+    secret.wait_for_unit("wisp.service")
+    secret.wait_for_open_port(7777)
+    nip11 = secret.succeed(
+        "${pkgs.curl}/bin/curl -sf -H 'Accept: application/nostr+json' http://127.0.0.1:7777/"
+    )
+    assert '"name":"secret relay"' in nip11, nip11
+    assert '"description":"from settingsFile"' in nip11, nip11
+    secret.succeed("test \"$(stat -c %a /run/wisp/wisp.toml)\" = 600")
+    secret.succeed(
+        "tr '\\0' ' ' < /proc/$(systemctl show -p MainPID --value wisp.service)/cmdline "
+        + "| grep -q ' relay /run/wisp/wisp.toml'"
+    )
   '';
 }

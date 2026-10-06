@@ -72,13 +72,15 @@ jobs:
     # exit, and a flake.lock bump landing on a nixpkgs rev where zig_0_17 is not
     # substitutable, which would start a source build of zig and LLVM. No job
     # here sets a timeout otherwise, so the default is 6 hours.
-    timeout-minutes: 20
+    timeout-minutes: 30
     if: github.event.pull_request.draft != true
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # HEAD^1 is the base the PR merges into, for the module test filter below.
+          fetch-depth: 2
 
       # Cheap and offline, so it runs before nix is even installed: it names the
       # offending file and hash in about a second, where nix build takes ~2
@@ -86,7 +88,53 @@ jobs:
       - name: Check nix/deps.nix and the package version against the manifests
         run: ./scripts/verify-nix-deps.sh
 
+      # The NixOS module VM test boots guests on top of the package build, so a PR
+      # only runs it when it touches the module, the flake, this workflow or the
+      # config loading the module relies on (src/config.zig, src/main.zig). Pushes
+      # to main always run it. If the diff cannot be computed, it runs.
+      - name: Decide whether to run the NixOS module test
+        id: module-test
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" != pull_request ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          elif ! changed="$(git diff --name-only HEAD^1 HEAD)"; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          elif printf '%s\n' "$changed" | grep -qE '^(nix/|flake\.(nix|lock)$|\.github/workflows/ci\.yml$|src/(config|main)\.zig$)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # install-nix-action would curl the installer and run it unchecked. Fetch the
+      # same pinned version to disk and verify it first, as the Zig setup does. The
+      # installer pins the sha256 of the binary tarball it downloads and aborts on
+      # a mismatch, so this one digest covers the whole bootstrap.
+      - name: Download and verify the Nix installer
+        env:
+          NIX_VERSION: 2.35.2
+          # sha256 of releases.nixos.org/nix/nix-2.35.2/install, equal to its published install.sha256
+          NIX_INSTALL_SHA256: 9adda97297d9e8ab360df95c729eabff4f4f93d6db091953c3a68f29e3fb130c
+        run: |
+          set -euo pipefail
+          installer="$RUNNER_TEMP/nix-install"
+          curl -fsSL --retry 3 -o "$installer" \
+            "https://releases.nixos.org/nix/nix-$NIX_VERSION/install"
+          echo "$NIX_INSTALL_SHA256  $installer" | sha256sum -c -
+
+      # The runner user is not a trusted nix user, so the daemon refuses
+      # client-supplied restricted settings (substituters, trusted keys,
+      # require-sigs), including any a PR adds to flake.nix nixConfig. Flake
+      # config is also not accepted at all, and the only substituter and signing
+      # key are cache.nixos.org's.
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          install_url: file://${{ runner.temp }}/nix-install
+          set_as_trusted_user: false
+          extra_nix_config: |
+            accept-flake-config = false
+            require-sigs = true
+            substituters = https://cache.nixos.org/
+            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
 
       # nix/deps.nix is the offline package cache for the Nix build, mirroring
       # the Zig manifests by hand. Nothing built it in CI, so it silently went
@@ -132,12 +180,11 @@ jobs:
             *) echo "NIP-11 response missing software field: $body"; cat relay-nix.log; exit 1 ;;
           esac
 
-      # The flake also exposes checks.<system>.wisp-module, a NixOS VM test that
-      # boots the module and drives a real WebSocket client. It is not run here
-      # only because of runtime: it builds a guest kernel and userland on top of
-      # this job's work. KVM *is* available on these runners (the installer
-      # enables it), so adding it is a cost decision, not a capability one.
-      # Run it with `nix flake check` when touching nix/module.nix.
+      # Boots services.wisp in NixOS VMs (KVM is enabled by the installer) and
+      # drives a real WebSocket client, with and without settingsFile.
+      - name: NixOS module VM test
+        if: steps.module-test.outputs.run == 'true'
+        run: nix build .#checks.x86_64-linux.wisp-module --no-link --print-build-logs
 
   integration:
     permissions:
