@@ -4,6 +4,7 @@ const ManagementStore = @import("management_store.zig").ManagementStore;
 const nostr = @import("nostr.zig");
 const nip86 = nostr.nip86;
 const hex = nostr.hex;
+const log = std.log.scoped(.nip86);
 
 pub const Nip86Handler = struct {
     config: *const Config,
@@ -13,20 +14,53 @@ pub const Nip86Handler = struct {
     relay_name: ?[]const u8 = null,
     relay_description: ?[]const u8 = null,
     relay_icon: ?[]const u8 = null,
+    // admin_pubkeys decoded once; entries that are neither 64-char hex (any
+    // case) nor an npub are logged and left out.
+    admins: std.ArrayListUnmanaged([32]u8) = .empty,
 
     pub fn init(
         allocator: std.mem.Allocator,
         config: *const Config,
         mgmt_store: *ManagementStore,
     ) Nip86Handler {
-        return .{
+        var handler: Nip86Handler = .{
             .allocator = allocator,
             .config = config,
             .mgmt_store = mgmt_store,
         };
+        var iter = std.mem.splitScalar(u8, config.admin_pubkeys, ',');
+        while (iter.next()) |entry| {
+            const trimmed = std.mem.trim(u8, entry, " \t");
+            if (trimmed.len == 0) continue;
+            const key = parseAdminKey(trimmed) orelse {
+                log.warn("admin_pubkeys entry \"{s}\" is not a 64-character hex key or an npub; it grants no access", .{trimmed});
+                continue;
+            };
+            handler.admins.append(allocator, key) catch log.err("out of memory loading admin_pubkeys", .{});
+        }
+        return handler;
+    }
+
+    fn parseAdminKey(entry: []const u8) ?[32]u8 {
+        if (entry.len == 64) {
+            var key: [32]u8 = undefined;
+            _ = std.fmt.hexToBytes(&key, entry) catch return null;
+            return key;
+        }
+        if (!std.mem.startsWith(u8, entry, "npub1")) return null;
+        var hrp: [8]u8 = undefined;
+        var data: [40]u8 = undefined;
+        const decoded = nostr.bech32.decode(entry, &hrp, &data) catch return null;
+        if (!std.mem.eql(u8, hrp[0..decoded.hrp_len], "npub") or decoded.data_len != 32) return null;
+        return data[0..32].*;
     }
 
     pub fn deinit(self: *Nip86Handler) void {
+        self.freeRelaySettings();
+        self.admins.deinit(self.allocator);
+    }
+
+    fn freeRelaySettings(self: *Nip86Handler) void {
         if (self.relay_name) |name| {
             self.allocator.free(name);
             self.relay_name = null;
@@ -42,7 +76,7 @@ pub const Nip86Handler = struct {
     }
 
     pub fn loadRelaySettings(self: *Nip86Handler) void {
-        self.deinit();
+        self.freeRelaySettings();
         self.relay_name = self.mgmt_store.getRelaySetting("name", self.allocator) catch null;
         self.relay_description = self.mgmt_store.getRelaySetting("description", self.allocator) catch null;
         self.relay_icon = self.mgmt_store.getRelaySetting("icon", self.allocator) catch null;
@@ -381,18 +415,7 @@ pub const Nip86Handler = struct {
     }
 
     fn isAdmin(self: *Nip86Handler, pubkey: *const [32]u8) bool {
-        if (self.config.admin_pubkeys.len == 0) return false;
-
-        var hex_buf: [64]u8 = undefined;
-        hex.encode(pubkey, &hex_buf);
-
-        var iter = std.mem.splitScalar(u8, self.config.admin_pubkeys, ',');
-        while (iter.next()) |admin| {
-            const trimmed = std.mem.trim(u8, admin, " \t");
-            if (trimmed.len == 64 and std.mem.eql(u8, trimmed, &hex_buf)) {
-                return true;
-            }
-        }
+        for (self.admins.items) |admin| if (std.mem.eql(u8, &admin, pubkey)) return true;
         return false;
     }
 };
@@ -401,22 +424,31 @@ const testing = std.testing;
 
 test "isAdmin matches the configured pubkey list" {
     var config = Config.defaults();
-    config.admin_pubkeys = "00000000000000000000000000000000000000000000000000000000000000aa, 00000000000000000000000000000000000000000000000000000000000000bb";
+    config.admin_pubkeys = "00000000000000000000000000000000000000000000000000000000000000aa, 00000000000000000000000000000000000000000000000000000000000000BB, npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqrwse98m4x, not-a-key, npub1bad";
 
     var mgmt: ManagementStore = undefined;
     var handler = Nip86Handler.init(testing.allocator, &config, &mgmt);
+    defer handler.deinit();
 
-    var admin: [32]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&admin, "00000000000000000000000000000000000000000000000000000000000000bb");
-    try testing.expect(handler.isAdmin(&admin));
+    // Lowercase hex, uppercase hex and npub entries all grant access.
+    for ([_][]const u8{ "aa", "bb", "dd" }) |last| {
+        var admin: [32]u8 = @splat(0);
+        _ = try std.fmt.hexToBytes(admin[31..], last);
+        try testing.expect(handler.isAdmin(&admin));
+    }
+    try testing.expectEqual(@as(usize, 3), handler.admins.items.len);
 
-    var stranger: [32]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&stranger, "00000000000000000000000000000000000000000000000000000000000000cc");
+    var stranger: [32]u8 = @splat(0);
+    stranger[31] = 0xcc;
     try testing.expect(!handler.isAdmin(&stranger));
 
     // An empty admin list denies everyone.
     config.admin_pubkeys = "";
-    try testing.expect(!handler.isAdmin(&admin));
+    var empty = Nip86Handler.init(testing.allocator, &config, &mgmt);
+    defer empty.deinit();
+    var admin: [32]u8 = @splat(0);
+    admin[31] = 0xaa;
+    try testing.expect(!empty.isAdmin(&admin));
 }
 
 test "nip86 dispatch routing, param guards, and store round-trip" {

@@ -212,7 +212,7 @@ than being accepted and then matching nothing. The same applies to `trusted_prox
 
 | TOML | Env | Type | Default | Description |
 |------|-----|------|---------|-------------|
-| `admin_pubkeys` | `WISP_ADMIN_PUBKEYS` | csv | (empty) | Hex pubkeys allowed to run NIP-86 relay-management commands (ban/allow pubkeys and IPs, etc.). |
+| `admin_pubkeys` | `WISP_ADMIN_PUBKEYS` | csv | (empty) | Pubkeys (64-character hex in any case, or `npub`) allowed to run NIP-86 relay-management commands (ban/allow pubkeys and IPs, etc.). An entry that is neither is logged at startup and grants nothing. |
 
 ## Spider mode
 
