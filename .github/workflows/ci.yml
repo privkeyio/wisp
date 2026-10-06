@@ -89,7 +89,8 @@ jobs:
         run: ./scripts/verify-nix-deps.sh
 
       # The NixOS module VM test boots guests on top of the package build, so a PR
-      # only runs it when it touches the module, the flake or this workflow. Pushes
+      # only runs it when it touches the module, the flake, this workflow or the
+      # config loading the module relies on (src/config.zig, src/main.zig). Pushes
       # to main always run it. If the diff cannot be computed, it runs.
       - name: Decide whether to run the NixOS module test
         id: module-test
@@ -100,7 +101,7 @@ jobs:
             echo "run=true" >> "$GITHUB_OUTPUT"
           elif ! changed="$(git diff --name-only HEAD^1 HEAD)"; then
             echo "run=true" >> "$GITHUB_OUTPUT"
-          elif printf '%s\n' "$changed" | grep -qE '^(nix/|flake\.(nix|lock)$|\.github/workflows/ci\.yml$)'; then
+          elif printf '%s\n' "$changed" | grep -qE '^(nix/|flake\.(nix|lock)$|\.github/workflows/ci\.yml$|src/(config|main)\.zig$)'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           fi
 

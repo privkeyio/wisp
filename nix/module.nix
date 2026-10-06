@@ -147,8 +147,15 @@ in
   config = lib.mkIf cfg.enable {
     assertions = [
       {
-        assertion = cfg.settingsFile == null || lib.hasPrefix "/" cfg.settingsFile;
-        message = "services.wisp.settingsFile must be an absolute path.";
+        assertion =
+          cfg.settingsFile == null
+          || (
+            lib.hasPrefix "/" cfg.settingsFile
+            && !lib.hasPrefix "${builtins.storeDir}/" cfg.settingsFile
+            && !lib.hasInfix "\n" cfg.settingsFile
+            && !lib.hasInfix "%" cfg.settingsFile
+          );
+        message = "services.wisp.settingsFile must be an absolute path outside the Nix store, without newlines or '%'.";
       }
     ];
 
