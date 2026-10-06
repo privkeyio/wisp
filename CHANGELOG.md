@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-10-06
+
+Rebuilds the release binaries and Docker image for the baseline CPU of each architecture. The v0.9.0 binaries could crash with an illegal instruction on CPUs unlike the build machine's; anyone running a release binary or the ghcr.io image should upgrade. The StartOS and Nix packages were not affected. No protocol or configuration changes.
+
 ### Changed
 
 - The Nix package fetches StringZilla by commit (`7ca3964`, the commit tag v4.5.1 points to) instead of by tag, so every dependency is pinned by commit. The content hash is unchanged.
@@ -326,7 +330,8 @@ rolling out.
 - Import/export to JSONL format
 - Configuration via TOML file or environment variables
 
-[Unreleased]: https://github.com/privkeyio/wisp/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/privkeyio/wisp/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/privkeyio/wisp/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/privkeyio/wisp/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/privkeyio/wisp/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/privkeyio/wisp/compare/v0.6.1...v0.7.0
