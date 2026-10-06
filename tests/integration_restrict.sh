@@ -12,6 +12,7 @@ set -u
 R="${1:?relay url required}"
 MODE="${2:?mode required (auth|protected|pow)}"
 SEC1=0000000000000000000000000000000000000000000000000000000000000001
+SEC2=0000000000000000000000000000000000000000000000000000000000000002
 pass=0
 fail=0
 
@@ -74,6 +75,22 @@ case "$MODE" in
     chk "NIP-70 normal event without auth is accepted" ok "$(pubres --sec $SEC1 -c normal70)"
     chk "NIP-70 protected event without auth is rejected" reject "$(pubres --sec $SEC1 -t '-' -c prot70)"
     chk "NIP-70 protected event with auth is accepted" ok "$(pubres --sec $SEC1 --auth -t '-' -c prot70auth)"
+    chk "NIP-78 app data without auth is rejected" reject "$(pubres --sec $SEC1 -k 30078 -d wisp-test -c appdata)"
+    chk "NIP-78 app data with auth is accepted" ok "$(pubres --sec $SEC1 --auth -k 30078 -d wisp-test -c appdata)"
+    chk "NIP-78 app data is not served without auth" 0 \
+      "$(timeout 10 noz req -k 30078 "$R" 2>/dev/null | grep -c '"kind"')"
+    chk "NIP-78 app data is hidden from a kindless REQ" 0 \
+      "$(timeout 10 noz req -a "$(noz key public $SEC1)" "$R" 2>/dev/null | grep -c '"kind":30078')"
+    chk "NIP-78 COUNT without auth is refused" 1 \
+      "$(timeout 10 noz send "$R" '["COUNT","c",{"kinds":[30078]}]' 2>/dev/null | grep -c '^\["CLOSED","c","auth-required:')"
+    chk "NIP-78 app data is not counted in a kindless COUNT" '"count":3' \
+      "$(timeout 10 noz send "$R" "[\"COUNT\",\"c\",{\"authors\":[\"$(noz key public $SEC1)\"]}]" 2>/dev/null | grep -oE '"count":[0-9]+')"
+    chk "NIP-78 app data is counted for its author" '"count":1' \
+      "$(timeout 10 noz send "$R" '["COUNT","c",{"kinds":[30078]}]' --sec $SEC1 --auth 2>/dev/null | grep -oE '"count":[0-9]+')"
+    chk "NIP-78 app data is served to its authenticated author" 1 \
+      "$(timeout 10 noz send "$R" '["REQ","a",{"kinds":[30078]}]' --sec $SEC1 --auth 2>/dev/null | grep -c '^\["EVENT"')"
+    chk "NIP-78 app data is hidden from another authenticated user" 0 \
+      "$(timeout 10 noz send "$R" '["REQ","a",{"kinds":[30078]}]' --sec $SEC2 --auth 2>/dev/null | grep -c '^\["EVENT"')"
     ;;
   pow)
     chk "NIP-13 event below difficulty is rejected" reject "$(pubres --sec $SEC1 -c lowpow)"

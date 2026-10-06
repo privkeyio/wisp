@@ -1,5 +1,6 @@
 const std = @import("std");
 const nostr = @import("nostr.zig");
+const isPrivateKind = @import("connection.zig").isPrivateKind;
 const Store = @import("store.zig").Store;
 const Broadcaster = @import("broadcaster.zig").Broadcaster;
 const Config = @import("config.zig").Config;
@@ -207,7 +208,6 @@ pub const Spider = struct {
             client.readTimeout(1000) catch {};
 
             var events_received: u64 = 0;
-            var got_kind3 = false;
             const bootstrap_start = milliTimestamp();
             while (self.shouldRun() and milliTimestamp() - bootstrap_start < 10_000) {
                 const message = client.read() catch {
@@ -218,9 +218,6 @@ pub const Spider = struct {
                     if (msg.data.len > 0) {
                         if (std.mem.startsWith(u8, msg.data, "[\"EVENT\"")) {
                             self.handleRelayMessage(msg.data, relay_url, &events_received);
-                            if (std.mem.indexOf(u8, msg.data, "\"kind\":3")) |_| {
-                                got_kind3 = true;
-                            }
                         }
                         if (std.mem.startsWith(u8, msg.data, "[\"EOSE\"")) {
                             break;
@@ -231,10 +228,22 @@ pub const Spider = struct {
 
             if (events_received > 0) {
                 log.info("Bootstrapped {d} admin events from {s}", .{ events_received, relay_url });
-                if (got_kind3) return;
+                if (self.ownerKind3Stored()) return;
             }
         }
         log.warn("Failed to bootstrap kind 3 from any relay", .{});
+    }
+
+    // Whether the admin's contact list is now in the store, rather than trusting
+    // what an upstream relay's messages look like.
+    fn ownerKind3Stored(self: *Spider) bool {
+        var owner_pubkey: [32]u8 = undefined;
+        _ = std.fmt.hexToBytes(&owner_pubkey, self.config.spider_admin) catch return false;
+        var authors_array = [1][32]u8{owner_pubkey};
+        const filters = [_]nostr.Filter{.{ .kinds_slice = &[_]i32{3}, .authors_bytes = &authors_array, .limit_val = 1 }};
+        var iter = self.store.queryFull(&filters, 1) catch return false;
+        defer iter.deinit();
+        return (iter.next() catch null) != null;
     }
 
     fn loadKind3FollowList(self: *Spider) bool {
@@ -575,6 +584,9 @@ pub const Spider = struct {
             if (local_count % 1000 == 0 and !self.shouldRun()) return false;
             var event = nostr.Event.parse(json) catch continue;
             defer event.deinit();
+            // NIP-78 app data is private to its author: its ids must not reach
+            // the upstream relay through reconciliation.
+            if (isPrivateKind(event.kind())) continue;
             local_storage.insert(@intCast(event.createdAt()), event.id()) catch continue;
             local_count += 1;
         }

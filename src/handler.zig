@@ -1,6 +1,7 @@
 const std = @import("std");
 const Config = @import("config.zig").Config;
 const Store = @import("store.zig").Store;
+const Visibility = @import("store.zig").Visibility;
 const Subscriptions = @import("subscriptions.zig").Subscriptions;
 const Broadcaster = @import("broadcaster.zig").Broadcaster;
 const connection = @import("connection.zig");
@@ -49,7 +50,7 @@ fn monotonicSeconds() i64 {
 
 /// How a result stream ended. The caller must not send EOSE unless it ran to
 /// completion, since EOSE tells the client it has the whole set.
-const StreamOutcome = enum { complete, write_failed, timed_out, incomplete };
+const StreamOutcome = enum { complete, write_failed, timed_out, incomplete, query_failed };
 
 /// Result of enumerating the serving side of a negentropy session. Kept separate
 /// from the replies so the read transaction can be closed before any of them are
@@ -59,11 +60,15 @@ const NegEnumeration = enum { ok, query_failed, too_many, truncated };
 // `conn` is generic so the budget path can be exercised without a live
 // socket: a real *Connection returns error.NotConnected when it has no
 // websocket, which would mask every outcome as .write_failed.
-fn streamQueryResults(conn: anytype, sub_id: []const u8, iter: anytype, budget_seconds: i64) StreamOutcome {
-    // Monotonic, not wall clock: an NTP step backwards would otherwise extend the
-    // budget by the size of the step, and a step forwards would trip it instantly
-    // and cut every in-flight REQ short.
-    const started = monotonicSeconds();
+/// Ids already sent for one REQ, so an event matching several of its filters is
+/// delivered once.
+const SeenIds = std.AutoHashMapUnmanaged([32]u8, void);
+
+// `started` is a monotonicSeconds() reading taken once per REQ, so the budget
+// covers every filter's stream together. Monotonic, not wall clock: an NTP step
+// backwards would otherwise extend the budget by the size of the step, and a
+// step forwards would trip it instantly and cut every in-flight REQ short.
+fn streamQueryResults(conn: anytype, sub_id: []const u8, iter: anytype, started: i64, budget_seconds: i64, seen: ?*SeenIds, allocator: std.mem.Allocator, sent: *u32) StreamOutcome {
     while (true) {
         // An iterator error must not be swallowed as "no more events". Doing so
         // ends the stream early and reports .complete, so the client is sent
@@ -71,6 +76,10 @@ fn streamQueryResults(conn: anytype, sub_id: []const u8, iter: anytype, budget_s
         // below, arriving by a different route.
         const next = iter.next() catch return .incomplete;
         const json = next orelse break;
+        if (seen) |ids| {
+            const entry = ids.getOrPut(allocator, iter.lastId().*) catch return .incomplete;
+            if (entry.found_existing) continue;
+        }
         var buf: [65536]u8 = undefined;
         // An event that will not fit the frame buffer cannot be delivered.
         // Skipping it silently and then reporting .complete would tell the client
@@ -81,9 +90,28 @@ fn streamQueryResults(conn: anytype, sub_id: []const u8, iter: anytype, budget_s
         // stream so the LMDB read txn is released promptly.
         conn.write(event_msg) catch return .write_failed;
         _ = conn.events_sent.fetchAdd(1, .monotonic);
+        sent.* += 1;
         if (monotonicSeconds() - started >= budget_seconds) return .timed_out;
     }
     return .complete;
+}
+
+/// The reader for store iterators: hides NIP-78 events from anyone but their
+/// authenticated author.
+fn readerVisibility(conn: *Connection) Visibility {
+    return .{ .ctx = conn, .allowsFn = struct {
+        fn allows(ctx: *anyopaque, kind: i32, author: *const [32]u8) bool {
+            const c: *Connection = @ptrCast(@alignCast(ctx));
+            return c.mayAccessPrivate(kind, author);
+        }
+    }.allows };
+}
+
+fn requestsPrivateKinds(filters: []const nostr.Filter) bool {
+    for (filters) |f| {
+        for (f.kinds() orelse continue) |k| if (connection.isPrivateKind(k)) return true;
+    }
+    return false;
 }
 
 fn countLeadingZeroBits(id: *const [32]u8) u8 {
@@ -100,12 +128,10 @@ fn countLeadingZeroBits(id: *const [32]u8) u8 {
 }
 
 fn getCommittedDifficulty(raw_json: []const u8) ?u8 {
-    const tags_start = std.mem.indexOf(u8, raw_json, "\"tags\"") orelse return null;
-    var pos = tags_start + 6;
-
-    while (pos < raw_json.len and raw_json[pos] != '[') : (pos += 1) {}
-    if (pos >= raw_json.len) return null;
-    pos += 1;
+    // The same top-level tags member the event id hashes, never a decoy.
+    const tags_start = nostr.utils.findJsonFieldStart(raw_json, "tags") orelse return null;
+    if (raw_json[tags_start] != '[') return null;
+    var pos = tags_start + 1;
 
     var depth: i32 = 0;
     var in_string = false;
@@ -302,14 +328,18 @@ pub const Handler = struct {
             return;
         }
 
-        if (self.mgmt_store.hasAllowedPubkeys()) {
+        // A NIP-86 `allowevent` approves that one event past the pubkey and kind
+        // allowlists; a pubkey ban still applies.
+        const approved = self.mgmt_store.isEventAllowed(id);
+
+        if (!approved and self.mgmt_store.hasAllowedPubkeys()) {
             if (!self.mgmt_store.isPubkeyAllowed(event.pubkey())) {
                 self.sendOk(conn, id, false, "blocked: pubkey not in allowlist");
                 return;
             }
         }
 
-        if (!self.mgmt_store.isKindAllowed(event.kind())) {
+        if (!approved and !self.mgmt_store.isKindAllowed(event.kind())) {
             self.sendOk(conn, id, false, "blocked: event kind not allowed");
             return;
         }
@@ -374,6 +404,12 @@ pub const Handler = struct {
 
         if (event.kind() == 22242) {
             self.sendOk(conn, id, false, "invalid: AUTH events cannot be published");
+            return;
+        }
+
+        if (!conn.mayAccessPrivate(event.kind(), event.pubkey())) {
+            self.sendAuthChallenge(conn);
+            self.sendOk(conn, id, false, "auth-required: app data may only be published by its authenticated author");
             return;
         }
 
@@ -534,6 +570,13 @@ pub const Handler = struct {
             return;
         }
 
+        if (!conn.isAuthenticated() and requestsPrivateKinds(filters)) {
+            self.sendAuthChallenge(conn);
+            self.sendClosed(conn, sub_id, "auth-required: app data is only served to its authenticated author");
+            conn.allocator().free(filters);
+            return;
+        }
+
         self.subs.subscribe(conn, sub_id, filters, self.config.max_subscriptions) catch |err| {
             const error_msg = switch (err) {
                 error.TooManySubscriptions => "error: too many subscriptions",
@@ -544,42 +587,27 @@ pub const Handler = struct {
             return;
         };
 
-        var limit = self.config.query_limit_default;
-        if (filters.len > 0 and filters[0].limit() > 0) {
-            limit = @min(@as(u32, @intCast(filters[0].limit())), self.config.query_limit_max);
-        }
-
-        const outcome: StreamOutcome = if (filters.len == 1 and isKindOnlyQuery(&filters[0])) blk: {
-            const kinds = filters[0].kinds().?;
-            if (kinds.len == 1) {
-                if (self.shutdown.load(.acquire)) return;
-                var iter = self.store.query(filters, limit) catch {
-                    self.sendClosed(conn, sub_id, "error: query failed");
-                    return;
-                };
-                defer iter.deinit();
-
-                break :blk streamQueryResults(conn, sub_id, &iter, stream_budget_seconds);
-            } else {
-                if (self.shutdown.load(.acquire)) return;
-                var mk_iter = self.store.queryMultiKind(kinds, limit) catch {
-                    self.sendClosed(conn, sub_id, "error: query failed");
-                    return;
-                };
-                defer mk_iter.deinit();
-
-                break :blk streamQueryResults(conn, sub_id, &mk_iter, stream_budget_seconds);
-            }
-        } else blk: {
+        // Not the connection arena: it cannot reclaim the tables a growing map
+        // leaves behind, so they would pile up for the life of the connection.
+        var seen: SeenIds = .empty;
+        defer seen.deinit(conn.backing_allocator);
+        const started = monotonicSeconds();
+        var outcome: StreamOutcome = .complete;
+        // NIP-01 applies `limit` per filter and a filter with `limit: 0` returns no
+        // stored events, so each filter is queried on its own and the union is
+        // deduplicated by id.
+        // query_limit_max also bounds the REQ as a whole, so many filters cannot
+        // multiply what one message makes the relay send.
+        var sent: u32 = 0;
+        for (filters, 0..) |*f, i| {
+            const requested = f.limit() orelse self.config.query_limit_default;
+            if (requested == 0) continue;
+            const limit = @min(requested, self.config.query_limit_max - sent);
+            if (limit == 0) break;
             if (self.shutdown.load(.acquire)) return;
-            var iter = self.store.query(filters, limit) catch {
-                self.sendClosed(conn, sub_id, "error: query failed");
-                return;
-            };
-            defer iter.deinit();
-
-            break :blk streamQueryResults(conn, sub_id, &iter, stream_budget_seconds);
-        };
+            outcome = self.streamFilter(conn, sub_id, filters[i .. i + 1], limit, started, if (filters.len > 1) &seen else null, &sent);
+            if (outcome != .complete) break;
+        }
 
         switch (outcome) {
             // EOSE means "you now have the whole set", so it is only correct
@@ -602,7 +630,23 @@ pub const Handler = struct {
                 self.subs.unsubscribe(conn, sub_id);
                 self.sendClosed(conn, sub_id, "error: an event was too large to deliver");
             },
+            .query_failed => {
+                self.subs.unsubscribe(conn, sub_id);
+                self.sendClosed(conn, sub_id, "error: query failed");
+            },
         }
+    }
+
+    fn streamFilter(self: *Handler, conn: *Connection, sub_id: []const u8, filter: []const nostr.Filter, limit: u32, started: i64, seen: ?*SeenIds, sent: *u32) StreamOutcome {
+        if (isKindOnlyQuery(&filter[0]) and filter[0].kinds().?.len > 1) {
+            var mk_iter = self.store.queryMultiKind(&filter[0], limit, readerVisibility(conn)) catch return .query_failed;
+            defer mk_iter.deinit();
+            return streamQueryResults(conn, sub_id, &mk_iter, started, stream_budget_seconds, seen, conn.backing_allocator, sent);
+        }
+        var iter = self.store.query(filter, limit) catch return .query_failed;
+        defer iter.deinit();
+        iter.visibility = readerVisibility(conn);
+        return streamQueryResults(conn, sub_id, &iter, started, stream_budget_seconds, seen, conn.backing_allocator, sent);
     }
 
     fn handleClose(self: *Handler, conn: *Connection, msg: *nostr.ClientMsg) void {
@@ -656,8 +700,17 @@ pub const Handler = struct {
             return;
         }
 
+        if (!conn.isAuthenticated() and requestsPrivateKinds(filters)) {
+            self.sendAuthChallenge(conn);
+            self.sendClosed(conn, sub_id, "auth-required: app data is only counted for its authenticated author");
+            return;
+        }
+
         var total_count: u64 = 0;
         var read_failed = false;
+        // An event matching several filters is counted once.
+        var seen: SeenIds = .empty;
+        defer seen.deinit(conn.backing_allocator);
         for (filters) |filter| {
             // Uses the capped query() intentionally: for a selective filter this
             // count is approximate (bounded by the scan cap) rather than exact,
@@ -667,6 +720,7 @@ pub const Handler = struct {
                 return;
             };
             defer iter.deinit();
+            iter.visibility = readerVisibility(conn);
 
             while (true) {
                 // A read error would otherwise silently lower the reported count.
@@ -679,6 +733,13 @@ pub const Handler = struct {
                     break;
                 };
                 if (next == null) break;
+                if (filters.len > 1) {
+                    const entry = seen.getOrPut(conn.backing_allocator, iter.lastId().*) catch {
+                        read_failed = true;
+                        break;
+                    };
+                    if (entry.found_existing) continue;
+                }
                 total_count += 1;
             }
             if (read_failed) break;
@@ -823,6 +884,7 @@ pub const Handler = struct {
             var iter = self.store.query(&[_]nostr.Filter{filter}, enumeration_limit) catch
                 break :blk .query_failed;
             defer iter.deinit();
+            iter.visibility = readerVisibility(conn);
 
             var count: u32 = 0;
             while (true) {
@@ -1116,6 +1178,8 @@ test "scanner stress" {
 // Stands in for a Connection so the stream outcomes can be driven directly. A
 // real Connection has no websocket in a unit test and fails every write, which
 // would collapse all three outcomes into .write_failed.
+var test_sent: u32 = 0;
+
 const StubConn = struct {
     events_sent: std.atomic.Value(u64) = .init(0),
     written: usize = 0,
@@ -1144,12 +1208,17 @@ const StubIter = struct {
         self.yielded += 1;
         return "{\"id\":\"x\"}";
     }
+
+    fn lastId(self: *const StubIter) *const [32]u8 {
+        const ids = [_][32]u8{ @splat(1), @splat(2) };
+        return &ids[self.yielded % 2];
+    }
 };
 
 test "streamQueryResults: a fully delivered set reports complete" {
     var conn = StubConn{};
     var iter = StubIter{ .remaining = 3 };
-    try testing.expectEqual(StreamOutcome.complete, streamQueryResults(&conn, "s", &iter, 3600));
+    try testing.expectEqual(StreamOutcome.complete, streamQueryResults(&conn, "s", &iter, monotonicSeconds(), 3600, null, testing.allocator, &test_sent));
     try testing.expectEqual(@as(usize, 3), conn.written);
     try testing.expectEqual(@as(u64, 3), conn.events_sent.load(.monotonic));
 }
@@ -1158,7 +1227,7 @@ test "streamQueryResults: an empty result set is still complete" {
     // Nothing is written, but the client is entitled to its EOSE.
     var conn = StubConn{};
     var iter = StubIter{ .remaining = 0 };
-    try testing.expectEqual(StreamOutcome.complete, streamQueryResults(&conn, "s", &iter, 3600));
+    try testing.expectEqual(StreamOutcome.complete, streamQueryResults(&conn, "s", &iter, monotonicSeconds(), 3600, null, testing.allocator, &test_sent));
     try testing.expectEqual(@as(usize, 0), conn.written);
 }
 
@@ -1167,7 +1236,7 @@ test "streamQueryResults: a dead peer stops the stream without draining it" {
     // after walking the rest of the match set.
     var conn = StubConn{ .fail_after = 2 };
     var iter = StubIter{ .remaining = 100 };
-    try testing.expectEqual(StreamOutcome.write_failed, streamQueryResults(&conn, "s", &iter, 3600));
+    try testing.expectEqual(StreamOutcome.write_failed, streamQueryResults(&conn, "s", &iter, monotonicSeconds(), 3600, null, testing.allocator, &test_sent));
     try testing.expectEqual(@as(usize, 2), conn.written);
     try testing.expect(iter.remaining > 90);
 }
@@ -1178,7 +1247,7 @@ test "streamQueryResults: a failing iterator is not reported as a finished set" 
     // result set.
     var conn = StubConn{};
     var iter = StubIter{ .remaining = 100, .fail_after = 3 };
-    const outcome = streamQueryResults(&conn, "s", &iter, 3600);
+    const outcome = streamQueryResults(&conn, "s", &iter, monotonicSeconds(), 3600, null, testing.allocator, &test_sent);
     try testing.expectEqual(StreamOutcome.incomplete, outcome);
     try testing.expect(outcome != .complete);
     try testing.expectEqual(@as(usize, 3), conn.written);
@@ -1189,10 +1258,20 @@ test "streamQueryResults: a client slower than the budget is cut off, not silent
     // EOSE, so the client is never told an incomplete set is the whole set.
     var conn = StubConn{};
     var iter = StubIter{ .remaining = 100 };
-    const outcome = streamQueryResults(&conn, "s", &iter, 0);
+    const outcome = streamQueryResults(&conn, "s", &iter, monotonicSeconds(), 0, null, testing.allocator, &test_sent);
     try testing.expectEqual(StreamOutcome.timed_out, outcome);
     try testing.expect(outcome != .complete);
     // It stops promptly rather than walking the whole set first.
     try testing.expectEqual(@as(usize, 1), conn.written);
     try testing.expect(iter.remaining > 90);
+}
+
+test "streamQueryResults: an id already sent for another filter is skipped" {
+    var conn = StubConn{};
+    var iter = StubIter{ .remaining = 6 };
+    var seen: SeenIds = .empty;
+    defer seen.deinit(testing.allocator);
+    try testing.expectEqual(StreamOutcome.complete, streamQueryResults(&conn, "s", &iter, monotonicSeconds(), 3600, &seen, testing.allocator, &test_sent));
+    // The stub alternates between two ids, so only two distinct events go out.
+    try testing.expectEqual(@as(usize, 2), conn.written);
 }
