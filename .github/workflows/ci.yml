@@ -401,6 +401,31 @@ jobs:
           stop "$src"; stop "$spd"; wait 2>/dev/null
           exit $rc
 
+      - name: Run spider shutdown test (SIGTERM during bootstrap)
+        # starts its own stand-in upstream and spider relay, so it takes the binary
+        run: bash tests/integration_spider_shutdown.sh ./zig-out/bin/wisp
+
+      - name: Run NIP-77 scan-cap truncation test
+        run: |
+          stop() {
+            kill "$1" 2>/dev/null || return 0
+            for i in $(seq 1 20); do kill -0 "$1" 2>/dev/null || return 0; sleep 0.25; done
+            kill -9 "$1" 2>/dev/null || true
+          }
+          # enumeration asks for 3 events and may scan only 3 index entries,
+          # matching the fixture in the test
+          nohup env WISP_HOST=127.0.0.1 WISP_PORT=7789 WISP_NEGENTROPY_MAX_SYNC_EVENTS=2 \
+            WISP_QUERY_SCAN_MULTIPLIER=1 \
+            WISP_STORAGE_PATH="$RUNNER_TEMP/wisp-negtrunc" \
+            ./zig-out/bin/wisp relay > relay-negtrunc.log 2>&1 &
+          pid=$!
+          for i in $(seq 1 40); do nc -z 127.0.0.1 7789 && break; sleep 0.25; done
+          nc -z 127.0.0.1 7789 || { echo "relay never listened on 7789"; cat relay-negtrunc.log 2>/dev/null; stop "$pid"; wait "$pid" 2>/dev/null; exit 1; }
+          bash tests/integration_negentropy_truncation.sh ws://127.0.0.1:7789
+          rc=$?
+          stop "$pid"; wait "$pid" 2>/dev/null
+          exit $rc
+
       - name: Run crash-consistency test
         run: |
           sec=0000000000000000000000000000000000000000000000000000000000000001
