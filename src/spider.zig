@@ -2,6 +2,8 @@ const std = @import("std");
 const nostr = @import("nostr.zig");
 const isPrivateKind = @import("connection.zig").isPrivateKind;
 const Store = @import("store.zig").Store;
+const ManagementStore = @import("management_store.zig").ManagementStore;
+const handler = @import("handler.zig");
 const Broadcaster = @import("broadcaster.zig").Broadcaster;
 const Config = @import("config.zig").Config;
 const websocket = @import("websocket");
@@ -35,6 +37,7 @@ pub const Spider = struct {
     allocator: std.mem.Allocator,
     config: *const Config,
     store: *Store,
+    mgmt_store: *ManagementStore,
     broadcaster: *Broadcaster,
     running: std.atomic.Value(bool),
     global_shutdown: *std.atomic.Value(bool),
@@ -48,6 +51,7 @@ pub const Spider = struct {
         allocator: std.mem.Allocator,
         config: *const Config,
         store: *Store,
+        mgmt_store: *ManagementStore,
         broadcaster: *Broadcaster,
         global_shutdown: *std.atomic.Value(bool),
     ) !Spider {
@@ -55,6 +59,7 @@ pub const Spider = struct {
             .allocator = allocator,
             .config = config,
             .store = store,
+            .mgmt_store = mgmt_store,
             .broadcaster = broadcaster,
             .running = std.atomic.Value(bool).init(false),
             .global_shutdown = global_shutdown,
@@ -573,22 +578,28 @@ pub const Spider = struct {
             .{ .authors_bytes = pubkeys },
         };
 
-        var iter = self.store.queryFull(&filters, 100000) catch {
-            log.err("{s}: Failed to query local events for negentropy", .{relay_url});
-            return true;
-        };
-        defer iter.deinit();
-
+        // Enumerate in its own block so the read transaction closes before the
+        // exchange: events fetched below are stored on this thread, and their
+        // policy check needs a read transaction LMDB will not open while this
+        // thread still holds one.
         var local_count: usize = 0;
-        while (iter.next() catch null) |json| {
-            if (local_count % 1000 == 0 and !self.shouldRun()) return false;
-            var event = nostr.Event.parse(json) catch continue;
-            defer event.deinit();
-            // NIP-78 app data is private to its author: its ids must not reach
-            // the upstream relay through reconciliation.
-            if (isPrivateKind(event.kind())) continue;
-            local_storage.insert(@intCast(event.createdAt()), event.id()) catch continue;
-            local_count += 1;
+        {
+            var iter = self.store.queryFull(&filters, 100000) catch {
+                log.err("{s}: Failed to query local events for negentropy", .{relay_url});
+                return true;
+            };
+            defer iter.deinit();
+
+            while (iter.next() catch null) |json| {
+                if (local_count % 1000 == 0 and !self.shouldRun()) return false;
+                var event = nostr.Event.parse(json) catch continue;
+                defer event.deinit();
+                // NIP-78 app data is private to its author: its ids must not reach
+                // the upstream relay through reconciliation.
+                if (isPrivateKind(event.kind())) continue;
+                local_storage.insert(@intCast(event.createdAt()), event.id()) catch continue;
+                local_count += 1;
+            }
         }
         local_storage.seal();
 
@@ -989,6 +1000,13 @@ pub const Spider = struct {
         defer event.deinit();
 
         event.validate() catch return;
+        // Synced events meet the same limits and NIP-86 policy as published ones.
+        // Protected (NIP-70) events may only be published by their author, so
+        // they are never copied from another relay.
+        if (handler.limitRejection(self.config, &event) != null) return;
+        if (handler.powRejection(self.config, &event) != null) return;
+        if (nostr.isProtected(&event) or nostr.isExpired(&event)) return;
+        if (self.mgmt_store.rejection(&event) != null) return;
 
         const result = self.store.store(&event, event_json) catch return;
 
@@ -1220,4 +1238,55 @@ test isStale {
     try testing.expect(isStale(1000, 1000 + STALE_TIMEOUT_MS + 1));
     // A backward clock step must never report stale.
     try testing.expect(!isStale(5000, 1000));
+}
+
+test "synced events go through the NIP-86 policy and are stored only when admitted" {
+    const testing = std.testing;
+    const Lmdb = @import("lmdb.zig").Lmdb;
+    const Subscriptions = @import("subscriptions.zig").Subscriptions;
+    const io = nostr.io.io();
+    const cwd = std.Io.Dir.cwd();
+    const db_path = "./test_spider_policy_db";
+    defer {
+        cwd.deleteFile(io, db_path) catch {};
+        cwd.deleteFile(io, db_path ++ "-lock") catch {};
+    }
+
+    try nostr.init();
+    defer nostr.cleanup();
+
+    var lmdb = try Lmdb.init(testing.allocator, db_path, 10, .none);
+    defer lmdb.deinit();
+    var store = try Store.init(testing.allocator, &lmdb);
+    defer store.deinit();
+    var mgmt = try ManagementStore.init(testing.allocator, &lmdb);
+    // Broadcast keeps threadlocal scratch for the process lifetime, so it gets an
+    // allocator that is not leak-checked, as in the subscriptions tests.
+    var subs = Subscriptions.init(std.heap.page_allocator);
+    defer subs.deinit();
+    var broadcaster = Broadcaster.init(testing.allocator, &subs);
+    var shutdown = std.atomic.Value(bool).init(false);
+    var config = Config.defaults();
+    config.spider_relays = "";
+    var spider = try Spider.init(testing.allocator, &config, &store, &mgmt, &broadcaster, &shutdown);
+    defer spider.deinit();
+
+    const msg =
+        \\["EVENT","s",{"kind":7,"id":"de76f6953560d6a287e6dfa49ad48642ba33312b8611fcbd0e1aa6f13b9981b6","pubkey":"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798","created_at":1700000000,"tags":[],"content":"+","sig":"ccc0a6ca9ddc6c5c173741d280ae1c9927021987b489c6da9c939ed396929c0d895e86aac6d475f3cd617a2dd2e98a1662e725d85c00251000318ec8039d88d5"}]
+    ;
+    var id: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&id, "de76f6953560d6a287e6dfa49ad48642ba33312b8611fcbd0e1aa6f13b9981b6");
+    var author: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&author, "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
+
+    var received: u64 = 0;
+    try mgmt.banPubkey(&author, "");
+    spider.handleRelayMessage(msg, "wss://upstream", &received);
+    try testing.expectEqual(@as(u64, 0), received);
+    try testing.expect((try store.get(&id)) == null);
+
+    try mgmt.unbanPubkey(&author);
+    spider.handleRelayMessage(msg, "wss://upstream", &received);
+    try testing.expectEqual(@as(u64, 1), received);
+    try testing.expect((try store.get(&id)) != null);
 }

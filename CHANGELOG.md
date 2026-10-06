@@ -30,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A REQ for several kinds ignored `since`, `until` and expiration, and always scanned from the newest event, so paging back with `until` past the scan window returned an empty set.
 - COUNT counted an event once per filter it matched.
 - A REQ whose query failed was reported closed but left registered, so it kept receiving live events.
+- The spider stored events from upstream relays without the NIP-86 policy or limits published events go through, so a banned pubkey, a pubkey outside the allowlist, a disallowed kind, a banned event, an oversized or far-future event, or one below the required proof of work could still arrive by sync, and NIP-70 protected events were republished. Synced events now pass the same NIP-86 check and limits, and protected or expired ones are not copied. The NIP-86 check reads one snapshot and refuses the event if the policy cannot be read; it used to treat an unreadable policy as permissive, which is what happened on every event the spider fetched by negentropy, since that ran while the thread held a read transaction.
 - The spider ended kind 3 bootstrap from a relay as soon as any message from it contained the text `"kind":3` (including `"kind":30023`), so a non-matching event could stop it before the contact list arrived. It now checks that the admin's contact list was actually stored.
 
 ## [0.6.1] - 2026-08-12

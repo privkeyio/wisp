@@ -81,6 +81,39 @@ pub const ManagementStore = struct {
         return txn.get(dbi, key) catch null != null;
     }
 
+    /// Why the relay's NIP-86 policy refuses `event`, or null if it admits it.
+    /// A NIP-86 `allowevent` approves that one event past the pubkey and kind
+    /// allowlists; a pubkey ban still applies. Reads one snapshot, and refuses
+    /// the event if the policy cannot be read rather than admitting it.
+    pub fn rejection(self: *ManagementStore, event: *const nostr.Event) ?[]const u8 {
+        const unreadable = "error: relay policy unavailable";
+        var txn = self.lmdb.beginTxn(true) catch return unreadable;
+        defer txn.abort();
+        const kind = std.mem.asBytes(&event.kind());
+
+        if (has(&txn, self.banned_pubkeys, event.pubkey()) catch return unreadable) return "blocked: pubkey is banned";
+        const approved = has(&txn, self.allowed_events, event.id()) catch return unreadable;
+        if (!approved) {
+            const allowlist = hasAny(&txn, self.allowed_pubkeys) catch return unreadable;
+            if (allowlist and !(has(&txn, self.allowed_pubkeys, event.pubkey()) catch return unreadable)) return "blocked: pubkey not in allowlist";
+            if (has(&txn, self.disallowed_kinds, kind) catch return unreadable) return "blocked: event kind not allowed";
+            const kind_allowlist = hasAny(&txn, self.allowed_kinds) catch return unreadable;
+            if (kind_allowlist and !(has(&txn, self.allowed_kinds, kind) catch return unreadable)) return "blocked: event kind not allowed";
+        }
+        if (has(&txn, self.banned_events, event.id()) catch return unreadable) return "blocked: event is banned";
+        return null;
+    }
+
+    fn has(txn: *Txn, dbi: Dbi, key: []const u8) !bool {
+        return (try txn.get(dbi, key)) != null;
+    }
+
+    fn hasAny(txn: *Txn, dbi: Dbi) !bool {
+        var cursor = try txn.cursor(dbi);
+        defer cursor.close();
+        return (try cursor.get(.first)) != null;
+    }
+
     pub fn banPubkey(self: *ManagementStore, pubkey: *const [32]u8, reason: []const u8) !void {
         try self.putExclusive(self.banned_pubkeys, self.allowed_pubkeys, pubkey, reason);
     }

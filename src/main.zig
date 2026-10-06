@@ -212,7 +212,7 @@ pub fn main(init: std.process.Init) !void {
 
     var spider: ?Spider = null;
     if (config.spider_enabled) {
-        spider = Spider.init(allocator, &config, &store, &broadcaster, &g_shutdown) catch |err| {
+        spider = Spider.init(allocator, &config, &store, &mgmt_store, &broadcaster, &g_shutdown) catch |err| {
             std.log.err("Failed to initialize Spider: {}", .{err});
             return err;
         };
@@ -451,6 +451,9 @@ fn runExport(allocator: std.mem.Allocator, db_path: []const u8) !void {
 }
 
 test {
+    _ = @import("config.zig");
+    _ = @import("lmdb.zig");
+    _ = @import("spider.zig");
     _ = @import("connection.zig");
     _ = @import("handler.zig");
     _ = @import("nip86.zig");

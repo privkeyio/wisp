@@ -114,6 +114,27 @@ fn requestsPrivateKinds(filters: []const nostr.Filter) bool {
     return false;
 }
 
+/// Size and clock limits every stored event must meet, whether published or
+/// synced by the spider.
+pub fn limitRejection(config: *const Config, event: *const nostr.Event) ?[]const u8 {
+    if (event.createdAt() > nostr.io.timestamp() + config.max_future_seconds) return "invalid: event too far in future";
+    if (event.content().len > config.max_content_length) return "invalid: content too long";
+    if (event.tagCount() > config.max_event_tags) return "invalid: too many tags";
+    return null;
+}
+
+/// NIP-13 proof of work, when the relay requires it.
+pub fn powRejection(config: *const Config, event: *const nostr.Event) ?[]const u8 {
+    if (config.min_pow_difficulty == 0) return null;
+    const pow_difficulty = countLeadingZeroBits(event.id());
+    if (getCommittedDifficulty(event.raw_json)) |target| {
+        if (target < config.min_pow_difficulty) return "pow: committed target difficulty too low";
+        if (pow_difficulty < target) return "pow: actual difficulty below committed target";
+    }
+    if (pow_difficulty < config.min_pow_difficulty) return "pow: difficulty too low";
+    return null;
+}
+
 fn countLeadingZeroBits(id: *const [32]u8) u8 {
     var count: u8 = 0;
     for (id) |byte| {
@@ -323,29 +344,8 @@ pub const Handler = struct {
             }
         }
 
-        if (self.mgmt_store.isPubkeyBanned(event.pubkey())) {
-            self.sendOk(conn, id, false, "blocked: pubkey is banned");
-            return;
-        }
-
-        // A NIP-86 `allowevent` approves that one event past the pubkey and kind
-        // allowlists; a pubkey ban still applies.
-        const approved = self.mgmt_store.isEventAllowed(id);
-
-        if (!approved and self.mgmt_store.hasAllowedPubkeys()) {
-            if (!self.mgmt_store.isPubkeyAllowed(event.pubkey())) {
-                self.sendOk(conn, id, false, "blocked: pubkey not in allowlist");
-                return;
-            }
-        }
-
-        if (!approved and !self.mgmt_store.isKindAllowed(event.kind())) {
-            self.sendOk(conn, id, false, "blocked: event kind not allowed");
-            return;
-        }
-
-        if (self.mgmt_store.isEventBanned(id)) {
-            self.sendOk(conn, id, false, "blocked: event is banned");
+        if (self.mgmt_store.rejection(&event)) |reason| {
+            self.sendOk(conn, id, false, reason);
             return;
         }
 
@@ -355,26 +355,13 @@ pub const Handler = struct {
             return;
         }
 
-        const now = nostr.io.timestamp();
-        const created = event.createdAt();
-
-        if (created > now + self.config.max_future_seconds) {
-            self.sendOk(conn, id, false, "invalid: event too far in future");
+        if (limitRejection(self.config, &event)) |reason| {
+            self.sendOk(conn, id, false, reason);
             return;
         }
 
-        if (created < now - self.config.max_event_age) {
+        if (event.createdAt() < nostr.io.timestamp() - self.config.max_event_age) {
             self.sendOk(conn, id, false, "invalid: event too old");
-            return;
-        }
-
-        if (event.content().len > self.config.max_content_length) {
-            self.sendOk(conn, id, false, "invalid: content too long");
-            return;
-        }
-
-        if (event.tagCount() > self.config.max_event_tags) {
-            self.sendOk(conn, id, false, "invalid: too many tags");
             return;
         }
 
@@ -383,23 +370,9 @@ pub const Handler = struct {
             return;
         };
 
-        if (self.config.min_pow_difficulty > 0) {
-            const pow_difficulty = countLeadingZeroBits(id);
-            const committed = getCommittedDifficulty(event.raw_json);
-            if (committed) |target| {
-                if (target < self.config.min_pow_difficulty) {
-                    self.sendOk(conn, id, false, "pow: committed target difficulty too low");
-                    return;
-                }
-                if (pow_difficulty < target) {
-                    self.sendOk(conn, id, false, "pow: actual difficulty below committed target");
-                    return;
-                }
-            }
-            if (pow_difficulty < self.config.min_pow_difficulty) {
-                self.sendOk(conn, id, false, "pow: difficulty too low");
-                return;
-            }
+        if (powRejection(self.config, &event)) |reason| {
+            self.sendOk(conn, id, false, reason);
+            return;
         }
 
         if (event.kind() == 22242) {
