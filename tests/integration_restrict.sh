@@ -89,6 +89,23 @@ case "$MODE" in
       "$(timeout 10 noz send "$R" '["COUNT","c",{"kinds":[30078]}]' --sec $SEC1 --auth 2>/dev/null | grep -oE '"count":[0-9]+')"
     chk "NIP-78 NEG-OPEN without auth is refused" 1 \
       "$(timeout 10 noz send "$R" '["NEG-OPEN","n",{"kinds":[30078]},"6100"]' 2>/dev/null | grep -c '^\["NEG-ERR","n","auth-required:')"
+    # NIP-17/59 gift wraps: anyone may publish (one-time keys), only the
+    # authenticated p-tagged recipient may read or delete
+    PK2=$(noz key public $SEC2)
+    WRAPKEY=$(noz key generate | head -1 | awk '{print $NF}')
+    WRAP=$(timeout 12 noz event --sec "$WRAPKEY" -k 1059 -p "$PK2" -c sealed "$R" 2>/dev/null | grep -oE '"id":"[a-f0-9]{64}"' | head -1 | cut -d'"' -f4)
+    chk "NIP-59 gift wrap is accepted without auth" 64 "${#WRAP}"
+    chk "NIP-17 gift wraps are not served without auth" 1 \
+      "$(timeout 10 noz send "$R" '["REQ","g",{"kinds":[1059]}]' 2>/dev/null | grep -c '^\["CLOSED","g","auth-required:')"
+    chk "NIP-17 gift wrap is hidden from a kindless REQ" 0 \
+      "$(timeout 10 noz send "$R" "[\"REQ\",\"g\",{\"#p\":[\"$PK2\"]}]" 2>/dev/null | grep -c '"kind":1059')"
+    chk "NIP-17 gift wrap is hidden from another authenticated user" 0 \
+      "$(timeout 10 noz send "$R" '["REQ","g",{"kinds":[1059]}]' --sec $SEC1 --auth 2>/dev/null | grep -c '^\["EVENT"')"
+    chk "NIP-17 gift wrap is served to its authenticated recipient" 1 \
+      "$(timeout 10 noz send "$R" '["REQ","g",{"kinds":[1059]}]' --sec $SEC2 --auth 2>/dev/null | grep -c '^\["EVENT"')"
+    pubres --sec $SEC2 -k 5 -e "$WRAP" -c "" >/dev/null
+    chk "NIP-59 recipient can delete a gift wrap" 0 \
+      "$(timeout 10 noz send "$R" '["REQ","g",{"kinds":[1059]}]' --sec $SEC2 --auth 2>/dev/null | grep -c '^\["EVENT"')"
     chk "NIP-78 app data is served to its authenticated author" 1 \
       "$(timeout 10 noz send "$R" '["REQ","a",{"kinds":[30078]}]' --sec $SEC1 --auth 2>/dev/null | grep -c '^\["EVENT"')"
     chk "NIP-78 app data is hidden from another authenticated user" 0 \

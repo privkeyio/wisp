@@ -7,24 +7,37 @@ const nostr = @import("nostr.zig");
 const QueryCache = @import("query_cache.zig").QueryCache;
 const isPrivateKind = @import("connection.zig").isPrivateKind;
 
-/// Who is reading: decides whether a private (NIP-78) event may be returned.
-/// Checked inside the iterators so a hidden event never counts toward `limit`.
+/// Who is reading: decides whether a private event (NIP-78 app data, NIP-59
+/// gift wraps) may be returned. Checked inside the iterators so a hidden event
+/// never counts toward `limit`.
 pub const Visibility = struct {
     ctx: *anyopaque,
-    allowsFn: *const fn (ctx: *anyopaque, kind: i32, author: *const [32]u8) bool,
+    allowsFn: *const fn (ctx: *anyopaque, event: *const nostr.Event) bool,
 
-    fn allows(self: Visibility, kind: i32, author: *const [32]u8) bool {
-        return !isPrivateKind(kind) or self.allowsFn(self.ctx, kind, author);
+    fn allows(self: Visibility, event: *const nostr.Event) bool {
+        return !isPrivateKind(event.kind()) or self.allowsFn(self.ctx, event);
     }
 
-    // For stored JSON that has not been parsed. Fails closed.
+    // For stored JSON that has not been parsed: only private kinds are parsed.
+    // Fails closed.
     fn allowsJson(self: Visibility, json: []const u8) bool {
         const kind = storedInt(json, "kind") orelse return false;
         if (!isPrivateKind(kind)) return true;
-        const author = nostr.utils.hexFieldAt(json, storedFieldStart(json, "pubkey") orelse return false, 32) orelse return false;
-        return self.allowsFn(self.ctx, kind, &author);
+        var event = nostr.Event.parse(json) catch return false;
+        defer event.deinit();
+        return self.allowsFn(self.ctx, &event);
     }
 };
+
+fn isGiftWrapRecipient(event: *const nostr.Event, pubkey: *const [32]u8) bool {
+    if (event.kind() != 1059) return false;
+    const recipients = event.tags.get('p') orelse return false;
+    for (recipients) |tag| switch (tag) {
+        .binary => |pk| if (std.mem.eql(u8, &pk, pubkey)) return true,
+        .string => {},
+    };
+    return false;
+}
 
 fn skipWs(json: []const u8, start: usize) usize {
     var pos = start;
@@ -314,7 +327,8 @@ pub const Store = struct {
     }
 
     // Delete within a caller-provided write transaction (no abort, no commit). The
-    // requester must own the event. Returns false if the event is absent or not
+    // requester must own the event, or be a p-tagged recipient of a gift wrap
+    // (NIP-59: its signer is a one-time key, so only the recipient can ask). Returns false if the event is absent or not
     // owned, leaving the shared transaction untouched.
     pub fn deleteInTxn(self: *Store, txn: *Txn, event_id: *const [32]u8, requester_pubkey: *const [32]u8) !bool {
         const json = try txn.get(self.events, event_id) orelse return false;
@@ -322,7 +336,7 @@ pub const Store = struct {
         var event = try nostr.Event.parse(json);
         defer event.deinit();
 
-        if (!std.mem.eql(u8, event.pubkey(), requester_pubkey)) return false;
+        if (!std.mem.eql(u8, event.pubkey(), requester_pubkey) and !isGiftWrapRecipient(&event, requester_pubkey)) return false;
 
         try self.deleteEventInternal(txn, &event);
         const now = nostr.io.timestamp();
@@ -494,7 +508,7 @@ pub const Store = struct {
                     var event = nostr.Event.parse(json) catch continue;
                     defer event.deinit();
                     if (nostr.isExpired(&event) or !filter.matches(&event)) continue;
-                    if (visibility) |v| if (!v.allows(event.kind(), event.pubkey())) continue;
+                    if (visibility) |v| if (!v.allows(&event)) continue;
                     try results.append(self.allocator, .{
                         .id = event_id.*,
                         .timestamp = timestamp,
@@ -774,7 +788,7 @@ pub const QueryIterator = struct {
                 defer event.deinit();
 
                 if (nostr.isExpired(&event)) continue;
-                if (self.visibility) |v| if (!v.allows(event.kind(), event.pubkey())) continue;
+                if (self.visibility) |v| if (!v.allows(&event)) continue;
 
                 if (self.filters.len == 0 or nostr.filtersMatch(self.filters, &event)) {
                     try hits.append(self.store.allocator, .{ .json = json, .created_at = event.createdAt(), .id = id.* });
@@ -839,7 +853,7 @@ pub const QueryIterator = struct {
         defer event.deinit();
 
         if (nostr.isExpired(&event)) return null;
-        if (self.visibility) |v| if (!v.allows(event.kind(), event.pubkey())) return null;
+        if (self.visibility) |v| if (!v.allows(&event)) return null;
 
         if (self.filters.len == 0 or nostr.filtersMatch(self.filters, &event)) {
             self.returned += 1;
