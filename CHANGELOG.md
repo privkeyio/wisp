@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The Nix package fetches StringZilla by commit (`7ca3964`, the commit tag v4.5.1 points to) instead of by tag, so every dependency is pinned by commit. The content hash is unchanged.
+
 ## [0.9.0] - 2026-10-06
 
 Serves NIP-17 / NIP-59 gift wraps only to their authenticated recipients, limits what the spider stores from upstream relays, and lets the NixOS module keep config values out of the Nix store. Clients reading gift wraps must now authenticate with NIP-42.
