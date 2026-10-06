@@ -197,13 +197,17 @@ pub const Writer = struct {
             const ids = nostr.getDeletionIds(self.allocator, event) catch null;
             defer if (ids) |slice| self.allocator.free(slice);
             const slice = ids orelse return .{ .conn_id = job.conn_id, .event = event.*, .success = false, .message = "error: failed to parse deletion", .broadcast = false };
-            var only_received_wraps = slice.len > 0;
-            for (slice) |target| {
-                if (try self.store.deleteOutcomeInTxn(txn, &target, event.pubkey()) != .recipient) only_received_wraps = false;
+            const outcomes = try self.allocator.alloc(Store.DeleteOutcome, slice.len);
+            defer self.allocator.free(outcomes);
+            for (slice, outcomes) |target, *outcome| {
+                outcome.* = try self.store.deleteOutcomeInTxn(txn, &target, event.pubkey());
             }
             // A recipient deleting gift wraps sent to them: publishing that
             // deletion would tie their key to the wraps, so it is not kept.
-            if (only_received_wraps) return .{ .conn_id = job.conn_id, .event = event.*, .success = true, .message = "", .broadcast = false };
+            if (Store.onlyReceivedWraps(outcomes, event)) {
+                self.store.query_cache.invalidate();
+                return .{ .conn_id = job.conn_id, .event = event.*, .success = true, .message = "", .broadcast = false };
+            }
             _ = try self.store.storeInTxn(txn, event, job.json);
             return .{ .conn_id = job.conn_id, .event = event.*, .success = true, .message = "", .broadcast = true, .stored = true };
         }

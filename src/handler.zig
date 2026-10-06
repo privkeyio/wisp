@@ -478,15 +478,18 @@ pub const Handler = struct {
             return;
         }
 
-        var only_received_wraps = ids_to_delete.len > 0;
-        for (ids_to_delete) |target_id| {
-            const outcome = self.store.deleteOutcome(&target_id, pubkey) catch .none;
-            if (outcome != .recipient) only_received_wraps = false;
+        const outcomes = self.allocator.alloc(Store.DeleteOutcome, ids_to_delete.len) catch {
+            self.sendOk(conn, id, false, "error: out of memory");
+            return;
+        };
+        defer self.allocator.free(outcomes);
+        for (ids_to_delete, outcomes) |target_id, *outcome| {
+            outcome.* = self.store.deleteOutcome(&target_id, pubkey) catch .none;
         }
 
         // A recipient deleting gift wraps sent to them: publishing that deletion
         // would tie their key to the wraps, so it is applied but not kept.
-        if (only_received_wraps) {
+        if (Store.onlyReceivedWraps(outcomes, event)) {
             self.replyOk(conn, id, true, "");
             return;
         }

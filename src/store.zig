@@ -318,8 +318,23 @@ pub const Store = struct {
     }
 
     /// How a deletion request was applied. `recipient` means the requester was a
-    /// p-tagged recipient of a gift wrap rather than its (one-time key) author.
-    pub const DeleteOutcome = enum { none, own, recipient };
+    /// p-tagged recipient of a gift wrap rather than its (one-time key) author;
+    /// `already_deleted` means the target is gone because an earlier deletion
+    /// removed it, so who may delete it can no longer be told.
+    pub const DeleteOutcome = enum { none, own, recipient, already_deleted };
+
+    /// Whether a deletion event should be applied without being kept or
+    /// broadcast: every target was a gift wrap the signer received (or is
+    /// already gone), so keeping it would publicly tie the signer to the wraps.
+    /// Deletions with `a` tags are always kept.
+    pub fn onlyReceivedWraps(outcomes: []const DeleteOutcome, deletion: *const nostr.Event) bool {
+        if (deletion.tags.get('a') != null) return false;
+        for (outcomes) |o| switch (o) {
+            .own, .none => return false,
+            .recipient, .already_deleted => {},
+        };
+        return outcomes.len > 0;
+    }
 
     pub fn delete(self: *Store, event_id: *const [32]u8, requester_pubkey: *const [32]u8) !bool {
         return try self.deleteOutcome(event_id, requester_pubkey) != .none;
@@ -343,7 +358,8 @@ pub const Store = struct {
     // (NIP-59: its signer is a one-time key, so only the recipient can ask).
     // Leaves the shared transaction untouched when nothing is deleted.
     pub fn deleteOutcomeInTxn(self: *Store, txn: *Txn, event_id: *const [32]u8, requester_pubkey: *const [32]u8) !DeleteOutcome {
-        const json = try txn.get(self.events, event_id) orelse return .none;
+        const json = try txn.get(self.events, event_id) orelse
+            return if (try txn.get(self.deleted, event_id) != null) .already_deleted else .none;
 
         var event = try nostr.Event.parse(json);
         defer event.deinit();
@@ -1194,4 +1210,27 @@ test "deleteOutcome lets a gift wrap's recipient delete it and reports how" {
     try testing.expect((try s.get(&id)) != null);
     try testing.expectEqual(Store.DeleteOutcome.recipient, try s.deleteOutcome(&id, &recipient));
     try testing.expect((try s.get(&id)) == null);
+    // A replay finds the wrap gone; that must not read as "not yours".
+    try testing.expectEqual(Store.DeleteOutcome.already_deleted, try s.deleteOutcome(&id, &recipient));
+}
+
+test "onlyReceivedWraps keeps deletions that cover own, unknown or addressable targets" {
+    const plain = try nostr.Event.parse(
+        \\{"id":"00000000000000000000000000000000000000000000000000000000000000d1","pubkey":"00000000000000000000000000000000000000000000000000000000000000bb","sig":"00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000","kind":5,"created_at":1700000000,"content":"","tags":[]}
+    );
+    var plain_event = plain;
+    defer plain_event.deinit();
+    const with_a = try nostr.Event.parse(
+        \\{"id":"00000000000000000000000000000000000000000000000000000000000000d2","pubkey":"00000000000000000000000000000000000000000000000000000000000000bb","sig":"00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000","kind":5,"created_at":1700000000,"content":"","tags":[["a","30023:00000000000000000000000000000000000000000000000000000000000000bb:x"]]}
+    );
+    var a_event = with_a;
+    defer a_event.deinit();
+
+    const O = Store.DeleteOutcome;
+    try testing.expect(Store.onlyReceivedWraps(&.{ O.recipient, O.already_deleted }, &plain_event));
+    try testing.expect(Store.onlyReceivedWraps(&.{O.already_deleted}, &plain_event));
+    try testing.expect(!Store.onlyReceivedWraps(&.{ O.recipient, O.own }, &plain_event));
+    try testing.expect(!Store.onlyReceivedWraps(&.{ O.recipient, O.none }, &plain_event));
+    try testing.expect(!Store.onlyReceivedWraps(&.{}, &plain_event));
+    try testing.expect(!Store.onlyReceivedWraps(&.{O.recipient}, &a_event));
 }

@@ -109,6 +109,13 @@ case "$MODE" in
       "$(timeout 10 noz send "$R" '["REQ","g",{"kinds":[1059]}]' --sec $SEC2 --auth 2>/dev/null | grep -c '^\["EVENT"')"
     chk "a recipient's gift wrap deletion is not kept or served" 0 \
       "$(timeout 10 noz send "$R" "[\"REQ\",\"d\",{\"ids\":[\"$DEL\"]}]" 2>/dev/null | grep -c '^\["EVENT"')"
+    # re-sending the same deletion (no OK seen, or a replay) must not publish it
+    DELJSON=$(timeout 12 noz event --sec $SEC2 -k 5 -e "$WRAP" -e "$WRAP" -c "" 2>/dev/null | tail -1)
+    timeout 10 noz send "$R" "[\"EVENT\",$DELJSON]" >/dev/null 2>&1
+    timeout 10 noz send "$R" "[\"EVENT\",$DELJSON]" >/dev/null 2>&1
+    DEL2=$(echo "$DELJSON" | grep -oE '"id":"[a-f0-9]{64}"' | head -1 | cut -d'"' -f4)
+    chk "a re-sent or duplicate-target gift wrap deletion is not kept either" 0 \
+      "$(timeout 10 noz send "$R" "[\"REQ\",\"d\",{\"ids\":[\"$DEL2\"]}]" 2>/dev/null | grep -c '^\["EVENT"')"
     chk "NIP-78 app data is served to its authenticated author" 1 \
       "$(timeout 10 noz send "$R" '["REQ","a",{"kinds":[30078]}]' --sec $SEC1 --auth 2>/dev/null | grep -c '^\["EVENT"')"
     chk "NIP-78 app data is hidden from another authenticated user" 0 \
