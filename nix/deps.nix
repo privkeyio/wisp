@@ -36,7 +36,7 @@ linkFarm "zig-packages" [
   {
     name = "N-V-__8AAAZ8QgBoM0e_aCVlmr4bXY3hGnNSWSWNhluMsCs5";
     path = fetchzip {
-      url = "https://codeload.github.com/ashvardanian/StringZilla/tar.gz/refs/tags/v4.5.1";
+      url = "https://codeload.github.com/ashvardanian/StringZilla/tar.gz/7ca39645f02e00b8465ea2854b888ab9458be8be";
       hash = "sha256-0T8hQ+P6gZnIX52jkRcpF1Ofxy45+B7K/feEQr5Phf0=";
       extension = "tar.gz";
     };
