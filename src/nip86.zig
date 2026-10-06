@@ -524,6 +524,18 @@ test "nip86 ban and allow lists are exclusive and disallowkind is a deny list" {
     try testing.expect(!mgmt.isKindAllowed(1));
 
     // rejection() is the one policy check shared by published and synced events.
+    // A kind on the allowlist is admitted, which pins the kind key encoding.
+    var kind7 = try nostr.Event.parseWithAllocator(
+        \\{"id":"00000000000000000000000000000000000000000000000000000000000000e7","pubkey":"00000000000000000000000000000000000000000000000000000000000000bb","sig":"00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000","kind":7,"created_at":1700000000,"content":"","tags":[]}
+    , testing.allocator);
+    defer kind7.deinit();
+    try testing.expectEqualStrings("blocked: event kind not allowed", mgmt.rejection(&kind7).?);
+    try testing.expectEqual(@as(u16, 200), handler.dispatch("allowkind", "[7]").status);
+    try testing.expectEqual(@as(?[]const u8, null), mgmt.rejection(&kind7));
+    try testing.expectEqual(@as(u16, 200), handler.dispatch("allowpubkey", "[\"00000000000000000000000000000000000000000000000000000000000000cc\"]").status);
+    try testing.expectEqualStrings("blocked: pubkey not in allowlist", mgmt.rejection(&kind7).?);
+    try testing.expectEqual(@as(u16, 200), handler.dispatch("unallowpubkey", "[\"00000000000000000000000000000000000000000000000000000000000000cc\"]").status);
+
     var event = try nostr.Event.parseWithAllocator(
         \\{"id":"00000000000000000000000000000000000000000000000000000000000000ee","pubkey":"00000000000000000000000000000000000000000000000000000000000000bb","sig":"00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000","kind":1,"created_at":1700000000,"content":"","tags":[]}
     , testing.allocator);
@@ -533,6 +545,13 @@ test "nip86 ban and allow lists are exclusive and disallowkind is a deny list" {
     try testing.expectEqual(@as(?[]const u8, null), mgmt.rejection(&event));
     try testing.expectEqual(@as(u16, 200), handler.dispatch("banpubkey", "[\"" ++ pk_hex ++ "\"]").status);
     try testing.expectEqualStrings("blocked: pubkey is banned", mgmt.rejection(&event).?);
+    try testing.expectEqual(@as(u16, 200), handler.dispatch("unbanpubkey", "[\"" ++ pk_hex ++ "\"]").status);
+
+    // An event ban applies even where kinds and pubkeys would admit the event.
+    try testing.expectEqual(@as(u16, 200), handler.dispatch("allowkind", "[1]").status);
+    try testing.expectEqual(@as(?[]const u8, null), mgmt.rejection(&event));
+    try testing.expectEqual(@as(u16, 200), handler.dispatch("banevent", "[\"" ++ id_hex ++ "\"]").status);
+    try testing.expectEqualStrings("blocked: event is banned", mgmt.rejection(&event).?);
 }
 
 test "rejection refuses an event when the policy cannot be read" {
@@ -561,9 +580,11 @@ test "rejection refuses an event when the policy cannot be read" {
     // LMDB allows one transaction per thread, so while a store read is open on
     // this thread the policy cannot be read and the event must be refused.
     const filters = [_]nostr.Filter{.{}};
-    var iter = try store.queryFull(&filters, 10);
-    _ = try iter.next();
-    try testing.expectEqualStrings("error: relay policy unavailable", mgmt.rejection(&event).?);
-    iter.deinit();
+    {
+        var iter = try store.queryFull(&filters, 10);
+        defer iter.deinit();
+        _ = try iter.next();
+        try testing.expectEqualStrings("error: relay policy unavailable", mgmt.rejection(&event).?);
+    }
     try testing.expectEqual(@as(?[]const u8, null), mgmt.rejection(&event));
 }

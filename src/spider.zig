@@ -1239,3 +1239,54 @@ test isStale {
     // A backward clock step must never report stale.
     try testing.expect(!isStale(5000, 1000));
 }
+
+test "synced events go through the NIP-86 policy and are stored only when admitted" {
+    const testing = std.testing;
+    const Lmdb = @import("lmdb.zig").Lmdb;
+    const Subscriptions = @import("subscriptions.zig").Subscriptions;
+    const io = nostr.io.io();
+    const cwd = std.Io.Dir.cwd();
+    const db_path = "./test_spider_policy_db";
+    defer {
+        cwd.deleteFile(io, db_path) catch {};
+        cwd.deleteFile(io, db_path ++ "-lock") catch {};
+    }
+
+    try nostr.init();
+    defer nostr.cleanup();
+
+    var lmdb = try Lmdb.init(testing.allocator, db_path, 10, .none);
+    defer lmdb.deinit();
+    var store = try Store.init(testing.allocator, &lmdb);
+    defer store.deinit();
+    var mgmt = try ManagementStore.init(testing.allocator, &lmdb);
+    // Broadcast keeps threadlocal scratch for the process lifetime, so it gets an
+    // allocator that is not leak-checked, as in the subscriptions tests.
+    var subs = Subscriptions.init(std.heap.page_allocator);
+    defer subs.deinit();
+    var broadcaster = Broadcaster.init(testing.allocator, &subs);
+    var shutdown = std.atomic.Value(bool).init(false);
+    var config = Config.defaults();
+    config.spider_relays = "";
+    var spider = try Spider.init(testing.allocator, &config, &store, &mgmt, &broadcaster, &shutdown);
+    defer spider.deinit();
+
+    const msg =
+        \\["EVENT","s",{"kind":7,"id":"de76f6953560d6a287e6dfa49ad48642ba33312b8611fcbd0e1aa6f13b9981b6","pubkey":"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798","created_at":1700000000,"tags":[],"content":"+","sig":"ccc0a6ca9ddc6c5c173741d280ae1c9927021987b489c6da9c939ed396929c0d895e86aac6d475f3cd617a2dd2e98a1662e725d85c00251000318ec8039d88d5"}]
+    ;
+    var id: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&id, "de76f6953560d6a287e6dfa49ad48642ba33312b8611fcbd0e1aa6f13b9981b6");
+    var author: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&author, "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
+
+    var received: u64 = 0;
+    try mgmt.banPubkey(&author, "");
+    spider.handleRelayMessage(msg, "wss://upstream", &received);
+    try testing.expectEqual(@as(u64, 0), received);
+    try testing.expect((try store.get(&id)) == null);
+
+    try mgmt.unbanPubkey(&author);
+    spider.handleRelayMessage(msg, "wss://upstream", &received);
+    try testing.expectEqual(@as(u64, 1), received);
+    try testing.expect((try store.get(&id)) != null);
+}
