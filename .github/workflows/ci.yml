@@ -109,11 +109,16 @@ jobs:
       # same pinned version to disk and verify it first, as the Zig setup does. The
       # installer pins the sha256 of the binary tarball it downloads and aborts on
       # a mismatch, so this one digest covers the whole bootstrap.
+      #
+      # Because install_url below points at this file, NIX_VERSION here selects the
+      # nix version, NOT the action. Bumping install-nix-action does not move it, so
+      # a nix security release has to be applied here by hand. 31.11.1 -> 31.11.2
+      # was exactly such a release (2.35.2 -> 2.35.3) and changed nothing on its own.
       - name: Download and verify the Nix installer
         env:
-          NIX_VERSION: 2.35.2
-          # sha256 of releases.nixos.org/nix/nix-2.35.2/install, equal to its published install.sha256
-          NIX_INSTALL_SHA256: 9adda97297d9e8ab360df95c729eabff4f4f93d6db091953c3a68f29e3fb130c
+          NIX_VERSION: 2.35.3
+          # sha256 of releases.nixos.org/nix/nix-2.35.3/install, equal to its published install.sha256
+          NIX_INSTALL_SHA256: 69d0fe8fba8fe88f94c98b09964691ac9950abc7ecbf2ba861dc0533cfd901e9
         run: |
           set -euo pipefail
           installer="$RUNNER_TEMP/nix-install"
