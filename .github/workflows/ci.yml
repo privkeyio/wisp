@@ -126,7 +126,7 @@ jobs:
       # require-sigs), including any a PR adds to flake.nix nixConfig. Flake
       # config is also not accepted at all, and the only substituter and signing
       # key are cache.nixos.org's.
-      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
         with:
           install_url: file://${{ runner.temp }}/nix-install
           set_as_trusted_user: false
