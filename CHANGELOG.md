@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Stopping the relay (SIGTERM or SIGINT) while WebSocket messages were being handled could corrupt the heap and abort the process, reported as `double free or corruption` right after `Shutdown complete`. The vendored HTTP server closed every WebSocket connection, freeing its state and read buffer, as soon as the event loop stopped, while thread-pool handlers could still be processing a message on those connections. Handlers queued behind them then crashed on a connection that had already been closed. Connections are now closed only after the thread pool has finished its in-flight work. Events are acknowledged only after they are committed, so no acknowledged data was at risk.
+
 ## [0.9.2] - 2026-11-09
 
 Stops a watchdog warning that every default install logged on startup, and corrects the documented watchdog formula. No protocol changes; the only configuration change is the `watchdog.failures` default, which keeps watchdog behavior the same at the default interval.
