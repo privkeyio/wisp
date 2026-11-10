@@ -295,7 +295,7 @@ test probeHost {
 }
 
 test "minFailures: the watchdog can never fire before the relay self-heals" {
-    // Whatever the operator sets, interval * failures must cover the window in
+    // Whatever the operator sets, (failures - 1) * interval must cover the window in
     // which stalled connections are reaped, or a burst of idle connections is
     // enough to restart the relay.
     // Intervals at and above self_heal_seconds are included deliberately: there
