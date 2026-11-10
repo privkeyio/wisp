@@ -1066,11 +1066,15 @@ test "wisp: stop does not close a websocket handler while clientMessage is runni
     H.closes.store(0, .release);
     H.closed_during_msg.store(false, .release);
 
-    const port = 6995;
-    var server = try Server(H).init(t.io, t.allocator, .{ .address = .localhost(port), .workers = .{ .count = 1 } }, H{});
+    var server = try Server(H).init(t.io, t.allocator, .{ .address = .localhost(0), .workers = .{ .count = 1 } }, H{});
     var router = try server.router(.{});
     router.get("/ws", H.upgrade, .{});
     const thrd = try server.listenInNewThread();
+
+    var bound: posix.Address = undefined;
+    var bound_len: posix.socklen_t = @sizeOf(posix.Address);
+    try posix.getsockname(server._listener orelse return error.ListenFailed, &bound.any, &bound_len);
+    const port = std.mem.bigToNative(u16, bound.in.port);
 
     const stream = testStream(port);
     defer stream.close(t.io);
