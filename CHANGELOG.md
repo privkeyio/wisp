@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-11-09
+
+Stops a watchdog warning that every default install logged on startup, and corrects the documented watchdog formula. No protocol changes; the only configuration change is the `watchdog.failures` default, which keeps watchdog behavior the same at the default interval.
+
 ### Fixed
 
 - Every startup with the default configuration logged `watchdog.failures raised 3 -> 4`, a warning about a setting the operator never changed. The shipped `failures = 3` at a 10s interval falls short of the 25s window in which stalled connections are reaped, so the startup guard always raised it. The default is now 4, the value that was already in effect at the default interval, so the warning now appears only when `failures` is too low for the configured interval, which for the default of 4 means an `interval_seconds` of 8 or less. With `failures` unset and `interval_seconds` set to 13 or more, the threshold rises from 3 to 4, so a restart takes one more stalled probe.
@@ -335,7 +339,8 @@ rolling out.
 - Import/export to JSONL format
 - Configuration via TOML file or environment variables
 
-[Unreleased]: https://github.com/privkeyio/wisp/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/privkeyio/wisp/compare/v0.9.2...HEAD
+[0.9.2]: https://github.com/privkeyio/wisp/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/privkeyio/wisp/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/privkeyio/wisp/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/privkeyio/wisp/compare/v0.7.0...v0.8.0
