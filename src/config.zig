@@ -190,7 +190,7 @@ pub const Config = struct {
             .watchdog_enabled = true,
             .watchdog_interval_seconds = 10,
             .watchdog_timeout_ms = 2000,
-            .watchdog_failures = 3,
+            .watchdog_failures = 4,
             ._allocated = undefined,
             ._allocator = null,
         };

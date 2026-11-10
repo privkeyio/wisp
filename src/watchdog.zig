@@ -295,7 +295,7 @@ test probeHost {
 }
 
 test "minFailures: the watchdog can never fire before the relay self-heals" {
-    // Whatever the operator sets, interval * failures must cover the window in
+    // Whatever the operator sets, (failures - 1) * interval must cover the window in
     // which stalled connections are reaped, or a burst of idle connections is
     // enough to restart the relay.
     // Intervals at and above self_heal_seconds are included deliberately: there
@@ -319,6 +319,13 @@ test "minFailures: a single stalled probe can never trigger an exit" {
     for ([_]u32{ 25, 26, 100, 4000 }) |interval| {
         try std.testing.expect(minFailures(interval, 1) >= 2);
     }
+}
+
+test "minFailures: the shipped defaults are not raised" {
+    // A raise logs a warning on every startup, so if the defaults needed one,
+    // every out-of-the-box install would warn about a setting nobody changed.
+    const d = Config.defaults();
+    try std.testing.expectEqual(d.watchdog_failures, minFailures(d.watchdog_interval_seconds, d.watchdog_failures));
 }
 
 test "minFailures: an interval of zero cannot divide by zero" {

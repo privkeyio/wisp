@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Every startup with the default configuration logged `watchdog.failures raised 3 -> 4`, a warning about a setting the operator never changed. The shipped `failures = 3` at a 10s interval falls short of the 25s window in which stalled connections are reaped, so the startup guard always raised it. The default is now 4, the value that was already in effect at the default interval, so the warning now appears only when `failures` is too low for the configured interval, which for the default of 4 means an `interval_seconds` of 8 or less. With `failures` unset and `interval_seconds` set to 13 or more, the threshold rises from 3 to 4, so a restart takes one more stalled probe.
+- The `failures` documentation gave the guard as `interval_seconds × failures`. It is `(failures - 1) × interval_seconds`, since N stalled probes span N-1 intervals.
+
 ## [0.9.1] - 2026-10-06
 
 Rebuilds the release binaries and Docker image for the baseline CPU of each architecture. The v0.9.0 binaries could crash with an illegal instruction on CPUs unlike the build machine's; anyone running a release binary or the ghcr.io image should upgrade. The StartOS and Nix packages were not affected. No protocol or configuration changes.

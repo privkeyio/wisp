@@ -107,7 +107,7 @@ enabled = true
 interval_seconds = 10
 # Deadline for one probe. Clamped to 100..5000ms.
 timeout_ms = 2000
-# Consecutive stalls before exiting. Raised automatically if interval_seconds *
-# failures would be short enough to fire before the relay reaps stalled
+# Consecutive stalls before exiting. Raised automatically if (failures - 1) *
+# interval_seconds would be shorter than the 25s the relay takes to reap stalled
 # connections, so ordinary connection pressure cannot force a restart.
-failures = 3
+failures = 4
