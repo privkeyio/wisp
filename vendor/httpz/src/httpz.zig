@@ -1052,6 +1052,102 @@ test "httpz: shutdown without listen" {
     server.deinit();
 }
 
+// The websocket layer's shutdown() calls each live handler's close(). It used to
+// run on the event-loop thread as soon as stop() broke the loop, while the
+// thread pool could still be inside that same handler's clientMessage(), so the
+// application freed per-connection state out from under the running message
+// (wisp: "double free or corruption" on SIGTERM under load). close() must only
+// run once no clientMessage() is in flight.
+test "wisp: stop does not close a websocket handler while clientMessage is running" {
+    if (force_blocking) return; // the race is specific to the non-blocking worker
+    const H = ShutdownInFlightWsHandler;
+    H.in_msg.store(false, .release);
+    H.may_finish.store(false, .release);
+    H.closes.store(0, .release);
+    H.closed_during_msg.store(false, .release);
+
+    const port = 6995;
+    var server = try Server(H).init(t.io, t.allocator, .{ .address = .localhost(port), .workers = .{ .count = 1 } }, H{});
+    var router = try server.router(.{});
+    router.get("/ws", H.upgrade, .{});
+    const thrd = try server.listenInNewThread();
+
+    const stream = testStream(port);
+    defer stream.close(t.io);
+    var writer = stream.writer(t.io, &.{});
+    const w = &writer.interface;
+    try w.writeAll("GET /ws HTTP/1.1\r\nContent-Length: 0\r\nupgrade: websocket\r\n" ++
+        "Sec-Websocket-version: 13\r\nconnection: upgrade\r\nSec-Websocket-Key: a-secret-key\r\n\r\n");
+    try w.flush();
+
+    var buf: [512]u8 = undefined;
+    var pos: usize = 0;
+    var waited: usize = 0;
+    while (!std.mem.endsWith(u8, buf[0..pos], "\r\n\r\n")) : (waited += 1) {
+        if (waited > 400) return error.NoUpgradeResponse;
+        const n = posix.read(stream.socket.handle, buf[pos..]) catch |err| switch (err) {
+            error.WouldBlock => continue,
+            else => return err,
+        };
+        if (n == 0) return error.NoUpgradeResponse;
+        pos += n;
+    }
+    try t.expectEqual(true, std.mem.startsWith(u8, buf[0..pos], "HTTP/1.1 101"));
+
+    try w.writeAll(&websocket.frameText("park"));
+    try w.flush();
+    waited = 0;
+    while (H.in_msg.load(.acquire) == false) : (waited += 1) {
+        if (waited > 400) return error.HandlerNeverRan;
+        try t.io.sleep(.fromMilliseconds(5), .awake);
+    }
+
+    // The handler is parked inside clientMessage. Stop the server and give the
+    // event loop ample time to run its shutdown path before letting it finish.
+    server.stop();
+    try t.io.sleep(.fromMilliseconds(200), .awake);
+    H.may_finish.store(true, .release);
+
+    thrd.join();
+    server.deinit();
+
+    try t.expectEqual(false, H.closed_during_msg.load(.acquire));
+    try t.expectEqual(@as(u32, 1), H.closes.load(.acquire));
+}
+
+const ShutdownInFlightWsHandler = struct {
+    var in_msg: std.atomic.Value(bool) = .init(false);
+    var may_finish: std.atomic.Value(bool) = .init(false);
+    var closes: std.atomic.Value(u32) = .init(0);
+    var closed_during_msg: std.atomic.Value(bool) = .init(false);
+
+    pub const WebsocketHandler = struct {
+        pub fn init(_: *websocket.Conn, _: void) !WebsocketHandler {
+            return .{};
+        }
+
+        pub fn clientMessage(_: *WebsocketHandler, _: []const u8) !void {
+            in_msg.store(true, .release);
+            while (may_finish.load(.acquire) == false) {
+                t.io.sleep(.fromMilliseconds(5), .awake) catch unreachable;
+            }
+            in_msg.store(false, .release);
+        }
+
+        pub fn close(_: *WebsocketHandler) void {
+            if (in_msg.load(.acquire)) closed_during_msg.store(true, .release);
+            _ = closes.fetchAdd(1, .acq_rel);
+        }
+    };
+
+    pub fn upgrade(_: ShutdownInFlightWsHandler, req: *Request, res: *Response) !void {
+        if (try upgradeWebsocket(WebsocketHandler, req, res, {}) == false) {
+            res.status = 500;
+            res.body = "invalid websocket";
+        }
+    }
+};
+
 test "wisp: a second stop does not close the listener again" {
     var server = try Server(void).init(t.io, t.allocator, .{ .address = .localhost(0), .workers = .{ .count = 1 } }, {});
     defer server.deinit();

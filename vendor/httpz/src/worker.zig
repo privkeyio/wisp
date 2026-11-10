@@ -523,6 +523,19 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
             // buffers, so joining afterward would be too late -> use-after-free.
             self.thread_pool.stop();
 
+            // Only now close the remaining WebSocket handlers. shutdown() calls
+            // each handler's close() and frees its reader buffer, synchronized
+            // only by hc.cleanup, which neither dataAvailable() nor
+            // ConnManager.cleanup() holds while calling into the handler. Run
+            // from run() (on the event-loop thread) it raced in-flight
+            // processWebsocketData tasks: close() could free the app's
+            // per-connection state and the reader buffer while clientMessage()
+            // was still using them (heap corruption on SIGTERM under load), and
+            // tasks still queued afterward hit the nulled hc.handler. It could
+            // likely also race a task's own cleanupConn() -> close(). With the
+            // pool joined nothing else touches these connections.
+            self.websocket.shutdown();
+
             self.websocket.deinit();
             allocator.destroy(self.websocket);
 
@@ -567,7 +580,8 @@ pub fn NonBlocking(comptime S: type, comptime WSH: type) type {
                 return;
             };
             ready_sem.post(io);
-            defer self.websocket.shutdown();
+            // websocket.shutdown() is NOT deferred here: it runs in deinit(),
+            // after thread_pool.stop() has joined the handlers. See deinit().
 
             var now = timestamp(io);
             var last_timeout = now;
