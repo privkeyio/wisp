@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-11-10
+
+Fixes a crash that could abort the relay when it was stopped under load. No protocol or configuration changes.
+
 ### Fixed
 
 - Stopping the relay (SIGTERM or SIGINT) while WebSocket messages were being handled could corrupt the heap and abort the process, reported as `double free or corruption` right after `Shutdown complete`. The vendored HTTP server closed every WebSocket connection, freeing its state and read buffer, as soon as the event loop stopped, while thread-pool handlers could still be processing a message on those connections. Handlers queued behind them then crashed on a connection that had already been closed. Connections are now closed only after the thread pool has finished its in-flight work. Events are acknowledged only after they are committed, so no acknowledged data was at risk.
@@ -343,7 +347,8 @@ rolling out.
 - Import/export to JSONL format
 - Configuration via TOML file or environment variables
 
-[Unreleased]: https://github.com/privkeyio/wisp/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/privkeyio/wisp/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/privkeyio/wisp/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/privkeyio/wisp/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/privkeyio/wisp/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/privkeyio/wisp/compare/v0.8.0...v0.9.0
