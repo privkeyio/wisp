@@ -110,4 +110,4 @@ timeout_ms = 2000
 # Consecutive stalls before exiting. Raised automatically if interval_seconds *
 # failures would be short enough to fire before the relay reaps stalled
 # connections, so ordinary connection pressure cannot force a restart.
-failures = 3
+failures = 4

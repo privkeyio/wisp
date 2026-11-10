@@ -321,6 +321,13 @@ test "minFailures: a single stalled probe can never trigger an exit" {
     }
 }
 
+test "minFailures: the shipped defaults are not raised" {
+    // A raise logs a warning on every startup, so if the defaults needed one,
+    // every out-of-the-box install would warn about a setting nobody changed.
+    const d = Config.defaults();
+    try std.testing.expectEqual(d.watchdog_failures, minFailures(d.watchdog_interval_seconds, d.watchdog_failures));
+}
+
 test "minFailures: an interval of zero cannot divide by zero" {
     try std.testing.expect(minFailures(0, 1) >= 2);
 }
