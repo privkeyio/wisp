@@ -384,19 +384,32 @@ pub const ManagementStore = struct {
     /// older dotless "10.0.0"); see ip_match.zig. The key is stored as given so
     /// unblockip with the same text removes it.
     pub fn blockIp(self: *ManagementStore, ip: []const u8, reason: []const u8) !void {
-        if (ip_match.parseRule(ip, .allow_dotless_prefix) == null) return error.InvalidIpRule;
+        const rule = ip_match.parseRule(ip, .allow_dotless_prefix) orelse return error.InvalidIpRule;
 
         const io = nostr.io.io();
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
+        // Reserve before committing so a stored block is always enforced.
+        // `ip_rules` only changes under `mutex`, so the capacity is still there.
+        {
+            self.ip_rules_mutex.lockUncancelable(io);
+            defer self.ip_rules_mutex.unlock(io);
+            try self.ip_rules.ensureUnusedCapacity(self.allocator, 1);
+        }
         {
             var txn = try self.lmdb.beginTxn(false);
             errdefer txn.abort();
             try txn.put(self.blocked_ips, ip, reason);
             try txn.commit();
         }
-        try self.reloadIpRules();
+
+        self.ip_rules_mutex.lockUncancelable(io);
+        defer self.ip_rules_mutex.unlock(io);
+        for (self.ip_rules.items) |r| {
+            if (std.meta.eql(r, rule)) return;
+        }
+        self.ip_rules.appendAssumeCapacity(rule);
     }
 
     pub fn unblockIp(self: *ManagementStore, ip: []const u8) !void {
@@ -410,7 +423,12 @@ pub const ManagementStore = struct {
             txn.delete(self.blocked_ips, ip) catch {};
             try txn.commit();
         }
-        try self.reloadIpRules();
+        // The delete is committed; until the next rebuild the old rule keeps
+        // blocking, which fails closed.
+        self.reloadIpRules() catch |err| {
+            var buf: [64]u8 = undefined;
+            log.err("unblocked IP entry \"{s}\" is still enforced in memory: rebuilding rules failed: {s}", .{ ip_match.safeEntry(ip, &buf), @errorName(err) });
+        };
     }
 
     pub fn isIpBlocked(self: *ManagementStore, ip: []const u8) bool {
@@ -564,6 +582,7 @@ test "blocked IPs: CIDR, IPv6 subnets, legacy keys and malformed input" {
         var txn = try lmdb.beginTxn(false);
         errdefer txn.abort();
         try txn.put(setup.blocked_ips, "45.9.148", "legacy dotless");
+        try txn.put(setup.blocked_ips, "::ffff:91.92", "legacy mapped dotless");
         try txn.put(setup.blocked_ips, "not-an-ip", "junk");
         try txn.commit();
     }
@@ -571,10 +590,14 @@ test "blocked IPs: CIDR, IPv6 subnets, legacy keys and malformed input" {
     var mgmt = try ManagementStore.init(testing.allocator, &lmdb);
     defer mgmt.deinit();
 
-    // Legacy dotless key is a /24; junk is skipped rather than failing init.
-    try testing.expectEqual(@as(usize, 1), mgmt.ip_rules.items.len);
+    // Legacy dotless keys are prefixes; junk is skipped rather than failing init.
+    try testing.expectEqual(@as(usize, 2), mgmt.ip_rules.items.len);
     try testing.expect(mgmt.isIpBlocked("45.9.148.7"));
     try testing.expect(!mgmt.isIpBlocked("45.9.149.7"));
+    try testing.expect(mgmt.isIpBlocked("91.92.1.1"));
+    try testing.expect(mgmt.isIpBlocked("::ffff:91.92.1.1"));
+    try mgmt.unblockIp("::ffff:91.92");
+    try testing.expect(!mgmt.isIpBlocked("91.92.1.1"));
 
     try mgmt.blockIp("185.220.100.0/22", "tor exits");
     try mgmt.blockIp("2001:db8::/32", "");

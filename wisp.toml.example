@@ -68,11 +68,11 @@ idle_seconds = 300
 # append the real client to X-Forwarded-For and the backend port MUST NOT be
 # directly reachable, otherwise clients can forge these headers to spoof any IP.
 # Restrict which peers are trusted to a proxy IP/CIDR list; empty trusts any peer.
-# trusted_proxies = "127.0.0.1,10.0.0.0/8"
+# trusted_proxies = "127.0.0.1,10.0.0.0/24"
 # max_connections_per_ip = 10
 # Entries are an address or a CIDR range, IPv4 or IPv6. Legacy prefixes ending in
 # '.' or ':' still work ("10.0.0." is 10.0.0.0/24). '*' wildcards are not supported.
-# ip_whitelist = "192.168.1.0/24,10.0.0.0/8"
+# ip_whitelist = "192.168.1.0/24,10.0.0.0/24"
 # ip_blacklist = "185.220.100.0/22,2001:db8::/32"
 
 [spider]

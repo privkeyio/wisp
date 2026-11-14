@@ -193,7 +193,10 @@ does not cover IPv4.
 
 Older prefix entries ending in `.` or `:` still work and are read as the equivalent CIDR range:
 `10.` is `10.0.0.0/8`, `192.168.` is `192.168.0.0/16`, `185.220.101.` is `185.220.101.0/24`, and
-each IPv6 group before the trailing `:` is 16 bits, so `2001:db8:` is `2001:db8::/32`.
+each IPv6 group before the trailing `:` is 16 bits, so `2001:db8:` is `2001:db8::/32`. A mapped
+prefix is the IPv4 range it embeds: `::ffff:185.220.101.` is `185.220.101.0/24`. An IPv6 prefix
+containing `::` (`2001:db8::1:`) is no longer accepted, because its length is ambiguous; write it
+as a CIDR range instead.
 
 An entry that is none of these, such as `192.168.*`, `10.0.0.0/33` or a hostname, is rejected at
 startup with a warning naming it rather than being accepted and then matching nothing. If every

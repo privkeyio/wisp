@@ -7,7 +7,8 @@
 //!     ignored, so "10.1.2.3/8" is 10.0.0.0/8.
 //!   - legacy prefix (kept so existing configs keep working), converted to CIDR:
 //!     "10." -> /8, "10.0." -> /16, "10.0.0." -> /24, and IPv6 "2001:db8:" ->
-//!     one /16 per group, so 2001:db8::/32.
+//!     one /16 per group, so 2001:db8::/32. A mapped IPv4 prefix
+//!     ("::ffff:185.220.101.") is the IPv4 prefix it embeds.
 //!
 //! IPv4-mapped IPv6 ("::ffff:1.2.3.4") is folded to IPv4 on both sides, so an
 //! IPv4 rule matches a client that a dual-stack socket reports as mapped. Other
@@ -54,8 +55,7 @@ pub fn anyMatch(rules: []const Rule, addr: Addr) bool {
 pub fn parseAddr(text: []const u8) ?Addr {
     if (std.mem.indexOfScalar(u8, text, ':') != null) {
         const host = if (std.mem.indexOfScalar(u8, text, '%')) |pct| text[0..pct] else text;
-        const a = net.Ip6Address.parse(host, 0) catch return null;
-        return fromIp6Bytes(a.bytes);
+        return fromIp6Bytes(parseIp6(host) orelse return null);
     }
     const a = net.Ip4Address.parse(text, 0) catch return null;
     return .{ .family = .v4, .bits = std.mem.readInt(u32, &a.bytes, .big) };
@@ -71,21 +71,19 @@ pub fn parseRule(text: []const u8, syntax: Syntax) ?Rule {
         return makeRule(addr, len);
     }
 
+    // A legacy prefix of the mapped form was the only way to match IPv4 clients
+    // of a dual-stack listener, so it is the IPv4 rule it embeds.
+    if (stripMappedPrefix(text)) |rest| {
+        if (rest.len == 0) return v4Rule(0, 0);
+        if (parseLegacyIp4(rest, syntax)) |rule| return rule;
+    }
+
     if (parseRuleAddr(text)) |addr| {
         return makeRule(addr, if (addr.family == .v4) 32 else 128);
     }
 
-    const last = text[text.len - 1];
-    if (last == '.') return parseLegacyIp4(text);
-    if (last == ':') return parseLegacyIp6(text);
-    if (syntax == .allow_dotless_prefix and std.mem.count(u8, text, ".") < 3) {
-        var buf: [16]u8 = undefined;
-        if (text.len >= buf.len) return null;
-        @memcpy(buf[0..text.len], text);
-        buf[text.len] = '.';
-        return parseLegacyIp4(buf[0 .. text.len + 1]);
-    }
-    return null;
+    if (text[text.len - 1] == ':') return parseLegacyIp6(text);
+    return parseLegacyIp4(text, syntax);
 }
 
 const RuleAddr = struct { family: Family, bits: u128, mapped: bool };
@@ -95,8 +93,8 @@ const RuleAddr = struct { family: Family, bits: u128, mapped: bool };
 fn parseRuleAddr(text: []const u8) ?RuleAddr {
     if (std.mem.indexOfScalar(u8, text, '%') != null) return null;
     if (std.mem.indexOfScalar(u8, text, ':') != null) {
-        const a = net.Ip6Address.parse(text, 0) catch return null;
-        return .{ .family = .v6, .bits = std.mem.readInt(u128, &a.bytes, .big), .mapped = isMapped(a.bytes) };
+        const bytes = parseIp6(text) orelse return null;
+        return .{ .family = .v6, .bits = std.mem.readInt(u128, &bytes, .big), .mapped = isMapped(bytes) };
     }
     const a = net.Ip4Address.parse(text, 0) catch return null;
     return .{ .family = .v4, .bits = std.mem.readInt(u32, &a.bytes, .big), .mapped = false };
@@ -135,8 +133,44 @@ fn parsePrefixLen(text: []const u8) ?u8 {
     return if (n > 128) null else @intCast(n);
 }
 
+/// std's parser reads anything starting with "::ffff:" as dotted IPv4, so the
+/// hex forms ("::ffff:c0a8:101", "::ffff:0:0") are rewritten to "0::ffff:...",
+/// which it parses as IPv6.
+fn parseIp6(text: []const u8) ?[16]u8 {
+    if (stripMappedPrefix(text)) |rest| {
+        if (std.mem.indexOfScalar(u8, rest, '.') == null) {
+            var buf: [64]u8 = undefined;
+            const hex = std.fmt.bufPrint(&buf, "0::ffff:{s}", .{rest}) catch return null;
+            const a = net.Ip6Address.parse(hex, 0) catch return null;
+            return a.bytes;
+        }
+    }
+    const a = net.Ip6Address.parse(text, 0) catch return null;
+    return a.bytes;
+}
+
+fn stripMappedPrefix(text: []const u8) ?[]const u8 {
+    const prefix = "::ffff:";
+    if (text.len < prefix.len or !std.ascii.eqlIgnoreCase(text[0..prefix.len], prefix)) return null;
+    return text[prefix.len..];
+}
+
+/// A prefix ending in '.', or with `.allow_dotless_prefix` one without it.
+fn parseLegacyIp4(text: []const u8, syntax: Syntax) ?Rule {
+    if (text.len == 0) return null;
+    if (text[text.len - 1] == '.') return parseIp4Prefix(text);
+    if (syntax == .allow_dotless_prefix and std.mem.count(u8, text, ".") < 3) {
+        var buf: [16]u8 = undefined;
+        if (text.len >= buf.len) return null;
+        @memcpy(buf[0..text.len], text);
+        buf[text.len] = '.';
+        return parseIp4Prefix(buf[0 .. text.len + 1]);
+    }
+    return null;
+}
+
 /// "a." / "a.b." / "a.b.c." -> /8, /16, /24.
-fn parseLegacyIp4(text: []const u8) ?Rule {
+fn parseIp4Prefix(text: []const u8) ?Rule {
     if (std.mem.indexOfScalar(u8, text, ':') != null) return null;
     const octets = std.mem.count(u8, text, ".");
     if (octets < 1 or octets > 3) return null;
@@ -156,7 +190,7 @@ fn parseLegacyIp6(text: []const u8) ?Rule {
     var buf: [48]u8 = undefined;
     const full = std.fmt.bufPrint(&buf, "{s}:", .{text}) catch return null;
     const a = net.Ip6Address.parse(full, 0) catch return null;
-    return makeRule(.{ .family = Family.v6, .bits = std.mem.readInt(u128, &a.bytes, .big), .mapped = false }, @intCast(16 * groups));
+    return makeRule(.{ .family = Family.v6, .bits = std.mem.readInt(u128, &a.bytes, .big), .mapped = isMapped(a.bytes) }, @intCast(16 * groups));
 }
 
 /// `entry` truncated to 64 bytes with non-printable bytes replaced, for logging
@@ -200,6 +234,25 @@ test "parseAddr" {
     try testing.expect(parseAddr("1:2:3:4:5:6:7:8:9") == null);
 }
 
+test "IPv4-mapped hex forms" {
+    // std reads any "::ffff:" input as dotted IPv4; these must still parse.
+    try testing.expectEqual(Addr{ .family = .v4, .bits = 0x01020304 }, parseAddr("::ffff:102:304").?);
+    try testing.expectEqual(Addr{ .family = .v4, .bits = 0xc0a80101 }, parseAddr("::FFFF:c0a8:101").?);
+    try testing.expectEqual(Addr{ .family = .v4, .bits = 0x01020304 }, parseAddr("::FFFF:1.2.3.4").?);
+    try testing.expectEqual(Addr{ .family = .v6, .bits = 0xffff_0000_0001_0002 }, parseAddr("::ffff:0:1:2").?);
+    try testing.expect(parseAddr("::ffff:") == null);
+    try testing.expect(parseAddr("::ffff:1.2.3") == null);
+    try testing.expect(parseAddr("::ffff:1:2:3:4:5:6:7") == null);
+
+    try testing.expectEqual(parseRule("0.0.0.0/0", .standard).?, parseRule("::ffff:0:0/96", .standard).?);
+    try testing.expectEqual(parseRule("192.168.1.0/24", .standard).?, parseRule("::ffff:c0a8:101/120", .standard).?);
+    try testing.expectEqual(parseRule("192.168.1.1", .standard).?, parseRule("::FFFF:C0A8:101", .standard).?);
+    try testing.expectEqual(parseRule("::ffff:0:1:2/128", .standard).?, parseRule("0:0:0:0:ffff:0:1:2", .standard).?);
+    try testing.expect(ruleMatches("::ffff:c0a8:100/120", "192.168.1.77"));
+    try testing.expect(ruleMatches("10.0.0.0/8", "::ffff:a00:1"));
+    try testing.expect(!ruleMatches("10.0.0.0/8", "::ffff:b00:1"));
+}
+
 test "IPv4 CIDR boundaries" {
     // The incident range: 185.220.100.0/22 is 185.220.100.0 - 185.220.103.255.
     try testing.expect(!ruleMatches("185.220.100.0/22", "185.220.99.255"));
@@ -222,6 +275,14 @@ test "IPv4 CIDR boundaries" {
     try testing.expect(ruleMatches("0.0.0.0/0", "0.0.0.0"));
     try testing.expect(ruleMatches("0.0.0.0/0", "255.255.255.255"));
     try testing.expect(!ruleMatches("0.0.0.0/0", "2001:db8::1"));
+
+    try testing.expect(ruleMatches("128.0.0.0/1", "128.0.0.0"));
+    try testing.expect(ruleMatches("128.0.0.0/1", "255.255.255.255"));
+    try testing.expect(!ruleMatches("128.0.0.0/1", "127.255.255.255"));
+    try testing.expect(ruleMatches("10.0.0.2/31", "10.0.0.2"));
+    try testing.expect(ruleMatches("10.0.0.2/31", "10.0.0.3"));
+    try testing.expect(!ruleMatches("10.0.0.2/31", "10.0.0.1"));
+    try testing.expect(!ruleMatches("10.0.0.2/31", "10.0.0.4"));
 }
 
 test "IPv6 CIDR boundaries" {
@@ -240,6 +301,14 @@ test "IPv6 CIDR boundaries" {
     try testing.expect(ruleMatches("2001:db8::1/128", "2001:db8::1"));
     try testing.expect(!ruleMatches("2001:db8::1/128", "2001:db8::2"));
     try testing.expect(ruleMatches("::1", "::1"));
+
+    try testing.expect(ruleMatches("8000::/1", "8000::"));
+    try testing.expect(ruleMatches("8000::/1", "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"));
+    try testing.expect(!ruleMatches("8000::/1", "7fff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"));
+    try testing.expect(ruleMatches("2001:db8::2/127", "2001:db8::2"));
+    try testing.expect(ruleMatches("2001:db8::2/127", "2001:db8::3"));
+    try testing.expect(!ruleMatches("2001:db8::2/127", "2001:db8::1"));
+    try testing.expect(!ruleMatches("2001:db8::2/127", "2001:db8::4"));
 
     // ::/0 is all of IPv6, but not IPv4 (including mapped IPv4).
     try testing.expect(ruleMatches("::/0", "::"));
@@ -269,6 +338,13 @@ test "legacy prefixes convert to CIDR" {
         .{ .legacy = "2001:", .cidr = "2001::/16" },
         .{ .legacy = "2001:db8:", .cidr = "2001:db8::/32" },
         .{ .legacy = "1:2:3:4:5:6:7:", .cidr = "1:2:3:4:5:6:7::/112" },
+        // A mapped prefix is the IPv4 prefix it embeds.
+        .{ .legacy = "::ffff:1.2.", .cidr = "1.2.0.0/16" },
+        .{ .legacy = "::ffff:185.220.101.", .cidr = "185.220.101.0/24" },
+        .{ .legacy = "::FFFF:10.", .cidr = "10.0.0.0/8" },
+        .{ .legacy = "::ffff:", .cidr = "0.0.0.0/0" },
+        .{ .legacy = "0:0:0:0:0:ffff:", .cidr = "0.0.0.0/0" },
+        .{ .legacy = "0:0:0:0:0:ffff:a01:", .cidr = "10.1.0.0/16" },
     };
     for (cases) |c| {
         try testing.expectEqual(parseRule(c.cidr, .standard).?, parseRule(c.legacy, .standard).?);
@@ -279,6 +355,12 @@ test "legacy prefixes convert to CIDR" {
     try testing.expect(!ruleMatches("185.220.101.", "185.220.102.1"));
     // A prefix ends at an octet boundary: "1.2.3." does not cover 1.2.30.x.
     try testing.expect(!ruleMatches("1.2.3.", "1.2.30.1"));
+    try testing.expect(ruleMatches("::ffff:185.220.101.", "::ffff:185.220.101.9"));
+    try testing.expect(ruleMatches("::ffff:185.220.101.", "185.220.101.9"));
+    try testing.expect(!ruleMatches("::ffff:185.220.101.", "::ffff:185.220.102.9"));
+
+    // "::" makes the group count of a prefix ambiguous, so it is rejected.
+    try testing.expect(parseRule("2001:db8::1:", .standard) == null);
 
     // A complete address ending in "::" is an exact address, not a prefix.
     try testing.expectEqual(parseRule("2001:db8::/128", .standard).?, parseRule("2001:db8::", .standard).?);
@@ -289,6 +371,11 @@ test "legacy prefixes convert to CIDR" {
     try testing.expectEqual(parseRule("185.220.0.0/16", .standard).?, parseRule("185.220", .allow_dotless_prefix).?);
     try testing.expectEqual(parseRule("185.0.0.0/8", .standard).?, parseRule("185", .allow_dotless_prefix).?);
     try testing.expectEqual(parseRule("1.2.3.4/32", .standard).?, parseRule("1.2.3.4", .allow_dotless_prefix).?);
+    try testing.expectEqual(parseRule("185.220.0.0/16", .standard).?, parseRule("::ffff:185.220", .allow_dotless_prefix).?);
+    try testing.expectEqual(parseRule("185.0.0.0/8", .standard).?, parseRule("::ffff:185", .allow_dotless_prefix).?);
+    try testing.expectEqual(parseRule("1.2.3.4/32", .standard).?, parseRule("::ffff:1.2.3.4", .allow_dotless_prefix).?);
+    // Hex mapped addresses are still addresses in the NIP-86 store.
+    try testing.expectEqual(parseRule("1.2.3.4/32", .standard).?, parseRule("::ffff:102:304", .allow_dotless_prefix).?);
 }
 
 test "malformed rules are rejected" {
@@ -298,7 +385,7 @@ test "malformed rules are rejected" {
         "10.0.0.0/+8",    "10.0.0.0/08",      "10.0.0.0/8/8", "10.0.0.0/ 8",
         "2001:db8::/129", "2001:db8::/1000",  "10.0.0.256",   "10.0.0",
         "10.0.0.0.",      "256.",             "10..",         "010.",
-        "192.168.*",      "example.com",      "::ffff:1.2.",  "2001::db8:",
+        "192.168.*",      "example.com",      "::ffff:1.2",   "2001::db8:",
         "12345:",         "1:2:3:4:5:6:7:8:", "fe80::1%eth0", "fe80::%eth0/64",
         "10.0.0.0/8 ",    " 10.0.0.0/8",      "x::/16",
     };
