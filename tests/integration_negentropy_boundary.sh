@@ -33,7 +33,7 @@ count() { timeout 10 noz req -k 1 -l $((CAP * 4)) "$1" 2>/dev/null | grep -c '"k
 
 # Exactly CAP events, distinct created_at so each is unique. Not one under, not
 # one over: the boundary is the whole point.
-base=$(($(date +%s) - 1000))
+base=$(($(date +%s) - 1000 - CAP))
 for i in $(seq 1 "$CAP"); do
   timeout 6 noz event --sec $SEC1 --ts $((base + i)) -c "bound$i" "$A" >/dev/null 2>&1
 done
