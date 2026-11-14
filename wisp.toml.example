@@ -69,8 +69,9 @@ idle_seconds = 300
 # directly reachable, otherwise clients can forge these headers to spoof any IP.
 # Restrict which peers are trusted to a proxy IP/prefix list; empty trusts any peer.
 # trusted_proxies = "127.0.0.1,10.0.0."
-# /metrics answers only loopback clients (127.0.0.0/8, ::1) by default. Set true
-# to serve it to any client that passes ip_whitelist/ip_blacklist.
+# /metrics answers only direct loopback clients (127.0.0.0/8, ::1) by default;
+# requests carrying X-Forwarded-For or X-Real-IP (i.e. via a proxy) are refused.
+# Set true to serve it to any client that passes ip_whitelist/ip_blacklist.
 # metrics_public = false
 # max_connections_per_ip = 10
 # Prefix entries must end in '.' (IPv4) or ':' (IPv6); entries without a trailing
