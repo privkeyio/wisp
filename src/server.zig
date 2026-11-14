@@ -488,11 +488,15 @@ fn quotableEntry(entry: []const u8, buf: *[64]u8) []const u8 {
 
 /// Lock-free throttle: true for at most one caller per `interval` seconds.
 /// `last` starts at 0 so the first call fires; a racing caller that loses the
-/// swap stays quiet. A clock that steps backwards claims the slot rather than
-/// staying silent until it catches up with `last`.
+/// swap stays quiet. The slot reopens only once `now` is at least `interval`
+/// away from `last` in either direction: a clock stepped back by an interval or
+/// more claims it rather than staying silent until it catches up, while a
+/// worker whose sample is merely a second or two older than the winner's (it
+/// read the clock, then lost the race) is still suppressed. A smaller backward
+/// step delays the next warning by at most two intervals.
 fn claimWarnSlot(last: *std.atomic.Value(i64), now: i64, interval: i64) bool {
     const prev = last.load(.monotonic);
-    if (now >= prev and now - prev < interval) return false;
+    if (@abs(now - prev) < @as(u64, @intCast(interval))) return false;
     return last.cmpxchgStrong(prev, now, .monotonic, .monotonic) == null;
 }
 
@@ -520,6 +524,16 @@ test claimWarnSlot {
     try std.testing.expect(!claimWarnSlot(&last, 1_699_000_000, 3600));
     try std.testing.expect(!claimWarnSlot(&last, 1_699_003_599, 3600));
     try std.testing.expect(claimWarnSlot(&last, 1_699_003_600, 3600));
+
+    // A worker that sampled the clock just before the winner, then resumed after
+    // the winner claimed the slot, must not claim it too.
+    var raced = std.atomic.Value(i64).init(0);
+    try std.testing.expect(claimWarnSlot(&raced, 1_700_000_001, 3600));
+    try std.testing.expect(!claimWarnSlot(&raced, 1_700_000_000, 3600));
+    try std.testing.expect(!claimWarnSlot(&raced, 1_699_996_402, 3600));
+    try std.testing.expectEqual(@as(i64, 1_700_000_001), raced.load(.monotonic));
+    // A backward step of exactly one interval reopens it.
+    try std.testing.expect(claimWarnSlot(&raced, 1_699_996_401, 3600));
 }
 
 test isProxyPlausible {
