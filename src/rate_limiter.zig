@@ -51,10 +51,20 @@ pub const ConnectionLimiter = struct {
     // subnet bucket. Socket peers always parse, so this only holds malformed or
     // forged forwarded headers, and it keeps a stream of distinct garbage
     // strings (each its own per-IP bucket) from bypassing the subnet cap.
+    // The network bits are bytes rather than a u128 so the key is 17 bytes
+    // instead of padding to 32.
     const SubnetKey = struct {
         family: enum(u8) { v4, v6, unparsed },
-        bits: u128,
+        bits: [16]u8,
     };
+
+    comptime {
+        std.debug.assert(@sizeOf(SubnetKey) == 17);
+    }
+
+    // cleanup() rebuilds a shard's map once fewer than 1/8 of its slots are
+    // live, so a burst of distinct addresses does not pin its peak capacity.
+    const shrink_min_capacity = 64;
 
     const Shard = struct {
         mutex: std.Io.Mutex,
@@ -113,7 +123,7 @@ pub const ConnectionLimiter = struct {
         if (shard.ip_buckets.get(ip)) |bucket| {
             return bucket.connection_count < self.max_connections_per_ip;
         }
-        return true;
+        return self.max_connections_per_ip > 0;
     }
 
     /// Bool form of `acquire`.
@@ -129,15 +139,17 @@ pub const ConnectionLimiter = struct {
     pub fn acquire(self: *ConnectionLimiter, raw_ip: []const u8) Admission {
         if (!self.acquireIp(raw_ip)) return .per_ip_limit;
         if (self.subnet.max_connections != 0 and !self.acquireSubnet(self.subnetKey(raw_ip))) {
-            self.releaseIp(raw_ip);
+            _ = self.releaseIp(raw_ip);
             return .per_subnet_limit;
         }
         return .admitted;
     }
 
-    /// Give back both slots taken by a successful `acquire`.
+    /// Give back both slots taken by a successful `acquire`. The subnet slot is
+    /// released only when a per-IP slot was, so an unmatched call cannot free a
+    /// slot held by another address in the subnet.
     pub fn removeConnection(self: *ConnectionLimiter, raw_ip: []const u8) void {
-        self.releaseIp(raw_ip);
+        if (!self.releaseIp(raw_ip)) return;
         if (self.subnet.max_connections != 0) self.releaseSubnet(self.subnetKey(raw_ip));
     }
 
@@ -151,6 +163,9 @@ pub const ConnectionLimiter = struct {
         defer shard.mutex.unlock(io);
 
         const now = nostr.io.timestamp();
+
+        // A cap of 0 admits no one, a new address included.
+        if (self.max_connections_per_ip == 0) return false;
 
         if (shard.ip_buckets.getPtr(ip)) |bucket| {
             if (bucket.connection_count >= self.max_connections_per_ip) return false;
@@ -170,7 +185,8 @@ pub const ConnectionLimiter = struct {
         return true;
     }
 
-    fn releaseIp(self: *ConnectionLimiter, raw_ip: []const u8) void {
+    /// Whether a slot was held and given back.
+    fn releaseIp(self: *ConnectionLimiter, raw_ip: []const u8) bool {
         const io = nostr.io.io();
         var key_buf: [19]u8 = undefined;
         const ip = bucketKey(raw_ip, &key_buf);
@@ -179,25 +195,24 @@ pub const ConnectionLimiter = struct {
         shard.mutex.lockUncancelable(io);
         defer shard.mutex.unlock(io);
 
-        if (shard.ip_buckets.getPtr(ip)) |bucket| {
-            if (bucket.connection_count > 0) {
-                bucket.connection_count -= 1;
-            }
-        }
+        const bucket = shard.ip_buckets.getPtr(ip) orelse return false;
+        if (bucket.connection_count == 0) return false;
+        bucket.connection_count -= 1;
+        return true;
     }
 
     fn subnetKey(self: *const ConnectionLimiter, raw_ip: []const u8) SubnetKey {
-        const addr = ip_match.parseAddr(raw_ip) orelse return .{ .family = .unparsed, .bits = 0 };
+        const addr = ip_match.parseAddr(raw_ip) orelse return .{ .family = .unparsed, .bits = @splat(0) };
         return switch (addr.family) {
-            .v4 => .{ .family = .v4, .bits = addr.prefix(self.subnet.prefix_v4).bits },
-            .v6 => .{ .family = .v6, .bits = addr.prefix(self.subnet.prefix_v6).bits },
+            .v4 => .{ .family = .v4, .bits = @bitCast(addr.prefix(self.subnet.prefix_v4).bits) },
+            .v6 => .{ .family = .v6, .bits = @bitCast(addr.prefix(self.subnet.prefix_v6).bits) },
         };
     }
 
     fn subnetShard(self: *ConnectionLimiter, key: SubnetKey) *Shard {
         var h = std.hash.Wyhash.init(self.shard_seed);
         h.update(&.{@backingInt(key.family)});
-        h.update(std.mem.asBytes(&key.bits));
+        h.update(&key.bits);
         return &self.shards[h.final() % SHARD_COUNT];
     }
 
@@ -273,7 +288,30 @@ pub const ConnectionLimiter = struct {
             for (subnet_remove.items) |key| {
                 _ = shard.subnet_buckets.remove(key);
             }
+
+            shrinkIfSparse(self.allocator, &shard.ip_buckets.unmanaged);
+            shrinkIfSparse(self.allocator, &shard.subnet_buckets);
         }
+    }
+
+    /// Release a map's storage once it is mostly empty: free it outright when
+    /// no entries are left, otherwise move the entries into a map sized to them.
+    /// Keys and values move as they are, so owned keys stay owned. On allocation
+    /// failure the map is left as it was. Caller holds the shard lock.
+    fn shrinkIfSparse(allocator: std.mem.Allocator, map: anytype) void {
+        const cap = map.capacity();
+        const live = map.count();
+        if (cap <= shrink_min_capacity or live >= cap / 8) return;
+        if (live == 0) {
+            map.clearAndFree(allocator);
+            return;
+        }
+        var fresh: @TypeOf(map.*) = .empty;
+        fresh.ensureTotalCapacity(allocator, live) catch return;
+        var iter = map.iterator();
+        while (iter.next()) |entry| fresh.putAssumeCapacityNoClobber(entry.key_ptr.*, entry.value_ptr.*);
+        map.deinit(allocator);
+        map.* = fresh;
     }
 
     pub fn getStats(self: *ConnectionLimiter) Stats {
@@ -462,6 +500,84 @@ test "ConnectionLimiter cleanup reclaims idle subnet buckets" {
     // 2.2.2.0/24 still holds a connection and stays.
     try std.testing.expectEqual(@as(usize, 1), limiter.getStats().tracked_subnets);
     try std.testing.expectEqual(@as(u32, 1), limiter.subnetCountForTest("2.2.2.2"));
+}
+
+test "ConnectionLimiter unmatched removeConnection frees no other address's subnet slot" {
+    var limiter = ConnectionLimiter.init(std.testing.allocator, 1, .{ .max_connections = 4 });
+    defer limiter.deinit();
+
+    try std.testing.expect(limiter.tryAcquireConnection("10.0.0.1"));
+    try std.testing.expect(limiter.tryAcquireConnection("10.0.0.2"));
+    limiter.removeConnection("10.0.0.1");
+    // A second, unmatched release, and one for an address never seen.
+    limiter.removeConnection("10.0.0.1");
+    limiter.removeConnection("10.0.0.99");
+    try std.testing.expectEqual(@as(u32, 1), limiter.subnetCountForTest("10.0.0.2"));
+
+    // 10.0.0.2 still holds one of the four slots, so only three more fit.
+    try std.testing.expect(limiter.tryAcquireConnection("10.0.0.3"));
+    try std.testing.expect(limiter.tryAcquireConnection("10.0.0.4"));
+    try std.testing.expect(limiter.tryAcquireConnection("10.0.0.5"));
+    try std.testing.expectEqual(ConnectionLimiter.Admission.per_subnet_limit, limiter.acquire("10.0.0.6"));
+}
+
+test "ConnectionLimiter per-IP cap of 0 admits no one" {
+    var limiter = ConnectionLimiter.init(std.testing.allocator, 0, .{ .max_connections = 50 });
+    defer limiter.deinit();
+
+    try std.testing.expect(!limiter.canConnect("10.0.0.1"));
+    try std.testing.expectEqual(ConnectionLimiter.Admission.per_ip_limit, limiter.acquire("10.0.0.1"));
+    try std.testing.expectEqual(ConnectionLimiter.Admission.per_ip_limit, limiter.acquire("10.0.0.1"));
+    try std.testing.expectEqual(ConnectionLimiter.Admission.per_ip_limit, limiter.acquire("2001:db8::1"));
+    const stats = limiter.getStats();
+    try std.testing.expectEqual(@as(usize, 0), stats.tracked_ips);
+    try std.testing.expectEqual(@as(usize, 0), stats.tracked_subnets);
+}
+
+test "ConnectionLimiter cleanup shrinks maps left sparse by a burst" {
+    var limiter = ConnectionLimiter.init(std.testing.allocator, 1, .{ .max_connections = 1, .prefix_v4 = 32 });
+    defer limiter.deinit();
+    // Every idle bucket is stale.
+    limiter.cleanup_interval_seconds = -1;
+
+    var buf: [32]u8 = undefined;
+    for (0..4096) |i| {
+        const ip = try std.fmt.bufPrint(&buf, "10.{d}.{d}.1", .{ i / 256, i % 256 });
+        try std.testing.expect(limiter.tryAcquireConnection(ip));
+    }
+    for (2..4096) |i| {
+        const ip = try std.fmt.bufPrint(&buf, "10.{d}.{d}.1", .{ i / 256, i % 256 });
+        limiter.removeConnection(ip);
+    }
+
+    var cap_before: usize = 0;
+    for (&limiter.shards) |*shard| cap_before += shard.ip_buckets.capacity() + shard.subnet_buckets.capacity();
+    limiter.cleanup();
+    var cap_after: usize = 0;
+    for (&limiter.shards) |*shard| cap_after += shard.ip_buckets.capacity() + shard.subnet_buckets.capacity();
+    try std.testing.expect(cap_after * 8 < cap_before);
+
+    // The two live connections survive the rebuild with their counts.
+    const stats = limiter.getStats();
+    try std.testing.expectEqual(@as(usize, 2), stats.tracked_ips);
+    try std.testing.expectEqual(@as(usize, 2), stats.tracked_subnets);
+    try std.testing.expectEqual(ConnectionLimiter.Admission.per_ip_limit, limiter.acquire("10.0.0.1"));
+    try std.testing.expectEqual(@as(u32, 1), limiter.subnetCountForTest("10.0.1.1"));
+
+    limiter.removeConnection("10.0.0.1");
+    limiter.removeConnection("10.0.1.1");
+
+    // A fully drained burst frees each map outright.
+    for (0..4096) |i| {
+        const ip = try std.fmt.bufPrint(&buf, "10.{d}.{d}.1", .{ i / 256, i % 256 });
+        try std.testing.expect(limiter.tryAcquireConnection(ip));
+        limiter.removeConnection(ip);
+    }
+    limiter.cleanup();
+    for (&limiter.shards) |*shard| {
+        try std.testing.expectEqual(@as(u32, 0), shard.ip_buckets.capacity());
+        try std.testing.expectEqual(@as(u32, 0), shard.subnet_buckets.capacity());
+    }
 }
 
 /// Allow/deny lists of addresses and CIDR ranges; see ip_match.zig for the

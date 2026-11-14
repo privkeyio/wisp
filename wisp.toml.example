@@ -75,7 +75,8 @@ idle_seconds = 300
 # metrics_public = false
 # max_connections_per_ip = 10
 # Shared cap for all clients in one subnet (/24 IPv4, /48 IPv6 by default), on
-# top of the per-IP cap; 0 disables. 50 per /24 is generous for CGNAT/mobile.
+# top of the per-IP cap; 0 disables. 50 is a starting point: with many mobile or
+# CGNAT users, watch wisp_connections_rejected_subnet_total and raise it if needed.
 # max_connections_per_subnet = 50
 # subnet_prefix_v4 = 24  # 0-32
 # subnet_prefix_v6 = 48  # 0-128

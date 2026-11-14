@@ -267,6 +267,7 @@ pub const WsConn = struct {
             },
             .per_subnet_limit => {
                 metrics.rateLimited();
+                metrics.connectionRejectedSubnet();
                 return error.TooManyConnectionsPerSubnet;
             },
         }

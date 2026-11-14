@@ -48,6 +48,22 @@ fn envPrefixLen(name: []const u8, value: []const u8, max: u8, current: u8) u8 {
     };
 }
 
+/// max_connections_per_ip must be at least 1: 0 would refuse every client and
+/// silently take the relay offline, and there is no unlimited value.
+fn parsePerIpCap(value: []const u8) !u32 {
+    const cap = try std.fmt.parseInt(u32, value, 10);
+    if (cap == 0) return error.MaxConnectionsPerIpZero;
+    return cap;
+}
+
+fn envPerIpCap(value: []const u8, current: u32) u32 {
+    return parsePerIpCap(value) catch {
+        var buf: [64]u8 = undefined;
+        log.warn("WISP_MAX_CONNECTIONS_PER_IP=\"{s}\" is not a connection count of at least 1; keeping {d}", .{ safeValue(value, &buf), current });
+        return current;
+    };
+}
+
 fn envBool(name: []const u8, value: []const u8, current: bool) bool {
     return parseBool(value) orelse {
         var buf: [64]u8 = undefined;
@@ -372,7 +388,7 @@ pub const Config = struct {
             } else if (std.mem.eql(u8, key, "trusted_proxies")) {
                 self.trusted_proxies = try self.allocString(value);
             } else if (std.mem.eql(u8, key, "max_connections_per_ip")) {
-                self.max_connections_per_ip = try std.fmt.parseInt(u32, value, 10);
+                self.max_connections_per_ip = try parsePerIpCap(value);
             } else if (std.mem.eql(u8, key, "max_connections_per_subnet")) {
                 self.max_connections_per_subnet = try std.fmt.parseInt(u32, value, 10);
             } else if (std.mem.eql(u8, key, "subnet_prefix_v4")) {
@@ -445,7 +461,7 @@ pub const Config = struct {
         if (getenv("WISP_TRUST_PROXY")) |v| self.trust_proxy = envBool("WISP_TRUST_PROXY", v, self.trust_proxy);
         if (getenv("WISP_TRUSTED_PROXIES")) |v| self.trusted_proxies = v;
         if (getenv("WISP_METRICS_PUBLIC")) |v| self.metrics_public = envBool("WISP_METRICS_PUBLIC", v, self.metrics_public);
-        if (getenv("WISP_MAX_CONNECTIONS_PER_IP")) |v| self.max_connections_per_ip = envInt(u32, "WISP_MAX_CONNECTIONS_PER_IP", v, self.max_connections_per_ip);
+        if (getenv("WISP_MAX_CONNECTIONS_PER_IP")) |v| self.max_connections_per_ip = envPerIpCap(v, self.max_connections_per_ip);
         if (getenv("WISP_MAX_CONNECTIONS_PER_SUBNET")) |v| self.max_connections_per_subnet = envInt(u32, "WISP_MAX_CONNECTIONS_PER_SUBNET", v, self.max_connections_per_subnet);
         if (getenv("WISP_SUBNET_PREFIX_V4")) |v| self.subnet_prefix_v4 = envPrefixLen("WISP_SUBNET_PREFIX_V4", v, 32, self.subnet_prefix_v4);
         if (getenv("WISP_SUBNET_PREFIX_V6")) |v| self.subnet_prefix_v6 = envPrefixLen("WISP_SUBNET_PREFIX_V6", v, 128, self.subnet_prefix_v6);
@@ -562,6 +578,13 @@ test "setValue: subnet connection cap and prefix lengths" {
     try std.testing.expectError(error.Overflow, config.setValue("security", "subnet_prefix_v6", "256"));
     try std.testing.expectError(error.InvalidCharacter, config.setValue("security", "subnet_prefix_v4", "/24"));
     try std.testing.expectEqual(@as(u8, 32), config.subnet_prefix_v4);
+
+    try config.setValue("security", "max_connections_per_ip", "1");
+    try std.testing.expectEqual(@as(u32, 1), config.max_connections_per_ip);
+    try std.testing.expectError(error.MaxConnectionsPerIpZero, config.setValue("security", "max_connections_per_ip", "0"));
+    try std.testing.expectEqual(@as(u32, 1), config.max_connections_per_ip);
+    try std.testing.expectEqual(@as(u32, 1), envPerIpCap("0", 1));
+    try std.testing.expectEqual(@as(u32, 25), envPerIpCap("25", 1));
 
     // The environment keeps the current value on a bad one, like envInt.
     try std.testing.expectEqual(@as(u8, 24), envPrefixLen("WISP_SUBNET_PREFIX_V4", "33", 32, 24));
