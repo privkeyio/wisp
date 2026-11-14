@@ -196,37 +196,39 @@ pub const App = struct {
 
     fn clientIp(app: App, req: *httpz.Request, res: *httpz.Response, buf: *[64]u8) []const u8 {
         const socket_ip = formatPeerIp(res.conn.address, buf);
-        if (!app.config.trust_proxy) {
-            warnIgnoredForwarded(socket_ip, req.header("x-forwarded-for"), req.header("x-real-ip"));
-            return socket_ip;
-        }
+        const xff = req.header("x-forwarded-for");
+        const xrip = req.header("x-real-ip");
         // Only honor forwarded headers when the socket peer is a configured trusted
         // proxy; otherwise an attacker hitting the backend directly could forge them
         // to spoof any client IP. An empty trusted_proxies set trusts any peer.
-        if (!app.trusted_proxies.isTrustedProxy(socket_ip)) return socket_ip;
-        const xff = req.header("x-forwarded-for");
-        const xrip = req.header("x-real-ip");
-        return rate_limiter.extractClientIp(xff, xrip, socket_ip, true);
+        if (app.config.trust_proxy and app.trusted_proxies.isTrustedProxy(socket_ip)) {
+            return rate_limiter.extractClientIp(xff, xrip, socket_ip, true);
+        }
+        warnIgnoredForwarded(app.config.trust_proxy, socket_ip, xff, xrip);
+        return socket_ip;
     }
 
-    /// With trust_proxy off, a forwarded header usually means a reverse proxy in
-    /// front of wisp, so every client shares the proxy's IP for all per-IP
-    /// controls. Counted on every such request, logged at most once per
-    /// forwarded_warn_interval_s process-wide.
-    fn warnIgnoredForwarded(socket_ip: []const u8, xff: ?[]const u8, xrip: ?[]const u8) void {
-        const header = ignoredForwardedHeader(xff, xrip) orelse return;
-        metrics.forwardedHeaderIgnored();
-        if (!claimWarnSlot(&forwarded_warn_last, nostr.io.timestamp(), forwarded_warn_interval_s)) return;
+    /// A forwarded header from a peer whose headers are not honored usually
+    /// means a reverse proxy wisp was not told about, so every client shares the
+    /// proxy's IP for all per-IP controls.
+    fn warnIgnoredForwarded(trust_proxy: bool, socket_ip: []const u8, xff: ?[]const u8, xrip: ?[]const u8) void {
+        if (xff == null and xrip == null) return;
+        const w = ignoredForwarded(trust_proxy, socket_ip, xff, xrip, nostr.io.timestamp(), &forwarded_warn_slots) orelse return;
         var peer_buf: [64]u8 = undefined;
         var value_buf: [64]u8 = undefined;
-        log.warn("request from {s} carries {s} ({s}) but trust_proxy is off; all clients behind this proxy share " ++
-            "per-IP limits (events_per_minute, queries_per_minute, max_connections_per_ip) and the IP allow/deny lists. " ++
-            "If this is your reverse proxy, set trust_proxy = true and trusted_proxies in [security]; see docs/deployment.md. " ++
-            "Logged at most hourly; wisp_forwarded_header_ignored_total counts every such request.", .{
-            safeIp(socket_ip, &peer_buf),
-            header.name,
-            ip_match.safeEntry(header.value, &value_buf),
-        });
+        const peer = safeIp(socket_ip, &peer_buf);
+        const value = quotableEntry(w.header.value, &value_buf);
+        switch (w.kind) {
+            .ignored_proxy => log.warn("request from {s} carries {s} \"{s}\" but trust_proxy is off, so all clients behind this proxy share " ++
+                "per-IP limits (events_per_minute, queries_per_minute, max_connections_per_ip) and the IP allow/deny lists. " ++
+                "If {s} is your reverse proxy, set trust_proxy = true AND trusted_proxies = \"{s}\" in [security]; " ++
+                "trust_proxy with an empty trusted_proxies trusts every peer, so clients reaching the relay port directly could spoof their IP. " ++
+                "See docs/deployment.md. " ++ forwarded_warn_suffix, .{ peer, w.header.name, value, peer, peer }),
+            .ignored_public => log.warn("a client at {s} sent {s} \"{s}\"; trust_proxy is off, so it was ignored. " ++
+                "If you don't run a reverse proxy this is client-supplied and can be ignored. " ++ forwarded_warn_suffix, .{ peer, w.header.name, value }),
+            .untrusted_proxy => log.warn("forwarded header {s} \"{s}\" from {s}, which is not in trusted_proxies, was ignored and the request counted against {s}. " ++
+                "If it is your proxy, add it to trusted_proxies in [security]; see docs/deployment.md. " ++ forwarded_warn_suffix, .{ w.header.name, value, peer, peer }),
+        }
     }
 
     // Forwarded-header IPs are never validated as addresses (they key per-IP
@@ -399,7 +401,15 @@ fn metricsAllowed(metrics_public: bool, peer_ip: []const u8, has_forwarded_heade
 }
 
 const forwarded_warn_interval_s: i64 = 3600;
-var forwarded_warn_last = std.atomic.Value(i64).init(0);
+const forwarded_warn_suffix = "Logged at most hourly per peer class; wisp_forwarded_header_ignored_total counts every ignored forwarded header.";
+
+/// One throttle slot per peer class, so a directly connecting client cannot
+/// use up the slot that would report a misconfigured proxy.
+const ForwardedWarnSlots = struct {
+    proxy: std.atomic.Value(i64) = .init(0),
+    public: std.atomic.Value(i64) = .init(0),
+};
+var forwarded_warn_slots: ForwardedWarnSlots = .{};
 
 const ForwardedHeader = struct { name: []const u8, value: []const u8 };
 
@@ -410,12 +420,79 @@ fn ignoredForwardedHeader(xff: ?[]const u8, xrip: ?[]const u8) ?ForwardedHeader 
     return null;
 }
 
+const ForwardedWarnKind = enum {
+    /// trust_proxy off, peer could be a proxy: advise trust_proxy + trusted_proxies.
+    ignored_proxy,
+    /// trust_proxy off, public peer: most likely a client setting the header itself.
+    ignored_public,
+    /// trust_proxy on, proxy-plausible peer missing from a non-empty trusted_proxies.
+    untrusted_proxy,
+};
+
+const ForwardedWarning = struct { kind: ForwardedWarnKind, header: ForwardedHeader };
+
+/// Called for a request whose forwarded headers are not honored. Counts it if
+/// it carries one, and returns the warning to log unless there is nothing worth
+/// saying or the peer class's slot was claimed within the last interval. A
+/// public peer under trust_proxy is what trusted_proxies exists to refuse, so
+/// it is counted but not logged.
+fn ignoredForwarded(
+    trust_proxy: bool,
+    socket_ip: []const u8,
+    xff: ?[]const u8,
+    xrip: ?[]const u8,
+    now: i64,
+    slots: *ForwardedWarnSlots,
+) ?ForwardedWarning {
+    const header = ignoredForwardedHeader(xff, xrip) orelse return null;
+    metrics.forwardedHeaderIgnored();
+    const plausible = isProxyPlausible(socket_ip);
+    const kind: ForwardedWarnKind = if (trust_proxy)
+        (if (plausible) .untrusted_proxy else return null)
+    else if (plausible) .ignored_proxy else .ignored_public;
+    const slot = if (plausible) &slots.proxy else &slots.public;
+    if (!claimWarnSlot(slot, now, forwarded_warn_interval_s)) return null;
+    return .{ .kind = kind, .header = header };
+}
+
+/// Whether a socket peer could be a reverse proxy in front of wisp: loopback,
+/// RFC 1918, CGNAT 100.64/10, link-local, or IPv6 ULA fc00::/7, including the
+/// IPv4-mapped forms. A public or unparseable peer is treated as a client.
+fn isProxyPlausible(ip: []const u8) bool {
+    const addr = ip_match.parseAddr(ip) orelse return false;
+    return switch (addr.family) {
+        .v4 => blk: {
+            const a: u32 = @truncate(addr.bits);
+            break :blk a >> 24 == 127 or // 127.0.0.0/8
+                a >> 24 == 10 or // 10.0.0.0/8
+                a >> 20 == 0xac1 or // 172.16.0.0/12
+                a >> 16 == 0xc0a8 or // 192.168.0.0/16
+                a >> 22 == (100 << 2 | 1) or // 100.64.0.0/10
+                a >> 16 == 0xa9fe; // 169.254.0.0/16
+        },
+        .v6 => addr.bits == 1 or // ::1
+            addr.bits >> 121 == 0x7e or // fc00::/7
+            addr.bits >> 118 == 0x3fa, // fe80::/10
+    };
+}
+
+/// `entry` made safe to log inside double quotes: non-printable bytes and '"'
+/// are replaced so a forged header cannot fake the end of the quoted value.
+fn quotableEntry(entry: []const u8, buf: *[64]u8) []const u8 {
+    const len = ip_match.safeEntry(entry, buf).len;
+    for (buf[0..len]) |*c| {
+        if (c.* == '"') c.* = '?';
+    }
+    return buf[0..len];
+}
+
 /// Lock-free throttle: true for at most one caller per `interval` seconds.
 /// `last` starts at 0 so the first call fires; a racing caller that loses the
-/// swap stays quiet, and a clock stepping backwards only delays the next one.
+/// swap stays quiet. A clock that steps backwards claims the slot rather than
+/// staying silent until it catches up with `last`.
 fn claimWarnSlot(last: *std.atomic.Value(i64), now: i64, interval: i64) bool {
     const prev = last.load(.monotonic);
-    if (now - prev < interval) return false;
+    if (now >= prev and now - prev < interval) return false;
     return last.cmpxchgStrong(prev, now, .monotonic, .monotonic) == null;
 }
 
@@ -437,9 +514,73 @@ test claimWarnSlot {
     try std.testing.expect(!claimWarnSlot(&last, 1_700_003_599, 3600));
     try std.testing.expect(claimWarnSlot(&last, 1_700_003_600, 3600));
     try std.testing.expectEqual(@as(i64, 1_700_003_600), last.load(.monotonic));
-    // A clock that steps backwards suppresses rather than spams.
+    // A clock that steps backwards claims the slot once, then throttles from there.
+    try std.testing.expect(claimWarnSlot(&last, 1_699_000_000, 3600));
+    try std.testing.expectEqual(@as(i64, 1_699_000_000), last.load(.monotonic));
     try std.testing.expect(!claimWarnSlot(&last, 1_699_000_000, 3600));
-    try std.testing.expect(claimWarnSlot(&last, 1_700_007_200, 3600));
+    try std.testing.expect(!claimWarnSlot(&last, 1_699_003_599, 3600));
+    try std.testing.expect(claimWarnSlot(&last, 1_699_003_600, 3600));
+}
+
+test isProxyPlausible {
+    const plausible = [_][]const u8{
+        "127.0.0.1",        "127.255.0.9",     "10.0.3.1",   "172.16.0.1",
+        "172.31.255.1",     "192.168.1.1",     "100.64.0.1", "100.127.255.254",
+        "169.254.1.1",      "::1",             "fc00::1",    "fd12:3456::1",
+        "fe80::1",          "fe80::1%eth0",    "febf::1",    "::ffff:10.0.3.1",
+        "::ffff:127.0.0.1", "::ffff:c0a8:101",
+    };
+    for (plausible) |ip| try std.testing.expect(isProxyPlausible(ip));
+    const public = [_][]const u8{
+        "1.2.3.4",     "8.8.8.8",        "172.15.255.255", "172.32.0.1",
+        "192.169.0.1", "100.63.255.255", "100.128.0.1",    "169.255.0.1",
+        "11.0.0.1",    "2001:db8::1",    "fec0::1",        "fbff::1",
+        "::",          "::2",            "::ffff:1.2.3.4", "unknown",
+        "",
+    };
+    for (public) |ip| try std.testing.expect(!isProxyPlausible(ip));
+}
+
+test quotableEntry {
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("1.2.3.4, 10.0.0.1", quotableEntry("1.2.3.4, 10.0.0.1", &buf));
+    try std.testing.expectEqualStrings("a?b??", quotableEntry("a\"b\x1b\n", &buf));
+}
+
+test ignoredForwarded {
+    const now: i64 = 1_700_000_000;
+    var slots: ForwardedWarnSlots = .{};
+
+    // No header: not counted, no warning, no slot claimed.
+    var before = metrics.forwardedHeaderIgnoredTotal();
+    try std.testing.expect(ignoredForwarded(false, "10.0.3.1", null, null, now, &slots) == null);
+    try std.testing.expect(ignoredForwarded(true, "10.0.3.1", null, null, now, &slots) == null);
+    try std.testing.expectEqual(before, metrics.forwardedHeaderIgnoredTotal());
+    try std.testing.expectEqual(@as(i64, 0), slots.proxy.load(.monotonic));
+
+    // A public client takes the public slot only; the proxy warning still fires.
+    before = metrics.forwardedHeaderIgnoredTotal();
+    const pub_w = ignoredForwarded(false, "203.0.113.7", "1.1.1.1", null, now, &slots).?;
+    try std.testing.expectEqual(ForwardedWarnKind.ignored_public, pub_w.kind);
+    try std.testing.expect(ignoredForwarded(false, "203.0.113.8", null, "1.1.1.1", now, &slots) == null);
+    const proxy_w = ignoredForwarded(false, "10.0.3.1", null, "198.51.100.2", now, &slots).?;
+    try std.testing.expectEqual(ForwardedWarnKind.ignored_proxy, proxy_w.kind);
+    try std.testing.expectEqualStrings("X-Real-IP", proxy_w.header.name);
+    try std.testing.expectEqualStrings("198.51.100.2", proxy_w.header.value);
+    try std.testing.expect(ignoredForwarded(false, "10.0.3.1", "198.51.100.2", null, now + 1, &slots) == null);
+    try std.testing.expectEqual(before + 4, metrics.forwardedHeaderIgnoredTotal());
+
+    // trust_proxy on, peer not in trusted_proxies: a plausible proxy is warned
+    // about (sharing the proxy slot), a public peer is counted but not logged.
+    slots = .{};
+    before = metrics.forwardedHeaderIgnoredTotal();
+    try std.testing.expect(ignoredForwarded(true, "203.0.113.7", "1.1.1.1", null, now, &slots) == null);
+    try std.testing.expectEqual(@as(i64, 0), slots.public.load(.monotonic));
+    const untrusted = ignoredForwarded(true, "::ffff:10.0.3.1", "198.51.100.2", null, now, &slots).?;
+    try std.testing.expectEqual(ForwardedWarnKind.untrusted_proxy, untrusted.kind);
+    try std.testing.expect(ignoredForwarded(false, "192.168.1.1", "198.51.100.2", null, now, &slots) == null);
+    try std.testing.expect(ignoredForwarded(true, "fd00::1", "198.51.100.2", null, now + forwarded_warn_interval_s, &slots) != null);
+    try std.testing.expectEqual(before + 4, metrics.forwardedHeaderIgnoredTotal());
 }
 
 test "claimWarnSlot admits one caller under contention" {

@@ -29,17 +29,31 @@ sudo systemctl restart caddy
 
 Your relay is now live at `wss://relay.yourdomain.com`.
 
-> **Behind a proxy:** set `trust_proxy = true` in the `[security]` section of `wisp.toml` so
-> per-IP connection limits and IP allow/deny lists see the real client IP from Caddy's
-> `X-Forwarded-For` header instead of `127.0.0.1`.
+> **Behind a proxy:** set `trust_proxy = true` and `trusted_proxies = "127.0.0.1"` (the
+> proxy's address) in the `[security]` section of `wisp.toml` so per-IP connection limits and
+> IP allow/deny lists see the real client IP from Caddy's `X-Forwarded-For` header instead of
+> `127.0.0.1`. `trust_proxy` with an empty `trusted_proxies` honors the header from every peer,
+> so a client that reaches the relay port directly can spoof any IP.
 >
-> Without it, every client shares the proxy's IP, so all per-IP controls become relay-wide:
-> not only `max_connections_per_ip`, but also the `events_per_minute` and `queries_per_minute`
-> rate limits and the IP allow/deny lists. One busy client then gets everyone `rate-limited`.
-> wisp logs a warning (at most hourly) when a request carries `X-Forwarded-For` or `X-Real-IP`
-> while `trust_proxy` is off, and counts such requests in
-> `wisp_forwarded_header_ignored_total` on `/metrics`. Also set `trusted_proxies` to the
-> proxy's address so clients that reach the relay port directly cannot spoof their IP.
+> Without `trust_proxy`, every client shares the proxy's IP, so all per-IP controls become
+> relay-wide: not only `max_connections_per_ip`, but also the `events_per_minute` and
+> `queries_per_minute` rate limits and the IP allow/deny lists. One busy client then gets
+> everyone `rate-limited`. wisp warns when it ignores an `X-Forwarded-For` or `X-Real-IP`
+> header, and the wording depends on the socket peer:
+>
+> - From a peer that could be a proxy (loopback, RFC 1918, CGNAT `100.64.0.0/10`,
+>   link-local, IPv6 ULA `fc00::/7`) while `trust_proxy` is off, the warning names the peer
+>   and suggests `trust_proxy = true` together with `trusted_proxies` set to it.
+> - From such a peer while `trust_proxy` is on but the peer is missing from a non-empty
+>   `trusted_proxies` (for example a container gateway such as `10.0.3.1`), the warning says
+>   the peer is not in `trusted_proxies`; add it if it is your proxy.
+> - From a public peer while `trust_proxy` is off, the warning only notes that a client sent
+>   the header. If you don't run a reverse proxy this is client-supplied and can be ignored.
+>   A public peer missing from `trusted_proxies` is not logged.
+>
+> Each kind of peer (could-be-proxy, public) is logged at most once an hour, so a direct
+> client cannot crowd out the proxy warning. `wisp_forwarded_header_ignored_total` on
+> `/metrics` counts every ignored forwarded header.
 
 ## Limiting connections per source
 

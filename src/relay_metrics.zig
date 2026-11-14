@@ -46,6 +46,10 @@ pub fn forwardedHeaderIgnored() void {
     _ = forwarded_header_ignored.fetchAdd(1, .monotonic);
 }
 
+pub fn forwardedHeaderIgnoredTotal() u64 {
+    return forwarded_header_ignored.load(.monotonic);
+}
+
 fn metric(w: anytype, name: []const u8, help: []const u8, kind: []const u8, value: u64) !void {
     try w.print("# HELP {s} {s}\n# TYPE {s} {s}\n{s} {d}\n", .{ name, help, name, kind, name, value });
 }
@@ -61,7 +65,7 @@ pub fn write(w: anytype, active_connections: u64) !void {
     try metric(w, "wisp_req_total", "REQ subscription messages received", "counter", reqs_total.load(.monotonic));
     try metric(w, "wisp_rate_limited_total", "Connections/events rejected by rate or connection limits", "counter", rate_limited.load(.monotonic));
     try metric(w, "wisp_query_rate_limited_total", "Query messages (REQ/COUNT/NEG_OPEN) rejected by the query rate limit", "counter", query_rate_limited.load(.monotonic));
-    try metric(w, "wisp_forwarded_header_ignored_total", "Requests carrying X-Forwarded-For or X-Real-IP while trust_proxy is off", "counter", forwarded_header_ignored.load(.monotonic));
+    try metric(w, "wisp_forwarded_header_ignored_total", "Requests whose X-Forwarded-For or X-Real-IP was ignored because trust_proxy is off or the peer is not in trusted_proxies", "counter", forwarded_header_ignored.load(.monotonic));
 }
 
 test write {
