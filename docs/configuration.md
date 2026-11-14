@@ -180,16 +180,30 @@ instead leave it stopped.
 | TOML | Env | Type | Default | Description |
 |------|-----|------|---------|-------------|
 | `trust_proxy` | `WISP_TRUST_PROXY` | bool | `false` | Honor `X-Forwarded-For` / `X-Real-IP` for the client IP. Enable only behind a reverse proxy whose backend port is not directly reachable, or clients can spoof their IP. |
-| `trusted_proxies` | `WISP_TRUSTED_PROXIES` | csv | (empty) | IPs/prefixes of proxies whose forwarded headers are trusted. Empty with `trust_proxy=true` trusts any peer. |
+| `trusted_proxies` | `WISP_TRUSTED_PROXIES` | csv | (empty) | IPs/CIDR ranges of proxies whose forwarded headers are trusted. Empty with `trust_proxy=true` trusts any peer. |
 | `metrics_public` | `WISP_METRICS_PUBLIC` | bool | `false` | Serve `/metrics` to any client. When `false`, only direct requests whose socket peer is 127.0.0.0/8 or `::1` (including `::ffff:127.x`) and that carry no `X-Forwarded-For`/`X-Real-IP` header may scrape it; others get 403. |
 | `max_connections_per_ip` | `WISP_MAX_CONNECTIONS_PER_IP` | u32 | `10` | Per-IP concurrent connection cap, applied at the WebSocket upgrade. A connection that never sends a request does not reach it; those are closed by the 10s request timeout instead. To cap concurrent TCP connections per source, see [Limiting connections per source](deployment.md#limiting-connections-per-source). |
-| `ip_whitelist` | `WISP_IP_WHITELIST` | csv | (empty) | If set, only these IPs/prefixes may connect. |
-| `ip_blacklist` | `WISP_IP_BLACKLIST` | csv | (empty) | These IPs/prefixes are refused. |
+| `ip_whitelist` | `WISP_IP_WHITELIST` | csv | (empty) | If set, only these IPs/CIDR ranges may connect. |
+| `ip_blacklist` | `WISP_IP_BLACKLIST` | csv | (empty) | These IPs/CIDR ranges are refused. |
 
-IP list entries match exactly unless they end in `.` (IPv4 prefix) or `:` (IPv6 prefix), e.g.
-`10.0.0.` matches `10.0.0.0`–`10.0.0.255`. CIDR notation and `*` wildcards are not supported: an
-entry like `10.0.0.0/8` or `192.168.*` is rejected at startup with a warning naming it, rather
-than being accepted and then matching nothing. The same applies to `trusted_proxies`.
+IP list entries are a single address (`10.0.0.5`, `2001:db8::1`) or a CIDR range
+(`185.220.100.0/22`, `2001:db8::/32`, `0.0.0.0/0`). Bits past the prefix length are ignored, so
+`10.1.2.3/8` means `10.0.0.0/8`. An IPv4 rule also matches the same client seen as an
+IPv4-mapped IPv6 address (`::ffff:185.220.101.1`); IPv6 rules match only IPv6 clients, so `::/0`
+does not cover IPv4.
+
+Older prefix entries ending in `.` or `:` still work and are read as the equivalent CIDR range:
+`10.` is `10.0.0.0/8`, `192.168.` is `192.168.0.0/16`, `185.220.101.` is `185.220.101.0/24`, and
+each IPv6 group before the trailing `:` is 16 bits, so `2001:db8:` is `2001:db8::/32`. A mapped
+prefix is the IPv4 range it embeds: `::ffff:185.220.101.` is `185.220.101.0/24`. An IPv6 prefix
+containing `::` (`2001:db8::1:`) is no longer accepted, because its length is ambiguous; write it
+as a CIDR range instead.
+
+An entry that is none of these, such as `192.168.*`, `10.0.0.0/33` or a hostname, is rejected at
+startup with a warning naming it rather than being accepted and then matching nothing. If every
+`ip_whitelist` entry is rejected the allow list stays enabled and admits no one. The same rules
+apply to `trusted_proxies` and to the NIP-86 `blockip` method, which answers `400` for an entry it
+cannot parse.
 
 ### `[spider]`
 

@@ -4,6 +4,9 @@ const Txn = @import("lmdb.zig").Txn;
 const Dbi = @import("lmdb.zig").Dbi;
 const Cursor = @import("lmdb.zig").Cursor;
 const nostr = @import("nostr.zig");
+const ip_match = @import("ip_match.zig");
+
+const log = std.log.scoped(.management_store);
 
 pub const ManagementStore = struct {
     lmdb: *Lmdb,
@@ -20,7 +23,18 @@ pub const ManagementStore = struct {
 
     mutex: std.Io.Mutex,
 
+    /// Parsed copy of `blocked_ips`, rebuilt on every change so the
+    /// per-connection check never touches LMDB or parses a rule.
+    ip_rules: std.ArrayListUnmanaged(ip_match.Rule),
+    ip_rules_mutex: std.Io.Mutex,
+
     pub fn init(allocator: std.mem.Allocator, lmdb: *Lmdb) !ManagementStore {
+        var self = try open(allocator, lmdb);
+        try self.reloadIpRules();
+        return self;
+    }
+
+    fn open(allocator: std.mem.Allocator, lmdb: *Lmdb) !ManagementStore {
         var txn = try lmdb.beginTxn(false);
         errdefer txn.abort();
 
@@ -47,7 +61,13 @@ pub const ManagementStore = struct {
             .blocked_ips = blocked_ips,
             .relay_settings = relay_settings,
             .mutex = .init,
+            .ip_rules = .empty,
+            .ip_rules_mutex = .init,
         };
+    }
+
+    pub fn deinit(self: *ManagementStore) void {
+        self.ip_rules.deinit(self.allocator);
     }
 
     /// Writes `key` to `put_dbi` and removes it from `clear_dbi` in one
@@ -360,15 +380,36 @@ pub const ManagementStore = struct {
         return list.toOwnedSlice(allocator);
     }
 
+    /// `ip` is an address, a CIDR range, or a legacy prefix ("10.0.0." or the
+    /// older dotless "10.0.0"); see ip_match.zig. The key is stored as given so
+    /// unblockip with the same text removes it.
     pub fn blockIp(self: *ManagementStore, ip: []const u8, reason: []const u8) !void {
+        const rule = ip_match.parseRule(ip, .allow_dotless_prefix) orelse return error.InvalidIpRule;
+
         const io = nostr.io.io();
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
-        var txn = try self.lmdb.beginTxn(false);
-        errdefer txn.abort();
-        try txn.put(self.blocked_ips, ip, reason);
-        try txn.commit();
+        // Reserve before committing so a stored block is always enforced.
+        // `ip_rules` only changes under `mutex`, so the capacity is still there.
+        {
+            self.ip_rules_mutex.lockUncancelable(io);
+            defer self.ip_rules_mutex.unlock(io);
+            try self.ip_rules.ensureUnusedCapacity(self.allocator, 1);
+        }
+        {
+            var txn = try self.lmdb.beginTxn(false);
+            errdefer txn.abort();
+            try txn.put(self.blocked_ips, ip, reason);
+            try txn.commit();
+        }
+
+        self.ip_rules_mutex.lockUncancelable(io);
+        defer self.ip_rules_mutex.unlock(io);
+        for (self.ip_rules.items) |r| {
+            if (std.meta.eql(r, rule)) return;
+        }
+        self.ip_rules.appendAssumeCapacity(rule);
     }
 
     pub fn unblockIp(self: *ManagementStore, ip: []const u8) !void {
@@ -376,25 +417,55 @@ pub const ManagementStore = struct {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
-        var txn = try self.lmdb.beginTxn(false);
-        errdefer txn.abort();
-        txn.delete(self.blocked_ips, ip) catch {};
-        try txn.commit();
+        {
+            var txn = try self.lmdb.beginTxn(false);
+            errdefer txn.abort();
+            txn.delete(self.blocked_ips, ip) catch {};
+            try txn.commit();
+        }
+        // The delete is committed; until the next rebuild the old rule keeps
+        // blocking, which fails closed.
+        self.reloadIpRules() catch |err| {
+            var buf: [64]u8 = undefined;
+            log.err("unblocked IP entry \"{s}\" is still enforced in memory: rebuilding rules failed: {s}", .{ ip_match.safeEntry(ip, &buf), @errorName(err) });
+        };
     }
 
     pub fn isIpBlocked(self: *ManagementStore, ip: []const u8) bool {
-        var txn = self.lmdb.beginTxn(true) catch return false;
-        defer txn.abort();
+        const addr = ip_match.parseAddr(ip) orelse return false;
+        const io = nostr.io.io();
+        self.ip_rules_mutex.lockUncancelable(io);
+        defer self.ip_rules_mutex.unlock(io);
+        return ip_match.anyMatch(self.ip_rules.items, addr);
+    }
 
-        if ((txn.get(self.blocked_ips, ip) catch null) != null) return true;
+    /// Rebuild `ip_rules` from LMDB. Keys that do not parse (stored before
+    /// blockip validated its input) are skipped with a warning.
+    fn reloadIpRules(self: *ManagementStore) !void {
+        var rules: std.ArrayListUnmanaged(ip_match.Rule) = .empty;
+        errdefer rules.deinit(self.allocator);
+        {
+            var txn = try self.lmdb.beginTxn(true);
+            defer txn.abort();
+            var cursor = try txn.cursor(self.blocked_ips);
+            defer cursor.close();
 
-        var pos: usize = 0;
-        while (std.mem.indexOfScalarPos(u8, ip, pos, '.')) |dot| {
-            if ((txn.get(self.blocked_ips, ip[0..dot]) catch null) != null) return true;
-            pos = dot + 1;
+            var entry = try cursor.get(.first);
+            while (entry) |e| : (entry = try cursor.get(.next)) {
+                const rule = ip_match.parseRule(e.key, .allow_dotless_prefix) orelse {
+                    var buf: [64]u8 = undefined;
+                    log.warn("blocked IP entry \"{s}\" is not a valid address, CIDR range or prefix and is ignored; remove it with unblockip", .{ip_match.safeEntry(e.key, &buf)});
+                    continue;
+                };
+                try rules.append(self.allocator, rule);
+            }
         }
 
-        return false;
+        const io = nostr.io.io();
+        self.ip_rules_mutex.lockUncancelable(io);
+        defer self.ip_rules_mutex.unlock(io);
+        self.ip_rules.deinit(self.allocator);
+        self.ip_rules = rules;
     }
 
     pub fn listBlockedIps(self: *ManagementStore, allocator: std.mem.Allocator) ![]IpEntry {
@@ -489,3 +560,78 @@ pub const ManagementStore = struct {
         allocator.free(entries);
     }
 };
+
+test "blocked IPs: CIDR, IPv6 subnets, legacy keys and malformed input" {
+    const testing = std.testing;
+    const io = nostr.io.io();
+    const cwd = std.Io.Dir.cwd();
+    const db_path = "./test_mgmt_blocked_ips_db";
+    defer {
+        cwd.deleteFile(io, db_path) catch {};
+        cwd.deleteFile(io, db_path ++ "-lock") catch {};
+    }
+
+    var lmdb = try Lmdb.init(testing.allocator, db_path, 10, .none);
+    defer lmdb.deinit();
+
+    // Keys written before CIDR support: the dotless prefix form blockip used to
+    // match on, and junk that was stored unvalidated.
+    {
+        var setup = try ManagementStore.init(testing.allocator, &lmdb);
+        defer setup.deinit();
+        var txn = try lmdb.beginTxn(false);
+        errdefer txn.abort();
+        try txn.put(setup.blocked_ips, "45.9.148", "legacy dotless");
+        try txn.put(setup.blocked_ips, "::ffff:91.92", "legacy mapped dotless");
+        try txn.put(setup.blocked_ips, "not-an-ip", "junk");
+        try txn.commit();
+    }
+
+    var mgmt = try ManagementStore.init(testing.allocator, &lmdb);
+    defer mgmt.deinit();
+
+    // Legacy dotless keys are prefixes; junk is skipped rather than failing init.
+    try testing.expectEqual(@as(usize, 2), mgmt.ip_rules.items.len);
+    try testing.expect(mgmt.isIpBlocked("45.9.148.7"));
+    try testing.expect(!mgmt.isIpBlocked("45.9.149.7"));
+    try testing.expect(mgmt.isIpBlocked("91.92.1.1"));
+    try testing.expect(mgmt.isIpBlocked("::ffff:91.92.1.1"));
+    try mgmt.unblockIp("::ffff:91.92");
+    try testing.expect(!mgmt.isIpBlocked("91.92.1.1"));
+
+    try mgmt.blockIp("185.220.100.0/22", "tor exits");
+    try mgmt.blockIp("2001:db8::/32", "");
+    try mgmt.blockIp("10.0.0.", "legacy trailing dot");
+    try mgmt.blockIp("1.2.3.4", "");
+
+    try testing.expect(mgmt.isIpBlocked("185.220.103.255"));
+    try testing.expect(!mgmt.isIpBlocked("185.220.104.0"));
+    try testing.expect(mgmt.isIpBlocked("::ffff:185.220.101.1"));
+    try testing.expect(mgmt.isIpBlocked("2001:db8:abcd::1"));
+    try testing.expect(!mgmt.isIpBlocked("2001:db9::1"));
+    try testing.expect(mgmt.isIpBlocked("10.0.0.200"));
+    try testing.expect(mgmt.isIpBlocked("1.2.3.4"));
+    try testing.expect(!mgmt.isIpBlocked("1.2.3.40"));
+    try testing.expect(!mgmt.isIpBlocked("unknown"));
+
+    try testing.expectError(error.InvalidIpRule, mgmt.blockIp("10.0.0.0/33", ""));
+    try testing.expectError(error.InvalidIpRule, mgmt.blockIp("192.168.*", ""));
+    try testing.expectError(error.InvalidIpRule, mgmt.blockIp("", ""));
+
+    // Re-blocking an entry does not duplicate its rule; unblocking removes it.
+    try mgmt.blockIp("1.2.3.4", "again");
+    try testing.expectEqual(@as(usize, 5), mgmt.ip_rules.items.len);
+    try mgmt.unblockIp("185.220.100.0/22");
+    try testing.expect(!mgmt.isIpBlocked("185.220.101.1"));
+    // Junk keys can still be removed.
+    try mgmt.unblockIp("not-an-ip");
+    const entries = try mgmt.listBlockedIps(testing.allocator);
+    defer ManagementStore.freeIpEntries(entries, testing.allocator);
+    try testing.expectEqual(@as(usize, 4), entries.len);
+
+    // Rules are rebuilt from LMDB on startup.
+    var reopened = try ManagementStore.init(testing.allocator, &lmdb);
+    defer reopened.deinit();
+    try testing.expect(reopened.isIpBlocked("2001:db8::5"));
+    try testing.expect(!reopened.isIpBlocked("185.220.101.1"));
+}

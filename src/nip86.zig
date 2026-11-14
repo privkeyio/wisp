@@ -359,7 +359,10 @@ pub const Nip86Handler = struct {
         var parsed = nip86.ParsedParams.parseStrings(params, 2, self.allocator);
         defer parsed.deinit();
         const ip = parsed.values[0] orelse return nip86.Response.badRequest("{\"error\":\"missing ip parameter\"}");
-        self.mgmt_store.blockIp(ip, parsed.values[1] orelse "") catch return nip86.Response.internalError();
+        self.mgmt_store.blockIp(ip, parsed.values[1] orelse "") catch |err| return switch (err) {
+            error.InvalidIpRule => nip86.Response.badRequest("{\"error\":\"invalid ip: expected an address, CIDR range or prefix ending in '.' or ':'\"}"),
+            else => nip86.Response.internalError(),
+        };
         return nip86.Response.ok("{\"result\":true}");
     }
 
@@ -464,6 +467,7 @@ test "nip86 dispatch routing, param guards, and store round-trip" {
     var lmdb = try Lmdb.init(testing.allocator, db_path, 10, .none);
     defer lmdb.deinit();
     var mgmt = try ManagementStore.init(testing.allocator, &lmdb);
+    defer mgmt.deinit();
 
     var config = Config.defaults();
     var handler = Nip86Handler.init(testing.allocator, &config, &mgmt);
@@ -484,6 +488,12 @@ test "nip86 dispatch routing, param guards, and store round-trip" {
 
     // A malformed pubkey is rejected before the store is touched.
     try testing.expectEqual(@as(u16, 400), handler.dispatch("banpubkey", "[\"notahexpubkey\"]").status);
+
+    // blockip takes CIDR and rejects what can never match.
+    try testing.expectEqual(@as(u16, 200), handler.dispatch("blockip", "[\"185.220.100.0/22\",\"tor\"]").status);
+    try testing.expect(mgmt.isIpBlocked("185.220.102.3"));
+    try testing.expectEqual(@as(u16, 400), handler.dispatch("blockip", "[\"10.0.0.0/33\"]").status);
+    try testing.expectEqual(@as(u16, 400), handler.dispatch("blockip", "[\"192.168.*\"]").status);
 
     // A valid pubkey bans successfully and the store reflects it.
     const pk_hex = "00000000000000000000000000000000000000000000000000000000000000bb";
@@ -509,6 +519,7 @@ test "nip86 ban and allow lists are exclusive and disallowkind is a deny list" {
     var lmdb = try Lmdb.init(testing.allocator, db_path, 10, .none);
     defer lmdb.deinit();
     var mgmt = try ManagementStore.init(testing.allocator, &lmdb);
+    defer mgmt.deinit();
 
     var config = Config.defaults();
     var handler = Nip86Handler.init(testing.allocator, &config, &mgmt);
@@ -602,6 +613,7 @@ test "rejection refuses an event when the policy cannot be read" {
     var store = try Store.init(testing.allocator, &lmdb);
     defer store.deinit();
     var mgmt = try ManagementStore.init(testing.allocator, &lmdb);
+    defer mgmt.deinit();
 
     var event = try nostr.Event.parseWithAllocator(
         \\{"id":"00000000000000000000000000000000000000000000000000000000000000ee","pubkey":"00000000000000000000000000000000000000000000000000000000000000bb","sig":"00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000","kind":1,"created_at":1700000000,"content":"","tags":[]}

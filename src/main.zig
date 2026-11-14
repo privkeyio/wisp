@@ -178,6 +178,7 @@ pub fn main(init: std.process.Init) !void {
     defer store.deinit();
 
     var mgmt_store = try ManagementStore.init(allocator, &lmdb);
+    defer mgmt_store.deinit();
 
     var nip86_handler = Nip86Handler.init(allocator, &config, &mgmt_store);
     defer nip86_handler.deinit();
@@ -465,6 +466,8 @@ test {
     _ = @import("spider.zig");
     _ = @import("connection.zig");
     _ = @import("handler.zig");
+    _ = @import("ip_match.zig");
+    _ = @import("management_store.zig");
     _ = @import("nip86.zig");
     _ = @import("rate_limiter.zig");
     _ = @import("server.zig");

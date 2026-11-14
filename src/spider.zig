@@ -1326,6 +1326,7 @@ test "synced events go through the NIP-86 policy and are stored only when admitt
     var store = try Store.init(testing.allocator, &lmdb);
     defer store.deinit();
     var mgmt = try ManagementStore.init(testing.allocator, &lmdb);
+    defer mgmt.deinit();
     // Broadcast keeps threadlocal scratch for the process lifetime, so it gets an
     // allocator that is not leak-checked, as in the subscriptions tests.
     var subs = Subscriptions.init(std.heap.page_allocator);
