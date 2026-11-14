@@ -206,7 +206,7 @@ than being accepted and then matching nothing. The same applies to `trusted_prox
 | TOML | Env | Type | Default | Description |
 |------|-----|------|---------|-------------|
 | `enabled` | `WISP_NEGENTROPY_ENABLED` | bool | `true` | Enable NIP-77 set reconciliation. |
-| `max_sync_events` | `WISP_NEGENTROPY_MAX_SYNC_EVENTS` | u32 | `100000` | Maximum event IDs buffered in memory per reconciliation session, about 40 bytes each (roughly 4 MB at the default). A session whose filter matches more events is refused with `NEG-ERR "blocked: too many events"` rather than reconciled partially. Raise it when peers sync large stores relay-to-relay with NIP-77, keeping in mind that every session on every connection can buffer this many. |
+| `max_sync_events` | `WISP_NEGENTROPY_MAX_SYNC_EVENTS` | u32 | `100000` | Maximum event IDs buffered in memory per reconciliation session, about 40 bytes each (roughly 4 MB at the default). A session whose filter matches more events is refused with `NEG-ERR "blocked: too many events"` rather than reconciled partially. A selective filter can instead hit the scan cap (`max_sync_events × query_scan_multiplier` index entries) first and get `NEG-ERR "error: result set too large to reconcile"`; raising either setting fixes it. Raise it when peers sync large stores relay-to-relay with NIP-77, keeping in mind that every session on every connection can buffer this many. |
 | `max_sessions` | `WISP_NEGENTROPY_MAX_SESSIONS` | u32 | `4` | Concurrent reconciliation sessions per connection. Each can buffer up to `max_sync_events` IDs, so keep this small. |
 
 ### `[management]` (NIP-86)

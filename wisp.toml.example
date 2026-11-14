@@ -90,7 +90,10 @@ admin = ""  # your hex pubkey (use `zig-out/bin/wisp help` for npub support via 
 enabled = true
 # Event IDs buffered in memory per reconciliation session (~40 bytes each).
 # A sync whose filter matches more is refused with NEG-ERR "blocked: too many
-# events". Raise this for relay-to-relay sync of large stores.
+# events". A selective filter may instead hit the scan cap (max_sync_events x
+# [limits] query_scan_multiplier entries) and get NEG-ERR "error: result set
+# too large to reconcile"; raising either setting fixes it. Raise this for
+# relay-to-relay sync of large stores.
 max_sync_events = 100000
 # Concurrent reconciliation sessions per connection. Each can buffer up to
 # max_sync_events IDs, so keep this small.

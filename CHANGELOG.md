@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- The `negentropy.max_sync_events` default is lowered from 1,000,000 to 100,000. Each NIP-77 session buffers up to this many event IDs in memory (about 40 MB at the old default, per session). A reconciliation whose filter matches more events is refused with `NEG-ERR "blocked: too many events"`; operators who sync large stores relay-to-relay should raise the setting (#83)
+- The `negentropy.max_sync_events` default is lowered from 1,000,000 to 100,000. Each NIP-77 session buffers up to this many event IDs in memory (about 40 MB at the old default, per session). A reconciliation whose filter matches more events is refused with `NEG-ERR "blocked: too many events"`; operators who sync large stores relay-to-relay should raise the setting. The per-NEG-OPEN scan bound (`max_sync_events × query_scan_multiplier`) drops 10x with it, from about 20M to 2M index entries, which cuts the work a single NEG-OPEN can force on the relay; a selective filter can now hit `NEG-ERR "error: result set too large to reconcile"` sooner. A wisp spider that gets a NEG-ERR from a peer stops using negentropy for that peer and keeps only its live REQ subscription, so history beyond the cap is not backfilled; raise the setting on the peer being synced from (#83)
 
 ## [0.9.3] - 2026-11-10
 
