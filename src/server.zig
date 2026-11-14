@@ -150,11 +150,14 @@ pub const App = struct {
         res.body = try res.arena.dupe(u8, result.body);
     }
 
-    /// GET /metrics — Prometheus operational metrics. Honors the same IP policy
-    /// as the relay, so an operator allowlist/blocklist also covers the scraper.
+    /// GET /metrics — Prometheus operational metrics. Loopback-only unless
+    /// metrics_public is set, and always subject to the relay's IP policy. The
+    /// check uses clientIp, so behind a trusted proxy the forwarded client is
+    /// judged rather than the proxy's own (often loopback) socket address.
     pub fn getMetrics(app: App, req: *httpz.Request, res: *httpz.Response) !void {
         var ip_buf: [64]u8 = undefined;
-        if (app.ipDenied(app.clientIp(req, res, &ip_buf))) {
+        const client_ip = app.clientIp(req, res, &ip_buf);
+        if (app.ipDenied(client_ip) or (!app.config.metrics_public and !isLoopback(client_ip))) {
             res.status = 403;
             return;
         }
@@ -344,6 +347,25 @@ fn formatPeerIp(address: anytype, buf: *[64]u8) []const u8 {
     }
     if (std.mem.lastIndexOf(u8, formatted, ":")) |colon| return formatted[0..colon];
     return formatted;
+}
+
+/// 127.0.0.0/8, ::1, or IPv4-mapped ::ffff:127.0.0.0/104. Anything that does
+/// not parse as an address (e.g. "unknown") is not loopback.
+fn isLoopback(ip: []const u8) bool {
+    if (std.Io.net.Ip4Address.parse(ip, 0)) |a| return a.bytes[0] == 127 else |_| {}
+    const b = (std.Io.net.Ip6Address.parse(ip, 0) catch return false).bytes;
+    const v4_mapped = [12]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff };
+    if (std.mem.eql(u8, b[0..12], &v4_mapped)) return b[12] == 127;
+    return std.mem.allEqual(u8, b[0..15], 0) and b[15] == 1;
+}
+
+test isLoopback {
+    for ([_][]const u8{ "127.0.0.1", "127.255.0.9", "::1", "0:0:0:0:0:0:0:1", "::ffff:127.0.0.1", "::FFFF:127.1.2.3" }) |ip| {
+        try std.testing.expect(isLoopback(ip));
+    }
+    for ([_][]const u8{ "", "unknown", "10.0.0.1", "128.0.0.1", "1.127.0.0", "::", "::2", "::ffff:10.0.0.1", "::127.0.0.1", "fe80::1", "127.0.0.1, 10.0.0.1", "localhost" }) |ip| {
+        try std.testing.expect(!isLoopback(ip));
+    }
 }
 
 const PoolConfig = struct { workers: u16, pool: u16 };

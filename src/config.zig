@@ -106,6 +106,9 @@ pub const Config = struct {
     max_connections_per_ip: u32,
     ip_whitelist: []const u8,
     ip_blacklist: []const u8,
+    // Serve /metrics to non-loopback clients. Off by default so operational
+    // metrics are not world-readable.
+    metrics_public: bool,
 
     // Spider configuration
     spider_enabled: bool,
@@ -176,6 +179,7 @@ pub const Config = struct {
             .max_connections_per_ip = 10,
             .ip_whitelist = "",
             .ip_blacklist = "",
+            .metrics_public = false,
             .spider_enabled = false,
             .spider_relays = "",
             .spider_admin = "",
@@ -340,6 +344,8 @@ pub const Config = struct {
         } else if (std.mem.eql(u8, section, "security")) {
             if (std.mem.eql(u8, key, "trust_proxy")) {
                 self.trust_proxy = parseBool(value) orelse return error.InvalidBoolean;
+            } else if (std.mem.eql(u8, key, "metrics_public")) {
+                self.metrics_public = parseBool(value) orelse return error.InvalidBoolean;
             } else if (std.mem.eql(u8, key, "trusted_proxies")) {
                 self.trusted_proxies = try self.allocString(value);
             } else if (std.mem.eql(u8, key, "max_connections_per_ip")) {
@@ -409,6 +415,7 @@ pub const Config = struct {
         if (getenv("WISP_RELAY_URL")) |v| self.relay_url = v;
         if (getenv("WISP_TRUST_PROXY")) |v| self.trust_proxy = envBool("WISP_TRUST_PROXY", v, self.trust_proxy);
         if (getenv("WISP_TRUSTED_PROXIES")) |v| self.trusted_proxies = v;
+        if (getenv("WISP_METRICS_PUBLIC")) |v| self.metrics_public = envBool("WISP_METRICS_PUBLIC", v, self.metrics_public);
         if (getenv("WISP_MAX_CONNECTIONS_PER_IP")) |v| self.max_connections_per_ip = envInt(u32, "WISP_MAX_CONNECTIONS_PER_IP", v, self.max_connections_per_ip);
         if (getenv("WISP_WORKERS")) |v| self.workers = envInt(u16, "WISP_WORKERS", v, self.workers);
         if (getenv("WISP_MAX_CONN")) |v| self.max_conn = envInt(u16, "WISP_MAX_CONN", v, self.max_conn);
@@ -493,6 +500,14 @@ test "setValue: a malformed boolean in the config file fails the load" {
     try std.testing.expectEqual(false, config.watchdog_enabled);
     try config.setValue("watchdog", "enabled", "yes");
     try std.testing.expectEqual(true, config.watchdog_enabled);
+}
+
+test "setValue: metrics_public defaults off and parses under [security]" {
+    var config = Config.defaults();
+    try std.testing.expectEqual(false, config.metrics_public);
+    try config.setValue("security", "metrics_public", "true");
+    try std.testing.expectEqual(true, config.metrics_public);
+    try std.testing.expectError(error.InvalidBoolean, config.setValue("security", "metrics_public", "maybe"));
 }
 
 test safeValue {

@@ -181,6 +181,7 @@ instead leave it stopped.
 |------|-----|------|---------|-------------|
 | `trust_proxy` | `WISP_TRUST_PROXY` | bool | `false` | Honor `X-Forwarded-For` / `X-Real-IP` for the client IP. Enable only behind a reverse proxy whose backend port is not directly reachable, or clients can spoof their IP. |
 | `trusted_proxies` | `WISP_TRUSTED_PROXIES` | csv | (empty) | IPs/prefixes of proxies whose forwarded headers are trusted. Empty with `trust_proxy=true` trusts any peer. |
+| `metrics_public` | `WISP_METRICS_PUBLIC` | bool | `false` | Serve `/metrics` to non-loopback clients. When `false`, only 127.0.0.0/8 and `::1` (including `::ffff:127.x`) may scrape it; others get 403. |
 | `max_connections_per_ip` | `WISP_MAX_CONNECTIONS_PER_IP` | u32 | `10` | Per-IP concurrent connection cap, applied at the WebSocket upgrade. A connection that never sends a request does not reach it; those are closed by the 10s request timeout instead. To cap concurrent TCP connections per source, see [Limiting connections per source](deployment.md#limiting-connections-per-source). |
 | `ip_whitelist` | `WISP_IP_WHITELIST` | csv | (empty) | If set, only these IPs/prefixes may connect. |
 | `ip_blacklist` | `WISP_IP_BLACKLIST` | csv | (empty) | These IPs/prefixes are refused. |
@@ -232,9 +233,18 @@ admin = ""  # your hex pubkey
 ## Monitoring
 
 Operational metrics are served in Prometheus format at `GET /metrics` on the relay port:
-connection counts, events stored/rejected/broadcast, REQ totals, and rate-limit counters. The
-endpoint honors `ip_whitelist`/`ip_blacklist`, so restrict it there or at your reverse
-proxy/firewall if it should not be public.
+connection counts, events stored/rejected/broadcast, REQ totals, and rate-limit counters. By
+default only loopback clients (127.0.0.0/8, `::1`) may read it; everyone else gets 403. Set
+`metrics_public = true` under `[security]` (`WISP_METRICS_PUBLIC=true`) to open it to any client
+that passes `ip_whitelist`/`ip_blacklist`, which still apply either way.
+
+Reverse proxy note: a proxy on the same host connects to wisp over loopback. With
+`trust_proxy = true` the check uses the forwarded client address, so proxied internet requests
+are refused. With `trust_proxy = false` every proxied request looks like 127.0.0.1 and passes, so
+either enable `trust_proxy` or deny `/metrics` at the proxy (e.g. nginx
+`location = /metrics { return 404; }`), and scrape the backend port directly from the host. With
+`trust_proxy = true` and an empty `trusted_proxies`, any peer that can reach the backend port can
+forge `X-Forwarded-For: 127.0.0.1`, so keep that port private or set `trusted_proxies`.
 
 The `httpz_*` series come from the embedded HTTP server. The useful one is
 `httpz_connections`, which counts accepted TCP connections before any handler runs. Read
