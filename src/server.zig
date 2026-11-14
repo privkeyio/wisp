@@ -150,11 +150,21 @@ pub const App = struct {
         res.body = try res.arena.dupe(u8, result.body);
     }
 
-    /// GET /metrics — Prometheus operational metrics. Honors the same IP policy
-    /// as the relay, so an operator allowlist/blocklist also covers the scraper.
+    /// GET /metrics — Prometheus operational metrics. Unless metrics_public is
+    /// set, only direct requests from a loopback socket peer are served; anything
+    /// relayed by a proxy is refused regardless of trust_proxy. Always subject to
+    /// the relay's IP policy.
     pub fn getMetrics(app: App, req: *httpz.Request, res: *httpz.Response) !void {
         var ip_buf: [64]u8 = undefined;
-        if (app.ipDenied(app.clientIp(req, res, &ip_buf))) {
+        const client_ip = app.clientIp(req, res, &ip_buf);
+        var peer_buf: [64]u8 = undefined;
+        const peer_ip = formatPeerIp(res.conn.address, &peer_buf);
+        const forwarded = isForwarded(
+            req.header("x-forwarded-for"),
+            req.header("x-real-ip"),
+            req.headers.len >= req.headers.keys.len,
+        );
+        if (app.ipDenied(client_ip) or !metricsAllowed(app.config.metrics_public, peer_ip, forwarded)) {
             res.status = 403;
             return;
         }
@@ -344,6 +354,60 @@ fn formatPeerIp(address: anytype, buf: *[64]u8) []const u8 {
     }
     if (std.mem.lastIndexOf(u8, formatted, ":")) |colon| return formatted[0..colon];
     return formatted;
+}
+
+/// 127.0.0.0/8, ::1, or IPv4-mapped ::ffff:127.0.0.0/104. Anything that does
+/// not parse as an address (e.g. "unknown") is not loopback.
+fn isLoopback(ip: []const u8) bool {
+    if (std.Io.net.Ip4Address.parse(ip, 0)) |a| return a.bytes[0] == 127 else |_| {}
+    const b = (std.Io.net.Ip6Address.parse(ip, 0) catch return false).bytes;
+    const v4_mapped = [12]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff };
+    if (std.mem.eql(u8, b[0..12], &v4_mapped)) return b[12] == 127;
+    return std.mem.allEqual(u8, b[0..15], 0) and b[15] == 1;
+}
+
+/// /metrics policy: open when metrics_public, otherwise only for a loopback
+/// socket peer that is not relaying for someone else. Forwarding headers are
+/// checked for presence, not trusted, so a same-host proxy never passes.
+fn metricsAllowed(metrics_public: bool, peer_ip: []const u8, has_forwarded_header: bool) bool {
+    if (metrics_public) return true;
+    return isLoopback(peer_ip) and !has_forwarded_header;
+}
+
+/// A request is treated as proxied if it carries X-Forwarded-For or X-Real-IP.
+/// httpz silently drops headers past its table size, so a full table may have
+/// lost a proxy's X-Forwarded-For and counts as forwarded too.
+fn isForwarded(xff: ?[]const u8, xrip: ?[]const u8, headers_full: bool) bool {
+    return xff != null or xrip != null or headers_full;
+}
+
+test isForwarded {
+    try std.testing.expect(!isForwarded(null, null, false));
+    try std.testing.expect(isForwarded("1.2.3.4", null, false));
+    try std.testing.expect(isForwarded(null, "127.0.0.1", false));
+    try std.testing.expect(isForwarded("", null, false));
+    try std.testing.expect(isForwarded(null, null, true));
+}
+
+test metricsAllowed {
+    try std.testing.expect(metricsAllowed(false, "127.0.0.1", false));
+    try std.testing.expect(metricsAllowed(false, "::1", false));
+    try std.testing.expect(!metricsAllowed(false, "127.0.0.1", isForwarded("1.2.3.4", null, false)));
+    try std.testing.expect(!metricsAllowed(false, "127.0.0.1", isForwarded(null, "127.0.0.1", false)));
+    try std.testing.expect(!metricsAllowed(false, "::ffff:127.0.0.1", true));
+    try std.testing.expect(!metricsAllowed(false, "10.0.0.1", false));
+    try std.testing.expect(!metricsAllowed(false, "unknown", false));
+    try std.testing.expect(metricsAllowed(true, "10.0.0.1", false));
+    try std.testing.expect(metricsAllowed(true, "127.0.0.1", true));
+}
+
+test isLoopback {
+    for ([_][]const u8{ "127.0.0.1", "127.255.0.9", "::1", "0:0:0:0:0:0:0:1", "::ffff:127.0.0.1", "::FFFF:127.1.2.3" }) |ip| {
+        try std.testing.expect(isLoopback(ip));
+    }
+    for ([_][]const u8{ "", "unknown", "10.0.0.1", "128.0.0.1", "1.127.0.0", "::", "::2", "::ffff:10.0.0.1", "::127.0.0.1", "fe80::1", "127.0.0.1, 10.0.0.1", "localhost" }) |ip| {
+        try std.testing.expect(!isLoopback(ip));
+    }
 }
 
 const PoolConfig = struct { workers: u16, pool: u16 };

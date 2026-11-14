@@ -181,6 +181,7 @@ instead leave it stopped.
 |------|-----|------|---------|-------------|
 | `trust_proxy` | `WISP_TRUST_PROXY` | bool | `false` | Honor `X-Forwarded-For` / `X-Real-IP` for the client IP. Enable only behind a reverse proxy whose backend port is not directly reachable, or clients can spoof their IP. |
 | `trusted_proxies` | `WISP_TRUSTED_PROXIES` | csv | (empty) | IPs/prefixes of proxies whose forwarded headers are trusted. Empty with `trust_proxy=true` trusts any peer. |
+| `metrics_public` | `WISP_METRICS_PUBLIC` | bool | `false` | Serve `/metrics` to any client. When `false`, only direct requests whose socket peer is 127.0.0.0/8 or `::1` (including `::ffff:127.x`) and that carry no `X-Forwarded-For`/`X-Real-IP` header may scrape it; others get 403. |
 | `max_connections_per_ip` | `WISP_MAX_CONNECTIONS_PER_IP` | u32 | `10` | Per-IP concurrent connection cap, applied at the WebSocket upgrade. A connection that never sends a request does not reach it; those are closed by the 10s request timeout instead. To cap concurrent TCP connections per source, see [Limiting connections per source](deployment.md#limiting-connections-per-source). |
 | `ip_whitelist` | `WISP_IP_WHITELIST` | csv | (empty) | If set, only these IPs/prefixes may connect. |
 | `ip_blacklist` | `WISP_IP_BLACKLIST` | csv | (empty) | These IPs/prefixes are refused. |
@@ -232,9 +233,20 @@ admin = ""  # your hex pubkey
 ## Monitoring
 
 Operational metrics are served in Prometheus format at `GET /metrics` on the relay port:
-connection counts, events stored/rejected/broadcast, REQ totals, and rate-limit counters. The
-endpoint honors `ip_whitelist`/`ip_blacklist`, so restrict it there or at your reverse
-proxy/firewall if it should not be public.
+connection counts, events stored/rejected/broadcast, REQ totals, and rate-limit counters. By
+default it is served only to direct requests: the TCP peer must be loopback (127.0.0.0/8, `::1`)
+and the request must carry neither `X-Forwarded-For` nor `X-Real-IP`. Everyone else gets 403.
+Set `metrics_public = true` under `[security]` (`WISP_METRICS_PUBLIC=true`) to open it to any
+client that passes `ip_whitelist`/`ip_blacklist`, which still apply either way.
+
+Reverse proxy note: the check looks at the raw socket peer, never at forwarded addresses, so
+`trust_proxy` and `trusted_proxies` do not affect `/metrics`. A proxy that adds `X-Forwarded-For`
+(Caddy and the nginx example in [deployment.md](deployment.md) both do) has its requests
+refused, and a client cannot get in by forging a forwarding header. A request whose headers
+fill wisp's 32-header table is also refused, since an overflowing request may have lost the
+proxy's header. Scrape the backend port directly from the host instead. Denying `/metrics` at the
+proxy is still recommended as defence in depth, in case a proxy forwards without adding either
+header (e.g. nginx `location = /metrics { return 404; }`, Caddy `respond /metrics 404`).
 
 The `httpz_*` series come from the embedded HTTP server. The useful one is
 `httpz_connections`, which counts accepted TCP connections before any handler runs. Read
