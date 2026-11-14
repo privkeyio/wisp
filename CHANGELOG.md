@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- `/metrics` is now served by default only to direct, non-proxied requests from loopback: the TCP peer must be 127.0.0.0/8 or `::1` and the request must carry neither `X-Forwarded-For` nor `X-Real-IP`. Requests relayed by a reverse proxy are refused regardless of `trust_proxy`, so a same-host proxy no longer exposes it and a forged forwarding header cannot unlock it. Remote scrapers must either run on the relay host or set `metrics_public = true` (`WISP_METRICS_PUBLIC=true`), which serves any client that passes the IP allowlist/blocklist.
+
 ## [0.9.3] - 2026-11-10
 
 Fixes a crash that could abort the relay when it was stopped under load. No protocol or configuration changes.
