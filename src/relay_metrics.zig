@@ -12,6 +12,7 @@ var events_broadcast = std.atomic.Value(u64).init(0);
 var reqs_total = std.atomic.Value(u64).init(0);
 var rate_limited = std.atomic.Value(u64).init(0);
 var query_rate_limited = std.atomic.Value(u64).init(0);
+var forwarded_header_ignored = std.atomic.Value(u64).init(0);
 
 pub fn connectionOpened() void {
     _ = connections_total.fetchAdd(1, .monotonic);
@@ -41,6 +42,10 @@ pub fn queryRateLimited() void {
     _ = query_rate_limited.fetchAdd(1, .monotonic);
 }
 
+pub fn forwardedHeaderIgnored() void {
+    _ = forwarded_header_ignored.fetchAdd(1, .monotonic);
+}
+
 fn metric(w: anytype, name: []const u8, help: []const u8, kind: []const u8, value: u64) !void {
     try w.print("# HELP {s} {s}\n# TYPE {s} {s}\n{s} {d}\n", .{ name, help, name, kind, name, value });
 }
@@ -56,13 +61,16 @@ pub fn write(w: anytype, active_connections: u64) !void {
     try metric(w, "wisp_req_total", "REQ subscription messages received", "counter", reqs_total.load(.monotonic));
     try metric(w, "wisp_rate_limited_total", "Connections/events rejected by rate or connection limits", "counter", rate_limited.load(.monotonic));
     try metric(w, "wisp_query_rate_limited_total", "Query messages (REQ/COUNT/NEG_OPEN) rejected by the query rate limit", "counter", query_rate_limited.load(.monotonic));
+    try metric(w, "wisp_forwarded_header_ignored_total", "Requests carrying X-Forwarded-For or X-Real-IP while trust_proxy is off", "counter", forwarded_header_ignored.load(.monotonic));
 }
 
 test write {
     const conn_before = connections_total.load(.monotonic);
     const bcast_before = events_broadcast.load(.monotonic);
+    const fwd_before = forwarded_header_ignored.load(.monotonic);
 
     connectionOpened();
+    forwardedHeaderIgnored();
     eventBroadcast(3);
     eventBroadcast(0); // no-op: a zero-recipient broadcast must not move the counter
 
@@ -84,4 +92,6 @@ test write {
     try std.testing.expect(std.mem.indexOf(u8, out, conn_line) != null);
     const bcast_line = try std.fmt.bufPrint(&line_buf, "wisp_events_broadcast_total {d}\n", .{bcast_before + 3});
     try std.testing.expect(std.mem.indexOf(u8, out, bcast_line) != null);
+    const fwd_line = try std.fmt.bufPrint(&line_buf, "wisp_forwarded_header_ignored_total {d}\n", .{fwd_before + 1});
+    try std.testing.expect(std.mem.indexOf(u8, out, fwd_line) != null);
 }

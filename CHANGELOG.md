@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `ip_whitelist`, `ip_blacklist`, `trusted_proxies` and the NIP-86 `blockip` method accept CIDR ranges for IPv4 and IPv6 (`185.220.100.0/22`, `2001:db8::/32`). The config lists and the blocked-IP store now share one matcher: an IPv4 rule also matches IPv4-mapped IPv6 clients (`::ffff:a.b.c.d`), and an IPv6 subnet can be blocked through `blockip`, which previously only matched IPv4 prefixes. Existing entries keep working: a prefix ending in `.` or `:` is read as the equivalent CIDR range (`185.220.101.` is `185.220.101.0/24`), and dotless prefixes already stored by `blockip` (`185.220.101`) still match. `blockip` now answers `400` for an entry it cannot parse instead of storing one that never matches; such entries already stored are skipped with a warning and can still be removed with `unblockip` (#83)
+- A warning is logged when a request carries `X-Forwarded-For` or `X-Real-IP` while `trust_proxy` is off, which usually means wisp sits behind a reverse proxy and every client shares the proxy's IP for `events_per_minute`, `queries_per_minute`, `max_connections_per_ip` and the IP allow/deny lists. The warning names the peer and the header, points to `trust_proxy = true` and `trusted_proxies`, and repeats at most once an hour. A new counter, `wisp_forwarded_header_ignored_total`, counts every such request (#210)
 
 ### Migration
 

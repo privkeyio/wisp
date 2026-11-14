@@ -32,6 +32,14 @@ Your relay is now live at `wss://relay.yourdomain.com`.
 > **Behind a proxy:** set `trust_proxy = true` in the `[security]` section of `wisp.toml` so
 > per-IP connection limits and IP allow/deny lists see the real client IP from Caddy's
 > `X-Forwarded-For` header instead of `127.0.0.1`.
+>
+> Without it, every client shares the proxy's IP, so all per-IP controls become relay-wide:
+> not only `max_connections_per_ip`, but also the `events_per_minute` and `queries_per_minute`
+> rate limits and the IP allow/deny lists. One busy client then gets everyone `rate-limited`.
+> wisp logs a warning (at most hourly) when a request carries `X-Forwarded-For` or `X-Real-IP`
+> while `trust_proxy` is off, and counts such requests in
+> `wisp_forwarded_header_ignored_total` on `/metrics`. Also set `trusted_proxies` to the
+> proxy's address so clients that reach the relay port directly cannot spoof their IP.
 
 ## Limiting connections per source
 

@@ -10,6 +10,7 @@ const Subscriptions = @import("subscriptions.zig").Subscriptions;
 const Connection = @import("connection.zig").Connection;
 const nip11 = @import("nip11.zig");
 const rate_limiter = @import("rate_limiter.zig");
+const ip_match = @import("ip_match.zig");
 const Nip86Handler = @import("nip86.zig").Nip86Handler;
 const metrics = @import("relay_metrics.zig");
 
@@ -195,7 +196,10 @@ pub const App = struct {
 
     fn clientIp(app: App, req: *httpz.Request, res: *httpz.Response, buf: *[64]u8) []const u8 {
         const socket_ip = formatPeerIp(res.conn.address, buf);
-        if (!app.config.trust_proxy) return socket_ip;
+        if (!app.config.trust_proxy) {
+            warnIgnoredForwarded(socket_ip, req.header("x-forwarded-for"), req.header("x-real-ip"));
+            return socket_ip;
+        }
         // Only honor forwarded headers when the socket peer is a configured trusted
         // proxy; otherwise an attacker hitting the backend directly could forge them
         // to spoof any client IP. An empty trusted_proxies set trusts any peer.
@@ -203,6 +207,26 @@ pub const App = struct {
         const xff = req.header("x-forwarded-for");
         const xrip = req.header("x-real-ip");
         return rate_limiter.extractClientIp(xff, xrip, socket_ip, true);
+    }
+
+    /// With trust_proxy off, a forwarded header usually means a reverse proxy in
+    /// front of wisp, so every client shares the proxy's IP for all per-IP
+    /// controls. Counted on every such request, logged at most once per
+    /// forwarded_warn_interval_s process-wide.
+    fn warnIgnoredForwarded(socket_ip: []const u8, xff: ?[]const u8, xrip: ?[]const u8) void {
+        const header = ignoredForwardedHeader(xff, xrip) orelse return;
+        metrics.forwardedHeaderIgnored();
+        if (!claimWarnSlot(&forwarded_warn_last, nostr.io.timestamp(), forwarded_warn_interval_s)) return;
+        var peer_buf: [64]u8 = undefined;
+        var value_buf: [64]u8 = undefined;
+        log.warn("request from {s} carries {s} ({s}) but trust_proxy is off; all clients behind this proxy share " ++
+            "per-IP limits (events_per_minute, queries_per_minute, max_connections_per_ip) and the IP allow/deny lists. " ++
+            "If this is your reverse proxy, set trust_proxy = true and trusted_proxies in [security]; see docs/deployment.md. " ++
+            "Logged at most hourly; wisp_forwarded_header_ignored_total counts every such request.", .{
+            safeIp(socket_ip, &peer_buf),
+            header.name,
+            ip_match.safeEntry(header.value, &value_buf),
+        });
     }
 
     // Forwarded-header IPs are never validated as addresses (they key per-IP
@@ -372,6 +396,66 @@ fn isLoopback(ip: []const u8) bool {
 fn metricsAllowed(metrics_public: bool, peer_ip: []const u8, has_forwarded_header: bool) bool {
     if (metrics_public) return true;
     return isLoopback(peer_ip) and !has_forwarded_header;
+}
+
+const forwarded_warn_interval_s: i64 = 3600;
+var forwarded_warn_last = std.atomic.Value(i64).init(0);
+
+const ForwardedHeader = struct { name: []const u8, value: []const u8 };
+
+/// The forwarded header a request carries, preferring X-Forwarded-For, or null.
+fn ignoredForwardedHeader(xff: ?[]const u8, xrip: ?[]const u8) ?ForwardedHeader {
+    if (xff) |v| return .{ .name = "X-Forwarded-For", .value = v };
+    if (xrip) |v| return .{ .name = "X-Real-IP", .value = v };
+    return null;
+}
+
+/// Lock-free throttle: true for at most one caller per `interval` seconds.
+/// `last` starts at 0 so the first call fires; a racing caller that loses the
+/// swap stays quiet, and a clock stepping backwards only delays the next one.
+fn claimWarnSlot(last: *std.atomic.Value(i64), now: i64, interval: i64) bool {
+    const prev = last.load(.monotonic);
+    if (now - prev < interval) return false;
+    return last.cmpxchgStrong(prev, now, .monotonic, .monotonic) == null;
+}
+
+test ignoredForwardedHeader {
+    try std.testing.expect(ignoredForwardedHeader(null, null) == null);
+    const xff = ignoredForwardedHeader("1.2.3.4", "5.6.7.8").?;
+    try std.testing.expectEqualStrings("X-Forwarded-For", xff.name);
+    try std.testing.expectEqualStrings("1.2.3.4", xff.value);
+    const xrip = ignoredForwardedHeader(null, "5.6.7.8").?;
+    try std.testing.expectEqualStrings("X-Real-IP", xrip.name);
+    try std.testing.expectEqualStrings("5.6.7.8", xrip.value);
+    try std.testing.expectEqualStrings("", ignoredForwardedHeader("", null).?.value);
+}
+
+test claimWarnSlot {
+    var last = std.atomic.Value(i64).init(0);
+    try std.testing.expect(claimWarnSlot(&last, 1_700_000_000, 3600));
+    try std.testing.expect(!claimWarnSlot(&last, 1_700_000_000, 3600));
+    try std.testing.expect(!claimWarnSlot(&last, 1_700_003_599, 3600));
+    try std.testing.expect(claimWarnSlot(&last, 1_700_003_600, 3600));
+    try std.testing.expectEqual(@as(i64, 1_700_003_600), last.load(.monotonic));
+    // A clock that steps backwards suppresses rather than spams.
+    try std.testing.expect(!claimWarnSlot(&last, 1_699_000_000, 3600));
+    try std.testing.expect(claimWarnSlot(&last, 1_700_007_200, 3600));
+}
+
+test "claimWarnSlot admits one caller under contention" {
+    var last = std.atomic.Value(i64).init(0);
+    var wins = std.atomic.Value(u32).init(0);
+    const Worker = struct {
+        fn run(l: *std.atomic.Value(i64), w: *std.atomic.Value(u32)) void {
+            for (0..1000) |_| {
+                if (claimWarnSlot(l, 1_700_000_000, 3600)) _ = w.fetchAdd(1, .monotonic);
+            }
+        }
+    };
+    var threads: [8]std.Thread = undefined;
+    for (&threads) |*t| t.* = try std.Thread.spawn(.{}, Worker.run, .{ &last, &wins });
+    for (threads) |t| t.join();
+    try std.testing.expectEqual(@as(u32, 1), wins.load(.monotonic));
 }
 
 /// A request is treated as proxied if it carries X-Forwarded-For or X-Real-IP.
