@@ -20,6 +20,10 @@ pub const Connection = struct {
     arena: std.heap.ArenaAllocator,
     subscriptions: std.StringHashMap(Subscription),
     neg_sessions: std.StringHashMap(NegSession),
+    // neg_sessions.count(), kept atomically for the eviction scan: the map is
+    // only touched by this connection's worker, while the scan runs on the
+    // thread admitting a newcomer. An open NIP-77 sync is never evicted.
+    neg_session_count: std.atomic.Value(u32) = .init(0),
     created_at: i64,
     last_activity: std.atomic.Value(i64),
     // Thread-safe writer provided by websocket.zig; serializes per-connection
@@ -30,7 +34,7 @@ pub const Connection = struct {
 
     client_ip: [64]u8 = undefined,
     client_ip_len: u8 = 0,
-    // Client matched reserved_ips or ip_whitelist at upgrade. Such a connection
+    // Client matched reserved_ips at upgrade. Such a connection
     // may use the reserved_connections headroom and is never evicted to admit
     // a newcomer. Set once before the connection is registered.
     reserved: bool = false,
@@ -56,6 +60,7 @@ pub const Connection = struct {
         self.arena = std.heap.ArenaAllocator.init(backing_allocator);
         self.subscriptions = std.StringHashMap(Subscription).init(self.arena.allocator());
         self.neg_sessions = std.StringHashMap(NegSession).init(self.arena.allocator());
+        self.neg_session_count = .init(0);
         self.created_at = now;
         self.last_activity = .init(now);
         self.events_sent = .init(0);
@@ -230,6 +235,7 @@ pub const Connection = struct {
         const sub_id_copy = try self.backing_allocator.dupe(u8, sub_id);
         errdefer self.backing_allocator.free(sub_id_copy);
         try self.neg_sessions.put(sub_id_copy, NegSession.init(self.backing_allocator));
+        _ = self.neg_session_count.fetchAdd(1, .monotonic);
         return self.neg_sessions.getPtr(sub_id_copy).?;
     }
 
@@ -239,6 +245,7 @@ pub const Connection = struct {
 
     pub fn removeNegSession(self: *Connection, sub_id: []const u8) void {
         if (self.neg_sessions.fetchRemove(sub_id)) |kv| {
+            _ = self.neg_session_count.fetchSub(1, .monotonic);
             var session = kv.value;
             session.deinit();
             self.backing_allocator.free(kv.key);

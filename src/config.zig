@@ -78,11 +78,12 @@ pub const Config = struct {
     contact: ?[]const u8,
     max_connections: u32,
     // The top this-many max_connections slots are kept for clients matching
-    // reserved_ips or ip_whitelist (health checks, trusted clients). 0 disables.
+    // reserved_ips (health checks, trusted clients). 0 disables.
     reserved_connections: u32,
     // When max_connections is full, a newcomer evicts the longest-idle
-    // connection that has no subscription and has been silent at least this
-    // many seconds; reserved clients are never evicted. 0 disables eviction.
+    // connection that has no subscription or NIP-77 session and has sent no
+    // message for at least this many seconds; reserved clients are never
+    // evicted. 0 disables eviction.
     evict_idle_seconds: u32,
     // Epoll worker threads. 0 means auto (scale with CPU, capped at 4). Lower it
     // (e.g. 1) on a personal or memory-constrained relay: each worker carries its
@@ -182,7 +183,7 @@ pub const Config = struct {
             .contact = null,
             .max_connections = 1000,
             .reserved_connections = 0,
-            .evict_idle_seconds = 30,
+            .evict_idle_seconds = 120,
             .workers = 0,
             .max_conn = 0,
             .max_subscriptions = 20,
@@ -620,7 +621,7 @@ test safeValue {
 test "setValue: connection headroom and eviction" {
     var config = Config.defaults();
     try std.testing.expectEqual(@as(u32, 0), config.reserved_connections);
-    try std.testing.expectEqual(@as(u32, 30), config.evict_idle_seconds);
+    try std.testing.expectEqual(@as(u32, 120), config.evict_idle_seconds);
     try std.testing.expectEqualStrings("", config.reserved_ips);
     try config.validate();
 

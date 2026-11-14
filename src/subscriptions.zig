@@ -8,6 +8,12 @@ pub const Subscriptions = struct {
     connections: std.AutoHashMap(u64, *Connection),
     rwlock: std.Io.RwLock,
     kind_index: std.AutoHashMap(i32, std.ArrayListUnmanaged(u64)),
+    // Upgrades refused against a full pool skip the eviction scan until this
+    // timestamp (seconds). A scan that finds no victim sets it to now + 1, so a
+    // flood of refused upgrades scans at most once a second instead of holding
+    // the exclusive lock for a full registry walk on every attempt; see
+    // tryAddConnection for why that bound is the whole cost of the cache.
+    no_victim_before: std.atomic.Value(i64) = .init(0),
 
     pub fn init(allocator: std.mem.Allocator) Subscriptions {
         return .{
@@ -15,6 +21,7 @@ pub const Subscriptions = struct {
             .connections = std.AutoHashMap(u64, *Connection).init(allocator),
             .rwlock = .init,
             .kind_index = std.AutoHashMap(i32, std.ArrayListUnmanaged(u64)).init(allocator),
+            .no_victim_before = .init(0),
         };
     }
 
@@ -74,10 +81,24 @@ pub const Subscriptions = struct {
         const victim = blk: {
             defer self.rwlock.unlock(io);
             if (admission.evict_idle_seconds == 0) return error.TooManyConnections;
+            const now = nostr.io.timestamp();
+            if (now < self.no_victim_before.load(.monotonic)) return error.TooManyConnections;
             // Fail before touching the victim, so an allocation failure cannot
             // drop it without admitting the newcomer.
             try self.connections.ensureUnusedCapacity(1);
-            const v = self.evictionVictim(admission.evict_idle_seconds) orelse return error.TooManyConnections;
+            const v = self.evictionVictim(admission.evict_idle_seconds) orelse {
+                // No candidate becomes eligible before now + 1: a failed scan
+                // means every candidate has last_activity + evict_idle_seconds
+                // > now, and timestamps are whole seconds. So the earliest
+                // eligibility time is never sooner than the one-second backoff,
+                // and the backoff is all the cache needs to record. It is also
+                // the bound on how long a connection that turns evictable some
+                // other way (last subscription or NIP-77 session closed) can
+                // wait: noteEvictable() clears it for those, and a missed or
+                // racing clear costs at most this one second.
+                self.no_victim_before.store(now + 1, .monotonic);
+                return error.TooManyConnections;
+            };
             // Hold the victim alive past the unlock: its WsConn.close() drains
             // write_guard before freeing, as for closeIdleConnection.
             _ = v.write_guard.fetchAdd(1, .acquire);
@@ -91,15 +112,16 @@ pub const Subscriptions = struct {
     }
 
     // The longest-idle connection that is not reserved, has no open
-    // subscription, and has sent nothing for at least min_idle_seconds. A client
+    // subscription or NIP-77 session, and has sent nothing for at least min_idle_seconds. A client
     // holding a REQ open, or one that spoke recently, is never chosen.
     //
     // Caller holds the exclusive lock (subscribe/unsubscribe take it too, so the
     // subscription counts read here are stable). This is a linear scan of the
     // registry, run only when an upgrade finds the pool full, so it costs at most
     // max_connections cheap checks per such upgrade (a few microseconds at 3000).
-    // If floods of refused upgrades against an all-active pool ever make that
-    // lock hold time matter, cache a "no victim before T" timestamp here.
+    // Floods of refused upgrades against an all-active pool are throttled to one
+    // scan a second by no_victim_before, so readers are not starved by
+    // back-to-back exclusive registry walks.
     fn evictionVictim(self: *Subscriptions, min_idle_seconds: u32) ?*Connection {
         const threshold = nostr.io.timestamp() - @as(i64, min_idle_seconds);
         var best: ?*Connection = null;
@@ -108,6 +130,7 @@ pub const Subscriptions = struct {
         while (iter.next()) |conn_ptr| {
             const c = conn_ptr.*;
             if (c.reserved or c.subscriptions.count() != 0) continue;
+            if (c.neg_session_count.load(.monotonic) != 0) continue;
             const last = c.last_activity.load(.monotonic);
             if (last < best_activity) {
                 best = c;
@@ -210,6 +233,16 @@ pub const Subscriptions = struct {
         self.rwlock.lockUncancelable(io);
         defer self.rwlock.unlock(io);
         conn.removeSubscription(sub_id);
+        if (conn.subscriptions.count() == 0) self.noteEvictable();
+    }
+
+    /// A connection may have just become an eviction candidate (its last
+    /// subscription or NIP-77 session closed), so the next full-pool upgrade
+    /// rescans instead of waiting out the no-victim backoff. A newly added
+    /// connection needs no call: it cannot be eligible for evict_idle_seconds,
+    /// which is at least the one-second backoff.
+    pub fn noteEvictable(self: *Subscriptions) void {
+        self.no_victim_before.store(0, .monotonic);
     }
 
     fn connHasWildcard(conn: *Connection) bool {

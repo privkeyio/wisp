@@ -289,7 +289,6 @@ pub const Handler = struct {
 
     pub fn handle(self: *Handler, conn: *Connection, message: []const u8) void {
         if (self.shutdown.load(.acquire)) return;
-        conn.touch();
 
         if (!validateMessageStructure(message)) {
             self.sendNotice(conn, "error: invalid message structure");
@@ -301,6 +300,13 @@ pub const Handler = struct {
             return;
         };
         defer msg.deinit();
+
+        // Only a well-formed message counts as activity, for both the idle
+        // reaper (idle_seconds) and eviction (evict_idle_seconds): otherwise
+        // a junk frame every so often would keep a slot-hoarding connection
+        // from ever looking idle. A message the relay then refuses (bad
+        // signature, rate limit, auth) still counts; the client is talking.
+        conn.touch();
 
         switch (msg.msgType()) {
             .event => self.handleEvent(conn, &msg),
@@ -910,17 +916,17 @@ pub const Handler = struct {
         switch (enumeration) {
             .ok => {},
             .query_failed => {
-                conn.removeNegSession(sub_id);
+                self.endNegSession(conn, sub_id);
                 self.sendNegErr(conn, sub_id, "error: query failed");
                 return;
             },
             .too_many => {
-                conn.removeNegSession(sub_id);
+                self.endNegSession(conn, sub_id);
                 self.sendNegErr(conn, sub_id, "blocked: too many events");
                 return;
             },
             .truncated => {
-                conn.removeNegSession(sub_id);
+                self.endNegSession(conn, sub_id);
                 self.sendNegErr(conn, sub_id, "error: result set too large to reconcile");
                 return;
             },
@@ -959,8 +965,15 @@ pub const Handler = struct {
         self.reconcileAndSend(conn, sub_id, session, payload);
     }
 
-    fn handleNegClose(_: *Handler, conn: *Connection, msg: *nostr.ClientMsg) void {
-        conn.removeNegSession(msg.subscriptionId());
+    fn handleNegClose(self: *Handler, conn: *Connection, msg: *nostr.ClientMsg) void {
+        self.endNegSession(conn, msg.subscriptionId());
+    }
+
+    // An open NIP-77 session keeps a connection from being evicted, so closing
+    // the last one lets the next full-pool upgrade consider it again.
+    fn endNegSession(self: *Handler, conn: *Connection, sub_id: []const u8) void {
+        conn.removeNegSession(sub_id);
+        if (conn.neg_session_count.load(.monotonic) == 0) self.subs.noteEvictable();
     }
 
     fn reconcileAndSend(self: *Handler, conn: *Connection, sub_id: []const u8, session: *NegSession, query: []const u8) void {

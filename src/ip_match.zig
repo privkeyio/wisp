@@ -39,6 +39,12 @@ pub const Rule = struct {
     pub fn matches(self: Rule, addr: Addr) bool {
         return self.family == addr.family and (addr.bits & self.mask) == self.net;
     }
+
+    /// True if some address matches both rules.
+    pub fn overlaps(self: Rule, other: Rule) bool {
+        const common = self.mask & other.mask;
+        return self.family == other.family and (self.net & common) == (other.net & common);
+    }
 };
 
 pub const Syntax = enum {
@@ -443,4 +449,16 @@ test anyMatch {
     try testing.expect(anyMatch(&rules, parseAddr("2001:db8::5").?));
     try testing.expect(!anyMatch(&rules, parseAddr("11.1.1.1").?));
     try testing.expect(!anyMatch(&[_]Rule{}, parseAddr("10.1.1.1").?));
+}
+
+test "Rule.overlaps" {
+    const ten = parseRule("10.0.0.0/8", .standard).?;
+    try testing.expect(ten.overlaps(parseRule("10.1.2.3", .standard).?));
+    try testing.expect(parseRule("10.1.2.3", .standard).?.overlaps(ten));
+    try testing.expect(ten.overlaps(parseRule("0.0.0.0/0", .standard).?));
+    try testing.expect(ten.overlaps(parseRule("::ffff:10.0.0.0/104", .standard).?));
+    try testing.expect(!ten.overlaps(parseRule("11.0.0.0/8", .standard).?));
+    try testing.expect(!ten.overlaps(parseRule("::/0", .standard).?));
+    try testing.expect(parseRule("fc00::/7", .standard).?.overlaps(parseRule("fd12::1", .standard).?));
+    try testing.expect(!parseRule("fc00::/7", .standard).?.overlaps(parseRule("2001:db8::/32", .standard).?));
 }
