@@ -103,7 +103,9 @@ write path, since there is no fsync to amortize.
 
 | TOML | Env | Type | Default | Description |
 |------|-----|------|---------|-------------|
-| `max_connections` | `WISP_MAX_CONNECTIONS` | u32 | `1000` | Maximum concurrent connections. |
+| `max_connections` | `WISP_MAX_CONNECTIONS` | u32 | `1000` | Maximum concurrent connections. See [When max_connections is full](#when-max_connections-is-full). |
+| `reserved_connections` | `WISP_RESERVED_CONNECTIONS` | u32 | `0` | The top this-many `max_connections` slots are granted only to clients matching `reserved_ips` or `ip_whitelist`, so health checks and trusted clients still get in when the pool is full. Must be less than `max_connections` or startup fails. `0` disables it. |
+| `evict_idle_seconds` | `WISP_EVICT_IDLE_SECONDS` | u32 | `30` | When `max_connections` is full, a new client evicts the longest-idle connection that has no open subscription and has sent no message for at least this many seconds, instead of getting `503`. `0` disables eviction. |
 | `workers` | `WISP_WORKERS` | u16 | `0` | Epoll worker threads. `0` = auto (`min(CPU, 4)`). Set `1` on a personal or memory-constrained relay to shed per-worker buffers and threads. |
 | `max_conn` | `WISP_MAX_CONN` | u16 | `0` | Live connections **per worker** before that worker pauses accepting. `0` keeps the built-in default (8192). Distinct from `max_connections`, which is the relay-wide cap. Accepted connections are limited by `max_conn` × the effective worker count (with `workers = 0` that is `min(CPU, 4)`, not `0`), while `max_connections` independently caps registered relay connections; whichever binds first applies. |
 | `max_subscriptions` | — | u32 | `20` | Maximum open REQ subscriptions per connection. |
@@ -188,6 +190,7 @@ instead leave it stopped.
 | `subnet_prefix_v6` | `WISP_SUBNET_PREFIX_V6` | u8 | `48` | IPv6 prefix length (0-128) that groups clients for `max_connections_per_subnet`. |
 | `ip_whitelist` | `WISP_IP_WHITELIST` | csv | (empty) | If set, only these IPs/CIDR ranges may connect. |
 | `ip_blacklist` | `WISP_IP_BLACKLIST` | csv | (empty) | These IPs/CIDR ranges are refused. |
+| `reserved_ips` | `WISP_RESERVED_IPS` | csv | (empty) | IPs/CIDR ranges that may use the `reserved_connections` slots and are never evicted, e.g. your uptime monitor. Clients matching `ip_whitelist` get the same treatment. Matched against the same client IP as the per-IP limit, so behind a proxy it needs `trust_proxy`. |
 
 IP list entries are a single address (`10.0.0.5`, `2001:db8::1`) or a CIDR range
 (`185.220.100.0/22`, `2001:db8::/32`, `0.0.0.0/0`). Bits past the prefix length are ignored, so
@@ -207,6 +210,28 @@ startup with a warning naming it rather than being accepted and then matching no
 `ip_whitelist` entry is rejected the allow list stays enabled and admits no one. The same rules
 apply to `trusted_proxies` and to the NIP-86 `blockip` method, which answers `400` for an entry it
 cannot parse.
+
+### When max_connections is full
+
+A WebSocket upgrade is admitted in this order: `ip_whitelist`/`ip_blacklist`, then
+`max_connections_per_ip` and `max_connections_per_subnet` (`429`), then the global pool.
+In the pool:
+
+1. A client matching `reserved_ips` or `ip_whitelist` may use every slot. Any other
+   client may only use `max_connections - reserved_connections`.
+2. If no slot is free for the newcomer, the longest-idle connection is closed to make room.
+   It must have no open REQ subscription, must not have sent a message for
+   `evict_idle_seconds`, and must not be a reserved client. A client that is subscribed or
+   recently active is never evicted.
+3. If no connection qualifies, the newcomer gets `503 server connection limit reached`, as before.
+
+Eviction only runs after the per-IP and per-subnet caps have admitted the newcomer, so a source
+can never evict other clients with connections it was not allowed to hold. It defeats idle
+slot-hoarding (a swarm that connects and sits silent): those connections give way to new clients
+long before `idle_seconds` would reap them. A client that stays connected only to publish now and
+then, with no subscription, can be evicted under that pressure and should reconnect.
+WebSocket pings do not count as messages. Evictions are counted in `wisp_connections_evicted_total`
+and logged at most once a minute.
 
 ### `[spider]`
 

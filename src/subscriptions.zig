@@ -35,12 +35,86 @@ pub const Subscriptions = struct {
         try self.connections.put(conn.id, conn);
     }
 
-    pub fn tryAddConnection(self: *Subscriptions, conn: *Connection, max_connections: usize) !void {
+    pub const Admission = struct {
+        max_connections: usize,
+        /// The top this-many slots of max_connections go only to reserved clients.
+        reserved_connections: usize = 0,
+        /// The newcomer may use the reserved slots (conn.reserved).
+        reserved: bool = false,
+        /// When the newcomer finds no free slot, evict the longest-idle
+        /// connection that has been silent at least this long. 0 disables.
+        evict_idle_seconds: u32 = 0,
+    };
+
+    /// Register `conn` under the global connection limit. Returns true when an
+    /// idle connection was evicted to make room, false when a slot was free.
+    ///
+    /// The victim is dropped from the registry here, under the same exclusive
+    /// lock that admits the newcomer, so the slot changes hands atomically and
+    /// no broadcaster, idle-close or later eviction can reach it afterwards.
+    /// Closing it then goes through the idle reaper's path: closeWs() makes the
+    /// victim's worker read EOF and run WsConn.close(), which is what releases
+    /// its per-IP and per-subnet limiter slots and kind_index entries, exactly
+    /// once. Until that worker runs, the live socket count can exceed the
+    /// registry count by the number of evictions still in flight.
+    pub fn tryAddConnection(self: *Subscriptions, conn: *Connection, admission: Admission) !bool {
         const io = nostr.io.io();
         self.rwlock.lockUncancelable(io);
-        defer self.rwlock.unlock(io);
-        if (self.connections.count() >= max_connections) return error.TooManyConnections;
-        try self.connections.put(conn.id, conn);
+
+        const limit = if (admission.reserved)
+            admission.max_connections
+        else
+            admission.max_connections -| admission.reserved_connections;
+        if (self.connections.count() < limit) {
+            defer self.rwlock.unlock(io);
+            try self.connections.put(conn.id, conn);
+            return false;
+        }
+
+        const victim = blk: {
+            defer self.rwlock.unlock(io);
+            if (admission.evict_idle_seconds == 0) return error.TooManyConnections;
+            // Fail before touching the victim, so an allocation failure cannot
+            // drop it without admitting the newcomer.
+            try self.connections.ensureUnusedCapacity(1);
+            const v = self.evictionVictim(admission.evict_idle_seconds) orelse return error.TooManyConnections;
+            // Hold the victim alive past the unlock: its WsConn.close() drains
+            // write_guard before freeing, as for closeIdleConnection.
+            _ = v.write_guard.fetchAdd(1, .acquire);
+            _ = self.connections.remove(v.id);
+            self.connections.putAssumeCapacityNoClobber(conn.id, conn);
+            break :blk v;
+        };
+        defer _ = victim.write_guard.fetchSub(1, .release);
+        victim.closeWs();
+        return true;
+    }
+
+    // The longest-idle connection that is not reserved, has no open
+    // subscription, and has sent nothing for at least min_idle_seconds. A client
+    // holding a REQ open, or one that spoke recently, is never chosen.
+    //
+    // Caller holds the exclusive lock (subscribe/unsubscribe take it too, so the
+    // subscription counts read here are stable). This is a linear scan of the
+    // registry, run only when an upgrade finds the pool full, so it costs at most
+    // max_connections cheap checks per such upgrade (a few microseconds at 3000).
+    // If floods of refused upgrades against an all-active pool ever make that
+    // lock hold time matter, cache a "no victim before T" timestamp here.
+    fn evictionVictim(self: *Subscriptions, min_idle_seconds: u32) ?*Connection {
+        const threshold = nostr.io.timestamp() - @as(i64, min_idle_seconds);
+        var best: ?*Connection = null;
+        var best_activity: i64 = threshold + 1;
+        var iter = self.connections.valueIterator();
+        while (iter.next()) |conn_ptr| {
+            const c = conn_ptr.*;
+            if (c.reserved or c.subscriptions.count() != 0) continue;
+            const last = c.last_activity.load(.monotonic);
+            if (last < best_activity) {
+                best = c;
+                best_activity = last;
+            }
+        }
+        return best;
     }
 
     pub fn removeConnection(self: *Subscriptions, conn_id: u64) void {

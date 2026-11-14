@@ -543,6 +543,18 @@ pub const IpFilter = struct {
         return true;
     }
 
+    /// True only when the allow list is configured and the address matches it.
+    /// Unlike isAllowed, an empty list matches nobody.
+    pub fn matchesWhitelist(self: *IpFilter, ip: []const u8) bool {
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+
+        if (!self.whitelist_enabled) return false;
+        const addr = ip_match.parseAddr(ip) orelse return false;
+        return ip_match.anyMatch(self.whitelist.items, addr);
+    }
+
     pub fn isTrustedProxy(self: *IpFilter, ip: []const u8) bool {
         const io = nostr.io.io();
         self.mutex.lockUncancelable(io);
@@ -922,6 +934,18 @@ test "IpFilter whitelist with CIDR" {
     try std.testing.expect(!f.isAllowed("::2"));
     // A client address that does not parse cannot be on an allow list.
     try std.testing.expect(!f.isAllowed("unknown"));
+}
+
+test "IpFilter matchesWhitelist is empty-means-nobody" {
+    var f = IpFilter.init(std.testing.allocator);
+    defer f.deinit();
+    try std.testing.expect(!f.matchesWhitelist("10.0.0.1"));
+    try f.loadWhitelist("10.0.0.0/24, 2001:db8::/32");
+    try std.testing.expect(f.matchesWhitelist("10.0.0.9"));
+    try std.testing.expect(f.matchesWhitelist("::ffff:10.0.0.9"));
+    try std.testing.expect(f.matchesWhitelist("2001:db8::5"));
+    try std.testing.expect(!f.matchesWhitelist("10.0.1.1"));
+    try std.testing.expect(!f.matchesWhitelist("unknown"));
 }
 
 test "IpFilter trusted proxies with CIDR" {

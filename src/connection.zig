@@ -30,6 +30,10 @@ pub const Connection = struct {
 
     client_ip: [64]u8 = undefined,
     client_ip_len: u8 = 0,
+    // Client matched reserved_ips or ip_whitelist at upgrade. Such a connection
+    // may use the reserved_connections headroom and is never evicted to admit
+    // a newcomer. Set once before the connection is registered.
+    reserved: bool = false,
     auth_challenge: [32]u8 = undefined,
     authenticated_pubkeys: std.AutoHashMap([32]u8, void) = undefined,
     // Broadcast threads read the authenticated set (to gate private kinds) while
@@ -58,6 +62,7 @@ pub const Connection = struct {
         self.write_guard = .init(0);
         self.client_ip = undefined;
         self.client_ip_len = 0;
+        self.reserved = false;
         self.ws_conn = null;
         nostr.io.randomBytes(&self.auth_challenge);
         self.authenticated_pubkeys = std.AutoHashMap([32]u8, void).init(self.arena.allocator());

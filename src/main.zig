@@ -140,6 +140,12 @@ pub fn main(init: std.process.Init) !void {
     defer if (config_path != null) config.deinit();
 
     config.loadEnv();
+    config.validate() catch |err| {
+        switch (err) {
+            error.ReservedConnectionsTooLarge => std.log.err("Invalid config: reserved_connections ({d}) must be less than max_connections ({d})", .{ config.reserved_connections, config.max_connections }),
+        }
+        return err;
+    };
 
     if (spider_admin_arg) |admin| {
         config.spider_enabled = true;
