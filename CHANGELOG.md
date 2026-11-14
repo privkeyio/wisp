@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The `negentropy.max_sync_events` default is lowered from 1,000,000 to 100,000. Each NIP-77 session buffers up to this many event IDs in memory (about 40 MB at the old default, per session). A reconciliation whose filter matches more events is refused with `NEG-ERR "blocked: too many events"`; operators who sync large stores relay-to-relay should raise the setting (#83)
+
 ## [0.9.3] - 2026-11-10
 
 Fixes a crash that could abort the relay when it was stopped under load. No protocol or configuration changes.

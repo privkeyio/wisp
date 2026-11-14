@@ -88,7 +88,10 @@ admin = ""  # your hex pubkey (use `zig-out/bin/wisp help` for npub support via 
 
 [negentropy]
 enabled = true
-max_sync_events = 1000000
+# Event IDs buffered in memory per reconciliation session (~40 bytes each).
+# A sync whose filter matches more is refused with NEG-ERR "blocked: too many
+# events". Raise this for relay-to-relay sync of large stores.
+max_sync_events = 100000
 # Concurrent reconciliation sessions per connection. Each can buffer up to
 # max_sync_events IDs, so keep this small.
 max_sessions = 4
