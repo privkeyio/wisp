@@ -59,8 +59,12 @@ read kind 1059 should enable AUTH (`auth_required`).
 
 Operational metrics are exposed in Prometheus format at `GET /metrics` on the
 relay's port (connections, events stored/rejected/broadcast, REQ count, rate
-limiting). The endpoint honors the relay's IP allowlist/blocklist, so restrict
-it there or at your reverse proxy/firewall if you don't want it public.
+limiting). By default it answers only direct requests from a loopback peer;
+requests relayed by a proxy (carrying `X-Forwarded-For` or `X-Real-IP`) are
+refused whatever `trust_proxy` says. Set `metrics_public = true`
+(`WISP_METRICS_PUBLIC=true`) to open it, subject to the IP allowlist/blocklist.
+Denying `/metrics` at the proxy is still recommended as defence in depth. See
+[docs/configuration.md](docs/configuration.md#monitoring).
 
 ## Import/Export
 

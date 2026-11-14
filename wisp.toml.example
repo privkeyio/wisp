@@ -69,6 +69,10 @@ idle_seconds = 300
 # directly reachable, otherwise clients can forge these headers to spoof any IP.
 # Restrict which peers are trusted to a proxy IP/CIDR list; empty trusts any peer.
 # trusted_proxies = "127.0.0.1,10.0.0.0/24"
+# /metrics answers only direct loopback clients (127.0.0.0/8, ::1) by default;
+# requests carrying X-Forwarded-For or X-Real-IP (i.e. via a proxy) are refused.
+# Set true to serve it to any client that passes ip_whitelist/ip_blacklist.
+# metrics_public = false
 # max_connections_per_ip = 10
 # Entries are an address or a CIDR range, IPv4 or IPv6. Legacy prefixes ending in
 # '.' or ':' still work ("10.0.0." is 10.0.0.0/24). '*' wildcards are not supported.
@@ -88,7 +92,13 @@ admin = ""  # your hex pubkey (use `zig-out/bin/wisp help` for npub support via 
 
 [negentropy]
 enabled = true
-max_sync_events = 1000000
+# Event IDs buffered in memory per reconciliation session (~40 bytes each).
+# A sync whose filter matches more is refused with NEG-ERR "blocked: too many
+# events". A selective filter may instead hit the scan cap (max_sync_events x
+# [limits] query_scan_multiplier entries) and get NEG-ERR "error: result set
+# too large to reconcile"; raising either setting fixes it. Raise this for
+# relay-to-relay sync of large stores.
+max_sync_events = 100000
 # Concurrent reconciliation sessions per connection. Each can buffer up to
 # max_sync_events IDs, so keep this small.
 max_sessions = 4

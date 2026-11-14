@@ -16,6 +16,7 @@ Create `/etc/caddy/Caddyfile`:
 
 ```
 relay.yourdomain.com {
+    respond /metrics 404
     reverse_proxy localhost:7777
 }
 ```
@@ -71,6 +72,7 @@ limit_conn_zone $binary_remote_addr zone=perip:10m;
 
 server {
     listen 443 ssl;
+    location = /metrics { return 404; }
     location / {
         limit_conn perip 10;
         proxy_pass http://127.0.0.1:7777;
