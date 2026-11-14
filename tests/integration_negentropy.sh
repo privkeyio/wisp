@@ -25,8 +25,9 @@ chk() { # desc expected actual
 count() { timeout 10 noz req -k 1 -l 100 "$1" 2>/dev/null | grep -c '"kind"'; }
 
 # distinct created_at values so every event is unique
+base=$(($(date +%s) - 1000))
 for i in $(seq 1 $N); do
-  timeout 6 noz event --sec $SEC1 --ts $((1700000000 + i)) -c "neg$i" "$A" >/dev/null 2>&1
+  timeout 6 noz event --sec $SEC1 --ts $((base + i)) -c "neg$i" "$A" >/dev/null 2>&1
 done
 sleep 1
 

@@ -91,7 +91,7 @@ chk "allowed kind publishes" 1 "$(kind7 '++')"
 chk "kind outside the allowlist is blocked" 0 "$(published $SEC3 'kind 1 now blocked')"
 
 # allowevent approves one event past the kind allowlist
-TS=1700000000
+TS=$(($(date +%s) - 1000))
 APPROVED=$(timeout 10 noz event --sec "$SEC3" --ts $TS -c approved 2>/dev/null | grep -oE '"id":"[0-9a-f]{64}"' | cut -d'"' -f4)
 call $SEC1 "{\"method\":\"allowevent\",\"params\":[\"$APPROVED\"]}" >/dev/null
 chk "allowevent admits that event past the allowlist" 1 \
