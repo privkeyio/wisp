@@ -33,6 +33,21 @@ fn envInt(comptime T: type, name: []const u8, value: []const u8, current: T) T {
     };
 }
 
+/// A subnet prefix length, 0..max bits.
+fn parsePrefixLen(value: []const u8, max: u8) !u8 {
+    const len = try std.fmt.parseInt(u8, value, 10);
+    if (len > max) return error.PrefixLengthOutOfRange;
+    return len;
+}
+
+fn envPrefixLen(name: []const u8, value: []const u8, max: u8, current: u8) u8 {
+    return parsePrefixLen(value, max) catch {
+        var buf: [64]u8 = undefined;
+        log.warn("{s}=\"{s}\" is not a prefix length in 0..{d}; keeping {d}", .{ name, safeValue(value, &buf), max, current });
+        return current;
+    };
+}
+
 fn envBool(name: []const u8, value: []const u8, current: bool) bool {
     return parseBool(value) orelse {
         var buf: [64]u8 = undefined;
@@ -104,6 +119,11 @@ pub const Config = struct {
     // honored. Empty with trust_proxy=true honors headers from any peer.
     trusted_proxies: []const u8,
     max_connections_per_ip: u32,
+    // Aggregate cap over every client in one subnet (subnet_prefix_v4 /
+    // subnet_prefix_v6 bits), alongside the per-IP cap. 0 disables it.
+    max_connections_per_subnet: u32,
+    subnet_prefix_v4: u8,
+    subnet_prefix_v6: u8,
     ip_whitelist: []const u8,
     ip_blacklist: []const u8,
     // Serve /metrics to non-loopback clients. Off by default so operational
@@ -177,6 +197,9 @@ pub const Config = struct {
             .trust_proxy = false,
             .trusted_proxies = "",
             .max_connections_per_ip = 10,
+            .max_connections_per_subnet = 50,
+            .subnet_prefix_v4 = 24,
+            .subnet_prefix_v6 = 48,
             .ip_whitelist = "",
             .ip_blacklist = "",
             .metrics_public = false,
@@ -350,6 +373,12 @@ pub const Config = struct {
                 self.trusted_proxies = try self.allocString(value);
             } else if (std.mem.eql(u8, key, "max_connections_per_ip")) {
                 self.max_connections_per_ip = try std.fmt.parseInt(u32, value, 10);
+            } else if (std.mem.eql(u8, key, "max_connections_per_subnet")) {
+                self.max_connections_per_subnet = try std.fmt.parseInt(u32, value, 10);
+            } else if (std.mem.eql(u8, key, "subnet_prefix_v4")) {
+                self.subnet_prefix_v4 = try parsePrefixLen(value, 32);
+            } else if (std.mem.eql(u8, key, "subnet_prefix_v6")) {
+                self.subnet_prefix_v6 = try parsePrefixLen(value, 128);
             } else if (std.mem.eql(u8, key, "ip_whitelist")) {
                 self.ip_whitelist = try self.allocString(value);
             } else if (std.mem.eql(u8, key, "ip_blacklist")) {
@@ -417,6 +446,9 @@ pub const Config = struct {
         if (getenv("WISP_TRUSTED_PROXIES")) |v| self.trusted_proxies = v;
         if (getenv("WISP_METRICS_PUBLIC")) |v| self.metrics_public = envBool("WISP_METRICS_PUBLIC", v, self.metrics_public);
         if (getenv("WISP_MAX_CONNECTIONS_PER_IP")) |v| self.max_connections_per_ip = envInt(u32, "WISP_MAX_CONNECTIONS_PER_IP", v, self.max_connections_per_ip);
+        if (getenv("WISP_MAX_CONNECTIONS_PER_SUBNET")) |v| self.max_connections_per_subnet = envInt(u32, "WISP_MAX_CONNECTIONS_PER_SUBNET", v, self.max_connections_per_subnet);
+        if (getenv("WISP_SUBNET_PREFIX_V4")) |v| self.subnet_prefix_v4 = envPrefixLen("WISP_SUBNET_PREFIX_V4", v, 32, self.subnet_prefix_v4);
+        if (getenv("WISP_SUBNET_PREFIX_V6")) |v| self.subnet_prefix_v6 = envPrefixLen("WISP_SUBNET_PREFIX_V6", v, 128, self.subnet_prefix_v6);
         if (getenv("WISP_WORKERS")) |v| self.workers = envInt(u16, "WISP_WORKERS", v, self.workers);
         if (getenv("WISP_MAX_CONN")) |v| self.max_conn = envInt(u16, "WISP_MAX_CONN", v, self.max_conn);
         if (getenv("WISP_EVENTS_PER_MINUTE")) |v| self.events_per_minute = envInt(u32, "WISP_EVENTS_PER_MINUTE", v, self.events_per_minute);
@@ -508,6 +540,33 @@ test "setValue: metrics_public defaults off and parses under [security]" {
     try config.setValue("security", "metrics_public", "true");
     try std.testing.expectEqual(true, config.metrics_public);
     try std.testing.expectError(error.InvalidBoolean, config.setValue("security", "metrics_public", "maybe"));
+}
+
+test "setValue: subnet connection cap and prefix lengths" {
+    var config = Config.defaults();
+    try std.testing.expectEqual(@as(u32, 50), config.max_connections_per_subnet);
+    try std.testing.expectEqual(@as(u8, 24), config.subnet_prefix_v4);
+    try std.testing.expectEqual(@as(u8, 48), config.subnet_prefix_v6);
+
+    try config.setValue("security", "max_connections_per_subnet", "0");
+    try std.testing.expectEqual(@as(u32, 0), config.max_connections_per_subnet);
+    try config.setValue("security", "subnet_prefix_v4", "32");
+    try config.setValue("security", "subnet_prefix_v6", "0");
+    try std.testing.expectEqual(@as(u8, 32), config.subnet_prefix_v4);
+    try std.testing.expectEqual(@as(u8, 0), config.subnet_prefix_v6);
+    try config.setValue("security", "subnet_prefix_v6", "128");
+    try std.testing.expectEqual(@as(u8, 128), config.subnet_prefix_v6);
+
+    try std.testing.expectError(error.PrefixLengthOutOfRange, config.setValue("security", "subnet_prefix_v4", "33"));
+    try std.testing.expectError(error.PrefixLengthOutOfRange, config.setValue("security", "subnet_prefix_v6", "129"));
+    try std.testing.expectError(error.Overflow, config.setValue("security", "subnet_prefix_v6", "256"));
+    try std.testing.expectError(error.InvalidCharacter, config.setValue("security", "subnet_prefix_v4", "/24"));
+    try std.testing.expectEqual(@as(u8, 32), config.subnet_prefix_v4);
+
+    // The environment keeps the current value on a bad one, like envInt.
+    try std.testing.expectEqual(@as(u8, 24), envPrefixLen("WISP_SUBNET_PREFIX_V4", "33", 32, 24));
+    try std.testing.expectEqual(@as(u8, 48), envPrefixLen("WISP_SUBNET_PREFIX_V6", "-1", 128, 48));
+    try std.testing.expectEqual(@as(u8, 56), envPrefixLen("WISP_SUBNET_PREFIX_V6", "56", 128, 48));
 }
 
 test safeValue {

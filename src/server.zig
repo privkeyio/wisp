@@ -62,6 +62,13 @@ pub const App = struct {
                     log.warn("connection rejected (per-IP limit): {s}", .{safeIp(client_ip, &log_ip_buf)});
                     return;
                 },
+                error.TooManyConnectionsPerSubnet => {
+                    res.status = 429;
+                    res.content_type = .TEXT;
+                    res.body = "too many connections from your network";
+                    log.warn("connection rejected (per-subnet limit): {s}", .{safeIp(client_ip, &log_ip_buf)});
+                    return;
+                },
                 error.TooManyConnections => {
                     res.status = 503;
                     res.content_type = .TEXT;
@@ -249,10 +256,19 @@ pub const WsConn = struct {
         const app = ctx.app;
         const ip = ctx.ip();
 
-        // Atomic per-IP connection limit.
-        if (!app.conn_limiter.tryAcquireConnection(ip)) {
-            metrics.rateLimited();
-            return error.TooManyConnectionsPerIp;
+        // Atomic per-IP and per-subnet connection limits. On rejection neither
+        // slot is held; on success both are, and every later error path and
+        // close() gives both back through removeConnection.
+        switch (app.conn_limiter.acquire(ip)) {
+            .admitted => {},
+            .per_ip_limit => {
+                metrics.rateLimited();
+                return error.TooManyConnectionsPerIp;
+            },
+            .per_subnet_limit => {
+                metrics.rateLimited();
+                return error.TooManyConnectionsPerSubnet;
+            },
         }
         errdefer app.conn_limiter.removeConnection(ip);
 
@@ -527,7 +543,18 @@ pub const Server = struct {
     ) !void {
         self.allocator = allocator;
         self.next_id = std.atomic.Value(u64).init(0);
-        self.conn_limiter = rate_limiter.ConnectionLimiter.init(allocator, config.max_connections_per_ip);
+        self.conn_limiter = rate_limiter.ConnectionLimiter.init(allocator, config.max_connections_per_ip, .{
+            .max_connections = config.max_connections_per_subnet,
+            .prefix_v4 = config.subnet_prefix_v4,
+            .prefix_v6 = config.subnet_prefix_v6,
+        });
+        if (self.conn_limiter.subnet.max_connections != config.max_connections_per_subnet) {
+            log.warn("max_connections_per_subnet {d} is below max_connections_per_ip {d}; using {d}", .{
+                config.max_connections_per_subnet,
+                config.max_connections_per_ip,
+                self.conn_limiter.subnet.max_connections,
+            });
+        }
         self.ip_filter = rate_limiter.IpFilter.init(allocator);
         try self.ip_filter.loadWhitelist(config.ip_whitelist);
         try self.ip_filter.loadBlacklist(config.ip_blacklist);
@@ -646,11 +673,11 @@ const TestRelay = struct {
     limiter: rate_limiter.ConnectionLimiter,
     next_id: std.atomic.Value(u64),
 
-    fn init(self: *TestRelay, max_connections: u32, max_per_ip: u32) void {
+    fn init(self: *TestRelay, max_connections: u32, max_per_ip: u32, max_per_subnet: u32) void {
         self.config = Config.defaults();
         self.config.max_connections = max_connections;
         self.subs = Subscriptions.init(testing.allocator);
-        self.limiter = rate_limiter.ConnectionLimiter.init(testing.allocator, max_per_ip);
+        self.limiter = rate_limiter.ConnectionLimiter.init(testing.allocator, max_per_ip, .{ .max_connections = max_per_subnet });
         self.next_id = .init(0);
     }
 
@@ -683,7 +710,7 @@ const TestRelay = struct {
 
 test "WsConn init registers the connection and close releases the registry entry and per-IP slot" {
     var relay: TestRelay = undefined;
-    relay.init(10, 1);
+    relay.init(10, 1, 1);
     defer relay.deinit();
     var peer: TestPeer = undefined;
     try peer.init();
@@ -709,7 +736,7 @@ test "WsConn init registers the connection and close releases the registry entry
 
 test "WsConn init per-IP rejection leaves the registry untouched" {
     var relay: TestRelay = undefined;
-    relay.init(10, 1);
+    relay.init(10, 1, 1);
     defer relay.deinit();
     var peer: TestPeer = undefined;
     try peer.init();
@@ -722,9 +749,9 @@ test "WsConn init per-IP rejection leaves the registry untouched" {
     try testing.expectEqual(@as(usize, 1), relay.subs.connectionCount());
 }
 
-test "WsConn init global-limit rejection gives back the per-IP slot and frees the connection" {
+test "WsConn init global-limit rejection gives back the per-IP and subnet slots and frees the connection" {
     var relay: TestRelay = undefined;
-    relay.init(1, 1);
+    relay.init(1, 1, 2);
     defer relay.deinit();
     var peer: TestPeer = undefined;
     try peer.init();
@@ -741,11 +768,48 @@ test "WsConn init global-limit rejection gives back the per-IP slot and frees th
     try testing.expectError(error.TooManyConnections, WsConn.init(&peer.ws, &ctx_b));
     try testing.expect(relay.limiter.canConnect("10.0.0.4"));
     try testing.expectEqual(@as(usize, 1), relay.subs.connectionCount());
+
+    // Its subnet slot is back too: the /24 (cap 2) holds only 10.0.0.3, so
+    // exactly one more address fits.
+    try testing.expectEqual(rate_limiter.ConnectionLimiter.Admission.admitted, relay.limiter.acquire("10.0.0.5"));
+    try testing.expectEqual(rate_limiter.ConnectionLimiter.Admission.per_subnet_limit, relay.limiter.acquire("10.0.0.6"));
+    relay.limiter.removeConnection("10.0.0.5");
+}
+
+test "WsConn init per-subnet rejection holds no slots and other subnets still connect" {
+    var relay: TestRelay = undefined;
+    relay.init(10, 1, 2);
+    defer relay.deinit();
+    var peer: TestPeer = undefined;
+    try peer.init();
+    defer peer.deinit();
+
+    const ctx_a = relay.ctx("185.220.100.1");
+    const ctx_b = relay.ctx("::ffff:185.220.100.2");
+    const ctx_c = relay.ctx("185.220.100.3");
+    var ws_a = try WsConn.init(&peer.ws, &ctx_a);
+    var ws_b = try WsConn.init(&peer.ws, &ctx_b);
+    defer ws_b.close();
+
+    try testing.expectError(error.TooManyConnectionsPerSubnet, WsConn.init(&peer.ws, &ctx_c));
+    try testing.expectEqual(@as(usize, 2), relay.subs.connectionCount());
+    // The rejected address's per-IP slot was given back.
+    try testing.expect(relay.limiter.canConnect("185.220.100.3"));
+
+    const ctx_other = relay.ctx("185.220.101.1");
+    var ws_other = try WsConn.init(&peer.ws, &ctx_other);
+    ws_other.close();
+
+    // Closing one connection in the full /24 lets the next address in.
+    ws_a.close();
+    var ws_c = try WsConn.init(&peer.ws, &ctx_c);
+    ws_c.close();
+    try testing.expectEqual(@as(usize, 1), relay.subs.connectionCount());
 }
 
 test "WsConn afterInit sends the NIP-42 challenge only when auth is configured" {
     var relay: TestRelay = undefined;
-    relay.init(10, 10);
+    relay.init(10, 10, 10);
     defer relay.deinit();
     var peer: TestPeer = undefined;
     try peer.init();
@@ -782,7 +846,7 @@ test "WsConn concurrent init/close leaves no registry entries or per-IP slots be
     const threads = 8;
     const iterations = 200;
     var relay: TestRelay = undefined;
-    relay.init(threads, threads);
+    relay.init(threads, threads, threads);
     defer relay.deinit();
     var peers: [threads]TestPeer = undefined;
     for (&peers) |*p| try p.init();
