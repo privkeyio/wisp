@@ -972,7 +972,7 @@ pub const Handler = struct {
     // An open NIP-77 session keeps a connection from being evicted, so closing
     // the last one lets the next full-pool upgrade consider it again.
     fn endNegSession(self: *Handler, conn: *Connection, sub_id: []const u8) void {
-        conn.removeNegSession(sub_id);
+        if (!conn.removeNegSession(sub_id)) return;
         if (conn.neg_session_count.load(.monotonic) == 0) self.subs.noteEvictable();
     }
 

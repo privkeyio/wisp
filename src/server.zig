@@ -217,15 +217,14 @@ pub const App = struct {
     /// are not honored: the client IP is then the proxy's own address, which
     /// would make every proxied client reserved (the /metrics rule).
     fn mayBeReserved(app: App, req: *httpz.Request, res: *httpz.Response) bool {
-        const forwarded = isForwarded(
-            req.header("x-forwarded-for"),
-            req.header("x-real-ip"),
-            req.headers.len >= req.headers.keys.len,
-        );
-        if (!forwarded) return true;
+        const xff = req.header("x-forwarded-for");
+        const xrip = req.header("x-real-ip");
+        const headers_full = req.headers.len >= req.headers.keys.len;
+        if (!isForwarded(xff, xrip, headers_full)) return true;
         var peer_buf: [64]u8 = undefined;
         const peer_ip = formatPeerIp(res.conn.address, &peer_buf);
-        return reservedAllowed(app.config.trust_proxy and app.trusted_proxies.isTrustedProxy(peer_ip), forwarded);
+        const honored = app.config.trust_proxy and app.trusted_proxies.isTrustedProxy(peer_ip);
+        return reservedEligible(honored, xff, xrip, headers_full);
     }
 
     fn clientIp(app: App, req: *httpz.Request, res: *httpz.Response, buf: *[64]u8) []const u8 {
@@ -505,9 +504,12 @@ test coversProxyRange {
 
 /// Reserved status needs a client IP that is really the client's: either the
 /// request was not forwarded, or the forwarding headers were honored (trust_proxy
-/// with a trusted peer), so the IP came from them rather than the proxy socket.
-fn reservedAllowed(headers_honored: bool, forwarded: bool) bool {
-    return headers_honored or !forwarded;
+/// with a trusted peer) and actually named a client. Headers that name none (an
+/// empty X-Forwarded-For, or one httpz dropped from a full header table) leave
+/// the client IP as the proxy socket's, which must not match reserved_ips.
+fn reservedEligible(headers_honored: bool, xff: ?[]const u8, xrip: ?[]const u8, headers_full: bool) bool {
+    if (!isForwarded(xff, xrip, headers_full)) return true;
+    return headers_honored and rate_limiter.forwardedClientIp(xff, xrip) != null;
 }
 
 /// A request is treated as proxied if it carries X-Forwarded-For or X-Real-IP.
@@ -525,15 +527,24 @@ test isForwarded {
     try std.testing.expect(isForwarded(null, null, true));
 }
 
-test reservedAllowed {
-    try std.testing.expect(reservedAllowed(false, false));
-    try std.testing.expect(reservedAllowed(true, false));
-    try std.testing.expect(reservedAllowed(true, true));
+test reservedEligible {
+    // Not forwarded: the socket peer is the client.
+    try std.testing.expect(reservedEligible(false, null, null, false));
+    try std.testing.expect(reservedEligible(true, null, null, false));
+    // Honored headers that name a client.
+    try std.testing.expect(reservedEligible(true, "127.0.0.1", null, false));
+    try std.testing.expect(reservedEligible(true, "", "10.0.0.1", false));
+    try std.testing.expect(reservedEligible(true, "203.0.113.9", null, true));
     // trust_proxy off (or an untrusted peer) and the request was relayed: the
     // client IP is the proxy's, so loopback in reserved_ips must not match it.
-    try std.testing.expect(!reservedAllowed(false, isForwarded("203.0.113.9", null, false)));
-    try std.testing.expect(!reservedAllowed(false, isForwarded(null, "203.0.113.9", false)));
-    try std.testing.expect(!reservedAllowed(false, isForwarded(null, null, true)));
+    try std.testing.expect(!reservedEligible(false, "203.0.113.9", null, false));
+    try std.testing.expect(!reservedEligible(false, null, "203.0.113.9", false));
+    try std.testing.expect(!reservedEligible(false, null, null, true));
+    // Honored, but the headers name no client, so extraction falls back to the
+    // trusted proxy's own address.
+    try std.testing.expect(!reservedEligible(true, "", null, false));
+    try std.testing.expect(!reservedEligible(true, " , ", "", false));
+    try std.testing.expect(!reservedEligible(true, null, null, true));
 }
 
 test metricsAllowed {
@@ -1237,7 +1248,8 @@ test "a refused scan backs off for a second; closing a NIP-77 session or the las
     // Closing it (the handler calls noteEvictable once the last one is gone)
     // makes the next upgrade rescan at once and evict.
     relay.subs.no_victim_before.store(nostr.io.timestamp() + 60, .monotonic);
-    ws_a.connection.removeNegSession("neg");
+    try testing.expect(ws_a.connection.removeNegSession("neg"));
+    try testing.expect(!ws_a.connection.removeNegSession("neg"));
     try testing.expectEqual(@as(u32, 0), ws_a.connection.neg_session_count.load(.monotonic));
     relay.subs.noteEvictable();
     var ws_new = try WsConn.init(&peers[2].ws, &ctx_new);
@@ -1250,8 +1262,16 @@ test "a refused scan backs off for a second; closing a NIP-77 session or the las
     defer req.deinit();
     try relay.subs.subscribe(ws_b.connection, "s", try req.getFilters(ws_b.connection.allocator()), 5);
     relay.subs.no_victim_before.store(nostr.io.timestamp() + 60, .monotonic);
+    // A CLOSE for an id it does not hold changes nothing and keeps the backoff.
+    const pinned = nostr.io.timestamp() + 60;
+    relay.subs.no_victim_before.store(pinned, .monotonic);
+    relay.subs.unsubscribe(ws_b.connection, "other");
+    try testing.expectEqual(pinned, relay.subs.no_victim_before.load(.monotonic));
     relay.subs.unsubscribe(ws_b.connection, "s");
     try testing.expectEqual(@as(i64, 0), relay.subs.no_victim_before.load(.monotonic));
+    relay.subs.no_victim_before.store(pinned, .monotonic);
+    relay.subs.unsubscribe(ws_b.connection, "s");
+    try testing.expectEqual(pinned, relay.subs.no_victim_before.load(.monotonic));
 }
 
 test "reserved headroom and eviction together" {

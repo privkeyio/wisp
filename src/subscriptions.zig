@@ -232,8 +232,9 @@ pub const Subscriptions = struct {
         const io = nostr.io.io();
         self.rwlock.lockUncancelable(io);
         defer self.rwlock.unlock(io);
-        conn.removeSubscription(sub_id);
-        if (conn.subscriptions.count() == 0) self.noteEvictable();
+        // A CLOSE for an id the connection does not hold changes nothing, so it
+        // must not clear the no-victim backoff.
+        if (conn.removeSubscription(sub_id) and conn.subscriptions.count() == 0) self.noteEvictable();
     }
 
     /// A connection may have just become an eviction candidate (its last

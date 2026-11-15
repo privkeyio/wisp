@@ -198,7 +198,7 @@ pub const Connection = struct {
     pub fn addSubscription(self: *Connection, sub_id: []const u8, filters: []const nostr.Filter, max_subs: u32) !void {
         // Drop any existing subscription with this id first so replacing one at
         // capacity is allowed; only genuinely new ids are subject to the limit.
-        self.removeSubscription(sub_id);
+        _ = self.removeSubscription(sub_id);
 
         if (self.subscriptions.count() >= max_subs) {
             return error.TooManySubscriptions;
@@ -219,8 +219,9 @@ pub const Connection = struct {
         });
     }
 
-    pub fn removeSubscription(self: *Connection, sub_id: []const u8) void {
-        _ = self.subscriptions.remove(sub_id);
+    /// Whether a subscription with this id was held and removed.
+    pub fn removeSubscription(self: *Connection, sub_id: []const u8) bool {
+        return self.subscriptions.remove(sub_id);
     }
 
     pub fn addNegSession(self: *Connection, sub_id: []const u8) !*NegSession {
@@ -243,13 +244,14 @@ pub const Connection = struct {
         return self.neg_sessions.getPtr(sub_id);
     }
 
-    pub fn removeNegSession(self: *Connection, sub_id: []const u8) void {
-        if (self.neg_sessions.fetchRemove(sub_id)) |kv| {
-            _ = self.neg_session_count.fetchSub(1, .monotonic);
-            var session = kv.value;
-            session.deinit();
-            self.backing_allocator.free(kv.key);
-        }
+    /// Whether a session with this id was open and removed.
+    pub fn removeNegSession(self: *Connection, sub_id: []const u8) bool {
+        const kv = self.neg_sessions.fetchRemove(sub_id) orelse return false;
+        _ = self.neg_session_count.fetchSub(1, .monotonic);
+        var session = kv.value;
+        session.deinit();
+        self.backing_allocator.free(kv.key);
+        return true;
     }
 
     pub fn matchesEvent(self: *Connection, event: *const nostr.Event) ?[]const u8 {
