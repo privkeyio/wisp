@@ -13,6 +13,7 @@ var reqs_total = std.atomic.Value(u64).init(0);
 var rate_limited = std.atomic.Value(u64).init(0);
 var query_rate_limited = std.atomic.Value(u64).init(0);
 var connections_evicted = std.atomic.Value(u64).init(0);
+var connections_rejected_subnet = std.atomic.Value(u64).init(0);
 
 pub fn connectionOpened() void {
     _ = connections_total.fetchAdd(1, .monotonic);
@@ -46,6 +47,10 @@ pub fn queryRateLimited() void {
     _ = query_rate_limited.fetchAdd(1, .monotonic);
 }
 
+pub fn connectionRejectedSubnet() void {
+    _ = connections_rejected_subnet.fetchAdd(1, .monotonic);
+}
+
 fn metric(w: anytype, name: []const u8, help: []const u8, kind: []const u8, value: u64) !void {
     try w.print("# HELP {s} {s}\n# TYPE {s} {s}\n{s} {d}\n", .{ name, help, name, kind, name, value });
 }
@@ -62,17 +67,20 @@ pub fn write(w: anytype, active_connections: u64) !void {
     try metric(w, "wisp_req_total", "REQ subscription messages received", "counter", reqs_total.load(.monotonic));
     try metric(w, "wisp_rate_limited_total", "Connections/events rejected by rate or connection limits", "counter", rate_limited.load(.monotonic));
     try metric(w, "wisp_query_rate_limited_total", "Query messages (REQ/COUNT/NEG_OPEN) rejected by the query rate limit", "counter", query_rate_limited.load(.monotonic));
+    try metric(w, "wisp_connections_rejected_subnet_total", "Connections rejected by max_connections_per_subnet", "counter", connections_rejected_subnet.load(.monotonic));
 }
 
 test write {
     const conn_before = connections_total.load(.monotonic);
     const bcast_before = events_broadcast.load(.monotonic);
     const evicted_before = connections_evicted.load(.monotonic);
+    const subnet_before = connections_rejected_subnet.load(.monotonic);
 
     connectionOpened();
     connectionEvicted();
     eventBroadcast(3);
     eventBroadcast(0); // no-op: a zero-recipient broadcast must not move the counter
+    connectionRejectedSubnet();
 
     var buf: [4096]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
@@ -94,4 +102,7 @@ test write {
     try std.testing.expect(std.mem.indexOf(u8, out, bcast_line) != null);
     const evicted_line = try std.fmt.bufPrint(&line_buf, "wisp_connections_evicted_total {d}\n", .{evicted_before + 1});
     try std.testing.expect(std.mem.indexOf(u8, out, evicted_line) != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "# TYPE wisp_connections_rejected_subnet_total counter\n") != null);
+    const subnet_line = try std.fmt.bufPrint(&line_buf, "wisp_connections_rejected_subnet_total {d}\n", .{subnet_before + 1});
+    try std.testing.expect(std.mem.indexOf(u8, out, subnet_line) != null);
 }

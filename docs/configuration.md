@@ -184,8 +184,8 @@ instead leave it stopped.
 | `trust_proxy` | `WISP_TRUST_PROXY` | bool | `false` | Honor `X-Forwarded-For` / `X-Real-IP` for the client IP. Enable only behind a reverse proxy whose backend port is not directly reachable, or clients can spoof their IP. |
 | `trusted_proxies` | `WISP_TRUSTED_PROXIES` | csv | (empty) | IPs/CIDR ranges of proxies whose forwarded headers are trusted. Empty with `trust_proxy=true` trusts any peer. |
 | `metrics_public` | `WISP_METRICS_PUBLIC` | bool | `false` | Serve `/metrics` to any client. When `false`, only direct requests whose socket peer is 127.0.0.0/8 or `::1` (including `::ffff:127.x`) and that carry no `X-Forwarded-For`/`X-Real-IP` header may scrape it; others get 403. |
-| `max_connections_per_ip` | `WISP_MAX_CONNECTIONS_PER_IP` | u32 | `10` | Per-IP concurrent connection cap, applied at the WebSocket upgrade. A connection that never sends a request does not reach it; those are closed by the 10s request timeout instead. To cap concurrent TCP connections per source, see [Limiting connections per source](deployment.md#limiting-connections-per-source). |
-| `max_connections_per_subnet` | `WISP_MAX_CONNECTIONS_PER_SUBNET` | u32 | `50` | Concurrent connection cap shared by every client in one subnet (sized by the two prefix settings below), applied alongside `max_connections_per_ip`: a connection must fit under both. Stops a swarm spread over many addresses in one range from exhausting `max_connections`. `0` disables it. A value below `max_connections_per_ip` is raised to it, so one address can always use its full per-IP allowance. 50 per /24 is generous for real users, including CGNAT and mobile carriers. |
+| `max_connections_per_ip` | `WISP_MAX_CONNECTIONS_PER_IP` | u32 | `10` | Per-IP concurrent connection cap, applied at the WebSocket upgrade. A connection that never sends a request does not reach it; those are closed by the 10s request timeout instead. To cap concurrent TCP connections per source, see [Limiting connections per source](deployment.md#limiting-connections-per-source). Must be at least `1`: `0` fails the config load (and is ignored with a warning in the environment). There is no unlimited value, so set a large number to effectively lift the cap. |
+| `max_connections_per_subnet` | `WISP_MAX_CONNECTIONS_PER_SUBNET` | u32 | `50` | Concurrent connection cap shared by every client in one subnet (sized by the two prefix settings below), applied alongside `max_connections_per_ip`: a connection must fit under both. Stops a swarm spread over many addresses in one range from exhausting `max_connections`. `0` disables it. A value below `max_connections_per_ip` is raised to it, so one address can always use its full per-IP allowance. 50 is a starting point; see [Per-subnet connection cap](#per-subnet-connection-cap) before relying on it. |
 | `subnet_prefix_v4` | `WISP_SUBNET_PREFIX_V4` | u8 | `24` | IPv4 prefix length (0-32) that groups clients for `max_connections_per_subnet`. IPv4-mapped IPv6 clients (`::ffff:a.b.c.d`) count in their IPv4 subnet. |
 | `subnet_prefix_v6` | `WISP_SUBNET_PREFIX_V6` | u8 | `48` | IPv6 prefix length (0-128) that groups clients for `max_connections_per_subnet`. |
 | `ip_whitelist` | `WISP_IP_WHITELIST` | csv | (empty) | If set, only these IPs/CIDR ranges may connect. |
@@ -210,6 +210,28 @@ startup with a warning naming it rather than being accepted and then matching no
 `ip_whitelist` entry is rejected the allow list stays enabled and admits no one. The same rules
 apply to `trusted_proxies` and to the NIP-86 `blockip` method, which answers `400` for an entry it
 cannot parse.
+
+#### Per-subnet connection cap
+
+The default of 50 concurrent connections per /24 (or /48) is a starting point, not a measured
+safe value. Many users behind one carrier-grade NAT or mobile gateway share a subnet, so a busy
+relay with many mobile users should watch the `connection rejected (per-subnet limit)` log line
+and the `wisp_connections_rejected_subnet_total` metric. If legitimate clients are being refused,
+raise `max_connections_per_subnet`, narrow the subnet with a longer `subnet_prefix_v4` /
+`subnet_prefix_v6`, or set `max_connections_per_subnet = 0` to disable the cap.
+
+The cap is shared by the whole range, so any `max_connections_per_subnet / max_connections_per_ip`
+addresses in a subnet that hold their connections open lock the rest of that subnet out until they
+disconnect. That is the trade-off for bounding a swarm spread over a range. With `trust_proxy`
+enabled the client IP comes from the forwarded headers, and a client that can forge them can
+place its connections in any subnet, including one it wants to lock out; set `trusted_proxies` to
+exactly your proxies so only they are believed. Client IPs that do not parse as an address (a
+malformed or forged header) all share one subnet budget.
+
+Behind several proxy or ingress addresses in one subnet with `trust_proxy=false` (a Docker bridge
+network, Kubernetes ingress replicas), every client is seen as one of those addresses and the
+whole relay shares one subnet budget. Configure `trust_proxy` and `trusted_proxies`, or set
+`max_connections_per_subnet = 0`.
 
 ### When max_connections is full
 
