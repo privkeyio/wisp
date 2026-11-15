@@ -12,10 +12,15 @@ var events_broadcast = std.atomic.Value(u64).init(0);
 var reqs_total = std.atomic.Value(u64).init(0);
 var rate_limited = std.atomic.Value(u64).init(0);
 var query_rate_limited = std.atomic.Value(u64).init(0);
+var connections_evicted = std.atomic.Value(u64).init(0);
 var connections_rejected_subnet = std.atomic.Value(u64).init(0);
 
 pub fn connectionOpened() void {
     _ = connections_total.fetchAdd(1, .monotonic);
+}
+
+pub fn connectionEvicted() void {
+    _ = connections_evicted.fetchAdd(1, .monotonic);
 }
 
 pub fn eventStored() void {
@@ -55,6 +60,7 @@ fn metric(w: anytype, name: []const u8, help: []const u8, kind: []const u8, valu
 pub fn write(w: anytype, active_connections: u64) !void {
     try metric(w, "wisp_connections_total", "Total WebSocket connections accepted", "counter", connections_total.load(.monotonic));
     try metric(w, "wisp_connections_active", "Currently open WebSocket connections", "gauge", active_connections);
+    try metric(w, "wisp_connections_evicted_total", "Idle connections closed to admit a new one when max_connections was full", "counter", connections_evicted.load(.monotonic));
     try metric(w, "wisp_events_stored_total", "Events accepted and stored", "counter", events_stored.load(.monotonic));
     try metric(w, "wisp_events_rejected_total", "Events rejected (validation, auth, limits, PoW, ...)", "counter", events_rejected.load(.monotonic));
     try metric(w, "wisp_events_broadcast_total", "Events delivered to matching subscriptions", "counter", events_broadcast.load(.monotonic));
@@ -67,9 +73,11 @@ pub fn write(w: anytype, active_connections: u64) !void {
 test write {
     const conn_before = connections_total.load(.monotonic);
     const bcast_before = events_broadcast.load(.monotonic);
+    const evicted_before = connections_evicted.load(.monotonic);
     const subnet_before = connections_rejected_subnet.load(.monotonic);
 
     connectionOpened();
+    connectionEvicted();
     eventBroadcast(3);
     eventBroadcast(0); // no-op: a zero-recipient broadcast must not move the counter
     connectionRejectedSubnet();
@@ -92,6 +100,8 @@ test write {
     try std.testing.expect(std.mem.indexOf(u8, out, conn_line) != null);
     const bcast_line = try std.fmt.bufPrint(&line_buf, "wisp_events_broadcast_total {d}\n", .{bcast_before + 3});
     try std.testing.expect(std.mem.indexOf(u8, out, bcast_line) != null);
+    const evicted_line = try std.fmt.bufPrint(&line_buf, "wisp_connections_evicted_total {d}\n", .{evicted_before + 1});
+    try std.testing.expect(std.mem.indexOf(u8, out, evicted_line) != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "# TYPE wisp_connections_rejected_subnet_total counter\n") != null);
     const subnet_line = try std.fmt.bufPrint(&line_buf, "wisp_connections_rejected_subnet_total {d}\n", .{subnet_before + 1});
     try std.testing.expect(std.mem.indexOf(u8, out, subnet_line) != null);

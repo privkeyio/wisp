@@ -13,6 +13,7 @@ const Subscriptions = @import("subscriptions.zig").Subscriptions;
 const Handler = @import("handler.zig").Handler;
 const Broadcaster = @import("broadcaster.zig").Broadcaster;
 const Server = @import("server.zig").Server;
+const flushEvictionLog = @import("server.zig").flushEvictionLog;
 const Spider = @import("spider.zig").Spider;
 const nostr = @import("nostr.zig");
 const rate_limiter = @import("rate_limiter.zig");
@@ -140,6 +141,12 @@ pub fn main(init: std.process.Init) !void {
     defer if (config_path != null) config.deinit();
 
     config.loadEnv();
+    config.validate() catch |err| {
+        switch (err) {
+            error.ReservedConnectionsTooLarge => std.log.err("Invalid config: reserved_connections ({d}) must be less than max_connections ({d})", .{ config.reserved_connections, config.max_connections }),
+        }
+        return err;
+    };
 
     if (spider_admin_arg) |admin| {
         config.spider_enabled = true;
@@ -283,6 +290,8 @@ fn storeCleanupThread(server: *Server, store: *Store, config: *const Config, sub
         std.Io.sleep(nostr.io.io(), .{ .nanoseconds = check_interval_ns }, .awake) catch {};
         if (shutdown.load(.acquire)) break;
         checks += 1;
+
+        flushEvictionLog();
 
         if (config.idle_seconds != 0 and checks % idle_checks == 0) {
             const idle_ids = subs.getIdleConnections(config.idle_seconds);

@@ -10,6 +10,7 @@ const Subscriptions = @import("subscriptions.zig").Subscriptions;
 const Connection = @import("connection.zig").Connection;
 const nip11 = @import("nip11.zig");
 const rate_limiter = @import("rate_limiter.zig");
+const ip_match = @import("ip_match.zig");
 const Nip86Handler = @import("nip86.zig").Nip86Handler;
 const metrics = @import("relay_metrics.zig");
 
@@ -29,6 +30,7 @@ pub const App = struct {
     conn_limiter: *rate_limiter.ConnectionLimiter,
     ip_filter: *rate_limiter.IpFilter,
     trusted_proxies: *rate_limiter.IpFilter,
+    reserved_ips: *rate_limiter.IpFilter,
     next_id: *std.atomic.Value(u64),
 
     // httpz requires this declaration to enable WebSocket upgrades.
@@ -47,7 +49,12 @@ pub const App = struct {
 
         // WebSocket upgrade?
         if (req.header("upgrade")) |_| {
-            var ctx = WsContext{ .app = app, .client_ip_len = 0, .client_ip = undefined };
+            var ctx = WsContext{
+                .app = app,
+                .client_ip_len = 0,
+                .client_ip = undefined,
+                .may_be_reserved = app.mayBeReserved(req, res),
+            };
             ctx.setIp(client_ip);
             // WsConn.init runs inside the upgrade handshake, before any 101 reply is
             // written, so a connection-limit rejection surfaces here as an error.
@@ -200,6 +207,26 @@ pub const App = struct {
         return !app.ip_filter.isAllowed(client_ip) or app.nip86_handler.mgmt_store.isIpBlocked(client_ip);
     }
 
+    /// May use the reserved_connections headroom and is never evicted. Only
+    /// reserved_ips grants this; ip_whitelist only gates who may connect.
+    fn isReservedIp(app: App, client_ip: []const u8) bool {
+        return app.reserved_ips.matchesWhitelist(client_ip);
+    }
+
+    /// False when the request was relayed by a proxy whose forwarding headers
+    /// are not honored: the client IP is then the proxy's own address, which
+    /// would make every proxied client reserved (the /metrics rule).
+    fn mayBeReserved(app: App, req: *httpz.Request, res: *httpz.Response) bool {
+        const xff = req.header("x-forwarded-for");
+        const xrip = req.header("x-real-ip");
+        const headers_full = req.headers.len >= req.headers.keys.len;
+        if (!isForwarded(xff, xrip, headers_full)) return true;
+        var peer_buf: [64]u8 = undefined;
+        const peer_ip = formatPeerIp(res.conn.address, &peer_buf);
+        const honored = app.config.trust_proxy and app.trusted_proxies.isTrustedProxy(peer_ip);
+        return reservedEligible(honored, xff, xrip, headers_full);
+    }
+
     fn clientIp(app: App, req: *httpz.Request, res: *httpz.Response, buf: *[64]u8) []const u8 {
         const socket_ip = formatPeerIp(res.conn.address, buf);
         if (!app.config.trust_proxy) return socket_ip;
@@ -232,6 +259,9 @@ const WsContext = struct {
     app: App,
     client_ip: [64]u8,
     client_ip_len: u8,
+    // See App.mayBeReserved: false for a relayed request whose client IP is
+    // the proxy's own address.
+    may_be_reserved: bool,
 
     fn setIp(self: *WsContext, addr: []const u8) void {
         const len = @min(addr.len, self.client_ip.len);
@@ -279,6 +309,7 @@ pub const WsConn = struct {
         connection.init(app.allocator, id);
         connection.setWsConn(conn);
         connection.setClientIp(ip);
+        connection.reserved = ctx.may_be_reserved and app.isReservedIp(ip);
 
         // Restore the accept-time socket tuning the worker-pool migration dropped.
         const fd = conn.stream.socket.handle;
@@ -318,11 +349,22 @@ pub const WsConn = struct {
         }
         errdefer connection.deinit();
 
-        // Global connection limit + registry.
-        app.subs.tryAddConnection(connection, app.config.max_connections) catch |err| {
+        // Global connection limit + registry. This runs only after the per-IP
+        // and per-subnet caps above admitted the newcomer, so a source cannot
+        // evict anyone with connections it was not allowed to hold.
+        const evicted = app.subs.tryAddConnection(connection, .{
+            .max_connections = app.config.max_connections,
+            .reserved_connections = app.config.reserved_connections,
+            .reserved = connection.reserved,
+            .evict_idle_seconds = app.config.evict_idle_seconds,
+        }) catch |err| {
             metrics.rateLimited();
             return err;
         };
+        if (evicted) {
+            metrics.connectionEvicted();
+            eviction_log.record();
+        }
         metrics.connectionOpened();
 
         var self = WsConn{
@@ -363,6 +405,45 @@ pub const WsConn = struct {
     }
 };
 
+/// Evictions are logged at most once per interval, as a count, so a flood that
+/// churns the pool cannot flood the log with one line per upgrade.
+/// A count still pending when the evictions stop is flushed by the cleanup
+/// thread's once-a-second tick (flushEvictionLog), so a burst followed by quiet
+/// still reaches the log within one interval.
+const EvictionLog = struct {
+    const interval_s: i64 = 60;
+
+    pending: std.atomic.Value(u64) = .init(0),
+    last_logged: std.atomic.Value(i64) = .init(0),
+
+    fn record(self: *EvictionLog) void {
+        _ = self.pending.fetchAdd(1, .monotonic);
+        if (self.take(nostr.io.timestamp())) |n| logEvictions(n);
+    }
+
+    /// The count to log now, or null if none is pending or the last line was
+    /// less than an interval ago. At most one caller per interval gets it.
+    fn take(self: *EvictionLog, now: i64) ?u64 {
+        if (self.pending.load(.monotonic) == 0) return null;
+        const last = self.last_logged.load(.monotonic);
+        if (now - last < interval_s) return null;
+        if (self.last_logged.cmpxchgStrong(last, now, .monotonic, .monotonic) != null) return null;
+        const n = self.pending.swap(0, .monotonic);
+        return if (n == 0) null else n;
+    }
+};
+
+fn logEvictions(n: u64) void {
+    log.warn("connection pool full: evicted {d} idle connection(s) to admit new clients", .{n});
+}
+
+var eviction_log: EvictionLog = .{};
+
+/// Called from the cleanup thread's periodic tick.
+pub fn flushEvictionLog() void {
+    if (eviction_log.take(nostr.io.timestamp())) |n| logEvictions(n);
+}
+
 fn formatPeerIp(address: anytype, buf: *[64]u8) []const u8 {
     const formatted = std.fmt.bufPrint(buf, "{f}", .{address}) catch return "unknown";
     // IPv6 is "[addr]:port"; return the bracketed address.
@@ -391,6 +472,46 @@ fn metricsAllowed(metrics_public: bool, peer_ip: []const u8, has_forwarded_heade
     return isLoopback(peer_ip) and !has_forwarded_header;
 }
 
+/// True if any reserved_ips entry overlaps loopback or a private, link-local
+/// or CGNAT range, i.e. an address a reverse proxy or tunnel would connect from.
+/// Entries that do not parse are skipped; IpFilter already warns about them.
+fn coversProxyRange(list: []const u8) bool {
+    const internal = [_][]const u8{
+        "127.0.0.0/8",    "10.0.0.0/8",    "172.16.0.0/12", "192.168.0.0/16",
+        "169.254.0.0/16", "100.64.0.0/10", "::1/128",       "fc00::/7",
+        "fe80::/10",
+    };
+    var iter = std.mem.splitScalar(u8, list, ',');
+    while (iter.next()) |entry| {
+        const rule = ip_match.parseRule(std.mem.trim(u8, entry, " \t"), .standard) orelse continue;
+        for (internal) |text| {
+            if (rule.overlaps(ip_match.parseRule(text, .standard).?)) return true;
+        }
+    }
+    return false;
+}
+
+test coversProxyRange {
+    try std.testing.expect(!coversProxyRange(""));
+    try std.testing.expect(!coversProxyRange("203.0.113.10, 2001:db8::/64"));
+    try std.testing.expect(!coversProxyRange("not-an-ip"));
+    try std.testing.expect(coversProxyRange("203.0.113.10,127.0.0.1"));
+    try std.testing.expect(coversProxyRange("::1"));
+    try std.testing.expect(coversProxyRange("192.168.1.0/24"));
+    try std.testing.expect(coversProxyRange("fd00::5"));
+    try std.testing.expect(coversProxyRange("0.0.0.0/0"));
+}
+
+/// Reserved status needs a client IP that is really the client's: either the
+/// request was not forwarded, or the forwarding headers were honored (trust_proxy
+/// with a trusted peer) and actually named a client. Headers that name none (an
+/// empty X-Forwarded-For, or one httpz dropped from a full header table) leave
+/// the client IP as the proxy socket's, which must not match reserved_ips.
+fn reservedEligible(headers_honored: bool, xff: ?[]const u8, xrip: ?[]const u8, headers_full: bool) bool {
+    if (!isForwarded(xff, xrip, headers_full)) return true;
+    return headers_honored and rate_limiter.forwardedClientIp(xff, xrip) != null;
+}
+
 /// A request is treated as proxied if it carries X-Forwarded-For or X-Real-IP.
 /// httpz silently drops headers past its table size, so a full table may have
 /// lost a proxy's X-Forwarded-For and counts as forwarded too.
@@ -404,6 +525,26 @@ test isForwarded {
     try std.testing.expect(isForwarded(null, "127.0.0.1", false));
     try std.testing.expect(isForwarded("", null, false));
     try std.testing.expect(isForwarded(null, null, true));
+}
+
+test reservedEligible {
+    // Not forwarded: the socket peer is the client.
+    try std.testing.expect(reservedEligible(false, null, null, false));
+    try std.testing.expect(reservedEligible(true, null, null, false));
+    // Honored headers that name a client.
+    try std.testing.expect(reservedEligible(true, "127.0.0.1", null, false));
+    try std.testing.expect(reservedEligible(true, "", "10.0.0.1", false));
+    try std.testing.expect(reservedEligible(true, "203.0.113.9", null, true));
+    // trust_proxy off (or an untrusted peer) and the request was relayed: the
+    // client IP is the proxy's, so loopback in reserved_ips must not match it.
+    try std.testing.expect(!reservedEligible(false, "203.0.113.9", null, false));
+    try std.testing.expect(!reservedEligible(false, null, "203.0.113.9", false));
+    try std.testing.expect(!reservedEligible(false, null, null, true));
+    // Honored, but the headers name no client, so extraction falls back to the
+    // trusted proxy's own address.
+    try std.testing.expect(!reservedEligible(true, "", null, false));
+    try std.testing.expect(!reservedEligible(true, " , ", "", false));
+    try std.testing.expect(!reservedEligible(true, null, null, true));
 }
 
 test metricsAllowed {
@@ -530,6 +671,7 @@ pub const Server = struct {
     conn_limiter: rate_limiter.ConnectionLimiter,
     ip_filter: rate_limiter.IpFilter,
     trusted_proxy_filter: rate_limiter.IpFilter,
+    reserved_filter: rate_limiter.IpFilter,
     next_id: std.atomic.Value(u64),
 
     pub fn init(
@@ -561,6 +703,14 @@ pub const Server = struct {
         try self.ip_filter.loadBlacklist(config.ip_blacklist);
         self.trusted_proxy_filter = rate_limiter.IpFilter.init(allocator);
         try self.trusted_proxy_filter.loadWhitelist(config.trusted_proxies);
+        self.reserved_filter = rate_limiter.IpFilter.init(allocator);
+        try self.reserved_filter.loadWhitelist(config.reserved_ips);
+        if (config.reserved_connections > 0 and config.reserved_ips.len == 0) {
+            log.warn("reserved_connections = {d} but reserved_ips is not set: no client can use those slots", .{config.reserved_connections});
+        }
+        if (!config.trust_proxy and coversProxyRange(config.reserved_ips)) {
+            log.warn("reserved_ips includes a loopback or private range but trust_proxy is off: behind a proxy on such an address every proxied client would be reserved. Set trust_proxy, or keep reserved_ips to addresses that connect directly. Requests carrying X-Forwarded-For or X-Real-IP are never reserved while their headers are ignored", .{});
+        }
 
         const app = App{
             .allocator = allocator,
@@ -572,6 +722,7 @@ pub const Server = struct {
             .conn_limiter = &self.conn_limiter,
             .ip_filter = &self.ip_filter,
             .trusted_proxies = &self.trusted_proxy_filter,
+            .reserved_ips = &self.reserved_filter,
             .next_id = &self.next_id,
         };
 
@@ -634,6 +785,7 @@ pub const Server = struct {
         self.conn_limiter.deinit();
         self.ip_filter.deinit();
         self.trusted_proxy_filter.deinit();
+        self.reserved_filter.deinit();
     }
 };
 
@@ -661,6 +813,13 @@ const TestPeer = struct {
         _ = std.c.close(self.fds[1]);
     }
 
+    // closeWs() shuts down the read half of the server side, which then reads
+    // EOF; an open socket with nothing queued would report EAGAIN instead.
+    fn serverReadShutDown(self: *TestPeer) bool {
+        var b: [1]u8 = undefined;
+        return std.c.recv(self.fds[0], &b, 1, std.c.MSG.DONTWAIT) == 0;
+    }
+
     // Non-blocking read of whatever WsConn wrote to the client side.
     fn received(self: *TestPeer, buf: []u8) []const u8 {
         const n = std.c.recv(self.fds[1], buf.ptr, buf.len, std.c.MSG.DONTWAIT);
@@ -672,6 +831,8 @@ const TestRelay = struct {
     config: Config,
     subs: Subscriptions,
     limiter: rate_limiter.ConnectionLimiter,
+    ip_filter: rate_limiter.IpFilter,
+    reserved_ips: rate_limiter.IpFilter,
     next_id: std.atomic.Value(u64),
 
     fn init(self: *TestRelay, max_connections: u32, max_per_ip: u32, max_per_subnet: u32) void {
@@ -679,12 +840,16 @@ const TestRelay = struct {
         self.config.max_connections = max_connections;
         self.subs = Subscriptions.init(testing.allocator);
         self.limiter = rate_limiter.ConnectionLimiter.init(testing.allocator, max_per_ip, .{ .max_connections = max_per_subnet });
+        self.ip_filter = rate_limiter.IpFilter.init(testing.allocator);
+        self.reserved_ips = rate_limiter.IpFilter.init(testing.allocator);
         self.next_id = .init(0);
     }
 
     fn deinit(self: *TestRelay) void {
         self.subs.deinit();
         self.limiter.deinit();
+        self.ip_filter.deinit();
+        self.reserved_ips.deinit();
     }
 
     fn ctx(self: *TestRelay, ip: []const u8) WsContext {
@@ -697,12 +862,14 @@ const TestRelay = struct {
                 .shutdown = undefined,
                 .nip86_handler = undefined,
                 .conn_limiter = &self.limiter,
-                .ip_filter = undefined,
+                .ip_filter = &self.ip_filter,
                 .trusted_proxies = undefined,
+                .reserved_ips = &self.reserved_ips,
                 .next_id = &self.next_id,
             },
             .client_ip = undefined,
             .client_ip_len = 0,
+            .may_be_reserved = true,
         };
         c.setIp(ip);
         return c;
@@ -877,4 +1044,317 @@ test "WsConn concurrent init/close leaves no registry entries or per-IP slots be
     try testing.expectEqual(@as(u64, threads * iterations), relay.next_id.load(.monotonic));
     for (0..threads) |_| try testing.expect(relay.limiter.tryAcquireConnection("10.0.0.6"));
     try testing.expect(!relay.limiter.tryAcquireConnection("10.0.0.6"));
+}
+
+fn idleFor(ws: *WsConn, seconds: i64) void {
+    ws.connection.last_activity.store(nostr.io.timestamp() - seconds, .monotonic);
+}
+
+test "reserved slots admit only reserved_ips clients, not ip_whitelist or proxied ones" {
+    var relay: TestRelay = undefined;
+    relay.init(4, 10, 10);
+    defer relay.deinit();
+    relay.config.reserved_connections = 2;
+    relay.config.evict_idle_seconds = 0;
+    try relay.reserved_ips.loadWhitelist("203.0.113.0/24");
+    try relay.ip_filter.loadWhitelist("198.51.100.7");
+    var peer: TestPeer = undefined;
+    try peer.init();
+    defer peer.deinit();
+
+    // Two ordinary idle clients fill the unreserved part of the pool.
+    const ctx_a = relay.ctx("10.0.0.1");
+    const ctx_b = relay.ctx("10.0.1.1");
+    var ws_a = try WsConn.init(&peer.ws, &ctx_a);
+    defer ws_a.close();
+    var ws_b = try WsConn.init(&peer.ws, &ctx_b);
+    defer ws_b.close();
+    idleFor(&ws_a, 600);
+    idleFor(&ws_b, 600);
+
+    // An ordinary newcomer is refused though two slots are free, and gives
+    // its limiter slot back.
+    const ctx_c = relay.ctx("10.0.2.1");
+    try testing.expectError(error.TooManyConnections, WsConn.init(&peer.ws, &ctx_c));
+    try testing.expectEqual(@as(usize, 2), relay.subs.connectionCount());
+    try testing.expect(relay.limiter.canConnect("10.0.2.1"));
+
+    // ip_whitelist only gates who may connect; it grants no reserved slot.
+    const ctx_w = relay.ctx("198.51.100.7");
+    try testing.expectError(error.TooManyConnections, WsConn.init(&peer.ws, &ctx_w));
+
+    // A reserved_ips address relayed by a proxy whose headers are not honored
+    // is really the proxy's address, so it is not reserved either.
+    var ctx_p = relay.ctx("203.0.113.11");
+    ctx_p.may_be_reserved = false;
+    try testing.expectError(error.TooManyConnections, WsConn.init(&peer.ws, &ctx_p));
+    try testing.expectEqual(@as(usize, 2), relay.subs.connectionCount());
+
+    // reserved_ips matches, also seen as IPv4-mapped, get in.
+    const ctx_r = relay.ctx("::ffff:203.0.113.9");
+    var ws_r = try WsConn.init(&peer.ws, &ctx_r);
+    defer ws_r.close();
+    try testing.expect(ws_r.connection.reserved);
+    const ctx_r2 = relay.ctx("203.0.113.10");
+    var ws_r2 = try WsConn.init(&peer.ws, &ctx_r2);
+    defer ws_r2.close();
+    try testing.expect(!ws_a.connection.reserved);
+    try testing.expectEqual(@as(usize, 4), relay.subs.connectionCount());
+
+    // max_connections still binds reserved clients.
+    const ctx_r3 = relay.ctx("203.0.113.12");
+    try testing.expectError(error.TooManyConnections, WsConn.init(&peer.ws, &ctx_r3));
+}
+
+test "a newcomer evicts the longest-idle connection, whose limiter slots free on close" {
+    var relay: TestRelay = undefined;
+    relay.init(3, 1, 1);
+    defer relay.deinit();
+    var peers: [4]TestPeer = undefined;
+    for (&peers) |*p| try p.init();
+    defer for (&peers) |*p| p.deinit();
+
+    const ctx_0 = relay.ctx("10.0.1.1");
+    const ctx_1 = relay.ctx("10.0.2.1");
+    const ctx_2 = relay.ctx("10.0.3.1");
+    var ws_0 = try WsConn.init(&peers[0].ws, &ctx_0);
+    defer ws_0.close();
+    var ws_1 = try WsConn.init(&peers[1].ws, &ctx_1);
+    var ws_2 = try WsConn.init(&peers[2].ws, &ctx_2);
+    defer ws_2.close();
+    idleFor(&ws_0, 300);
+    idleFor(&ws_1, 400);
+    // Silent for less than evict_idle_seconds (120): never a candidate.
+    idleFor(&ws_2, 5);
+
+    const ctx_new = relay.ctx("10.0.4.1");
+    var ws_new = try WsConn.init(&peers[3].ws, &ctx_new);
+    defer ws_new.close();
+    try testing.expectEqual(@as(usize, 3), relay.subs.connectionCount());
+
+    // Only the longest-idle connection was told to close.
+    try testing.expect(peers[1].serverReadShutDown());
+    try testing.expect(!peers[0].serverReadShutDown());
+    try testing.expect(!peers[2].serverReadShutDown());
+    try testing.expect(!peers[3].serverReadShutDown());
+
+    // The victim keeps its limiter slots until its worker runs close().
+    try testing.expect(!relay.limiter.canConnect("10.0.2.1"));
+    ws_1.close();
+    try testing.expectEqual(@as(usize, 3), relay.subs.connectionCount());
+    try testing.expect(relay.limiter.canConnect("10.0.2.1"));
+    try testing.expectEqual(rate_limiter.ConnectionLimiter.Admission.admitted, relay.limiter.acquire("10.0.2.2"));
+    relay.limiter.removeConnection("10.0.2.2");
+
+    // The next newcomer takes the remaining idle connection, never the recent one.
+    const ctx_next = relay.ctx("10.0.5.1");
+    var ws_next = try WsConn.init(&peers[1].ws, &ctx_next);
+    defer ws_next.close();
+    try testing.expect(peers[0].serverReadShutDown());
+    try testing.expect(!peers[2].serverReadShutDown());
+}
+
+test "a full pool of subscribed, recently active or reserved connections refuses newcomers" {
+    var relay: TestRelay = undefined;
+    relay.init(3, 10, 10);
+    defer relay.deinit();
+    try relay.reserved_ips.loadWhitelist("203.0.113.5");
+    var peers: [3]TestPeer = undefined;
+    for (&peers) |*p| try p.init();
+    defer for (&peers) |*p| p.deinit();
+
+    var req = try nostr.ClientMsg.parse("[\"REQ\",\"s\",{\"kinds\":[1]}]");
+    defer req.deinit();
+
+    const ctx_sub = relay.ctx("10.0.0.1");
+    var ws_sub = try WsConn.init(&peers[0].ws, &ctx_sub);
+    defer ws_sub.close();
+    try relay.subs.subscribe(ws_sub.connection, "s", try req.getFilters(ws_sub.connection.allocator()), 5);
+    const ctx_recent = relay.ctx("10.0.1.1");
+    var ws_recent = try WsConn.init(&peers[1].ws, &ctx_recent);
+    defer ws_recent.close();
+    const ctx_res = relay.ctx("203.0.113.5");
+    var ws_res = try WsConn.init(&peers[2].ws, &ctx_res);
+    defer ws_res.close();
+    idleFor(&ws_sub, 600);
+    idleFor(&ws_recent, 1);
+    idleFor(&ws_res, 600);
+
+    const ctx_new = relay.ctx("10.0.2.1");
+    try testing.expectError(error.TooManyConnections, WsConn.init(&peers[0].ws, &ctx_new));
+    try testing.expectEqual(@as(usize, 3), relay.subs.connectionCount());
+    try testing.expect(relay.limiter.canConnect("10.0.2.1"));
+    for (&peers) |*p| try testing.expect(!p.serverReadShutDown());
+
+    // A long-idle connection with an open subscription is still protected.
+    // Clear the no-victim backoff the refusal above set, so this really scans.
+    try relay.subs.subscribe(ws_recent.connection, "s", try req.getFilters(ws_recent.connection.allocator()), 5);
+    idleFor(&ws_recent, 600);
+    relay.subs.noteEvictable();
+    try testing.expectError(error.TooManyConnections, WsConn.init(&peers[0].ws, &ctx_new));
+    for (&peers) |*p| try testing.expect(!p.serverReadShutDown());
+
+    // Closing its last subscription makes a connection evictable again.
+    relay.subs.unsubscribe(ws_sub.connection, "s");
+    var peer_new: TestPeer = undefined;
+    try peer_new.init();
+    defer peer_new.deinit();
+    var ws_new = try WsConn.init(&peer_new.ws, &ctx_new);
+    defer ws_new.close();
+    try testing.expect(peers[0].serverReadShutDown());
+    try testing.expect(!peers[1].serverReadShutDown());
+    try testing.expect(!peers[2].serverReadShutDown());
+}
+
+test "a refused scan backs off for a second; closing a NIP-77 session or the last subscription clears it" {
+    var relay: TestRelay = undefined;
+    relay.init(2, 10, 10);
+    defer relay.deinit();
+    var peers: [3]TestPeer = undefined;
+    for (&peers) |*p| try p.init();
+    defer for (&peers) |*p| p.deinit();
+
+    const ctx_a = relay.ctx("10.0.0.1");
+    var ws_a = try WsConn.init(&peers[0].ws, &ctx_a);
+    defer ws_a.close();
+    const ctx_b = relay.ctx("10.0.1.1");
+    var ws_b = try WsConn.init(&peers[1].ws, &ctx_b);
+    defer ws_b.close();
+    idleFor(&ws_a, 1);
+    idleFor(&ws_b, 1);
+
+    // An all-active pool: the scan finds nobody and records now + 1.
+    const ctx_new = relay.ctx("10.0.2.1");
+    const before = nostr.io.timestamp();
+    try testing.expectError(error.TooManyConnections, WsConn.init(&peers[2].ws, &ctx_new));
+    const after = nostr.io.timestamp();
+    const t = relay.subs.no_victim_before.load(.monotonic);
+    try testing.expect(t >= before + 1 and t <= after + 1);
+
+    // While the backoff holds, a connection that turned evictable without
+    // telling the registry is not found yet. (Pin the backoff in the future so
+    // a second boundary cannot end it mid-test.)
+    idleFor(&ws_a, 600);
+    relay.subs.no_victim_before.store(nostr.io.timestamp() + 60, .monotonic);
+    try testing.expectError(error.TooManyConnections, WsConn.init(&peers[2].ws, &ctx_new));
+    try testing.expect(!peers[0].serverReadShutDown());
+
+    // An open NIP-77 session protects an idle connection like a subscription.
+    _ = try ws_a.connection.addNegSession("neg");
+    relay.subs.noteEvictable();
+    try testing.expectError(error.TooManyConnections, WsConn.init(&peers[2].ws, &ctx_new));
+    try testing.expect(!peers[0].serverReadShutDown());
+
+    // Closing it (the handler calls noteEvictable once the last one is gone)
+    // makes the next upgrade rescan at once and evict.
+    relay.subs.no_victim_before.store(nostr.io.timestamp() + 60, .monotonic);
+    try testing.expect(ws_a.connection.removeNegSession("neg"));
+    try testing.expect(!ws_a.connection.removeNegSession("neg"));
+    try testing.expectEqual(@as(u32, 0), ws_a.connection.neg_session_count.load(.monotonic));
+    relay.subs.noteEvictable();
+    var ws_new = try WsConn.init(&peers[2].ws, &ctx_new);
+    defer ws_new.close();
+    try testing.expect(peers[0].serverReadShutDown());
+    try testing.expect(!peers[1].serverReadShutDown());
+
+    // unsubscribe() clears the backoff itself when the last subscription goes.
+    var req = try nostr.ClientMsg.parse("[\"REQ\",\"s\",{\"kinds\":[1]}]");
+    defer req.deinit();
+    try relay.subs.subscribe(ws_b.connection, "s", try req.getFilters(ws_b.connection.allocator()), 5);
+    relay.subs.no_victim_before.store(nostr.io.timestamp() + 60, .monotonic);
+    // A CLOSE for an id it does not hold changes nothing and keeps the backoff.
+    const pinned = nostr.io.timestamp() + 60;
+    relay.subs.no_victim_before.store(pinned, .monotonic);
+    relay.subs.unsubscribe(ws_b.connection, "other");
+    try testing.expectEqual(pinned, relay.subs.no_victim_before.load(.monotonic));
+    relay.subs.unsubscribe(ws_b.connection, "s");
+    try testing.expectEqual(@as(i64, 0), relay.subs.no_victim_before.load(.monotonic));
+    relay.subs.no_victim_before.store(pinned, .monotonic);
+    relay.subs.unsubscribe(ws_b.connection, "s");
+    try testing.expectEqual(pinned, relay.subs.no_victim_before.load(.monotonic));
+}
+
+test "reserved headroom and eviction together" {
+    var relay: TestRelay = undefined;
+    relay.init(4, 10, 10);
+    defer relay.deinit();
+    relay.config.reserved_connections = 1;
+    try relay.reserved_ips.loadWhitelist("203.0.113.0/24");
+    var peers: [7]TestPeer = undefined;
+    for (&peers) |*p| try p.init();
+    defer for (&peers) |*p| p.deinit();
+
+    // Ordinary clients fill max_connections - reserved_connections.
+    const ctx_a = relay.ctx("10.0.0.1");
+    var ws_a = try WsConn.init(&peers[0].ws, &ctx_a);
+    defer ws_a.close();
+    const ctx_b = relay.ctx("10.0.1.1");
+    var ws_b = try WsConn.init(&peers[1].ws, &ctx_b);
+    defer ws_b.close();
+    const ctx_c = relay.ctx("10.0.2.1");
+    var ws_c = try WsConn.init(&peers[2].ws, &ctx_c);
+    defer ws_c.close();
+    idleFor(&ws_a, 600);
+    idleFor(&ws_b, 500);
+    idleFor(&ws_c, 400);
+
+    // An ordinary newcomer at the unreserved limit evicts, though the
+    // headroom slot is still free: it may not use that slot.
+    const ctx_d = relay.ctx("10.0.3.1");
+    var ws_d = try WsConn.init(&peers[3].ws, &ctx_d);
+    defer ws_d.close();
+    try testing.expect(peers[0].serverReadShutDown());
+    try testing.expectEqual(@as(usize, 3), relay.subs.connectionCount());
+
+    // A reserved client takes the free headroom slot without evicting anyone.
+    const ctx_r1 = relay.ctx("203.0.113.1");
+    var ws_r1 = try WsConn.init(&peers[4].ws, &ctx_r1);
+    defer ws_r1.close();
+    try testing.expect(!peers[1].serverReadShutDown());
+    try testing.expectEqual(@as(usize, 4), relay.subs.connectionCount());
+    // Reserved clients are never victims, however long idle.
+    idleFor(&ws_r1, 3600);
+    idleFor(&ws_d, 1);
+
+    // With every slot taken, a reserved newcomer evicts the longest-idle
+    // ordinary connection.
+    const ctx_r2 = relay.ctx("203.0.113.2");
+    var ws_r2 = try WsConn.init(&peers[5].ws, &ctx_r2);
+    defer ws_r2.close();
+    try testing.expect(peers[1].serverReadShutDown());
+    try testing.expect(!peers[2].serverReadShutDown());
+    try testing.expect(!peers[3].serverReadShutDown());
+    try testing.expect(!peers[4].serverReadShutDown());
+    try testing.expectEqual(@as(usize, 4), relay.subs.connectionCount());
+}
+
+test "EvictionLog flushes a pending count once per interval, including after the evictions stop" {
+    var el: EvictionLog = .{};
+    try testing.expectEqual(@as(?u64, null), el.take(1000));
+    _ = el.pending.fetchAdd(3, .monotonic);
+    try testing.expectEqual(@as(?u64, 3), el.take(1000));
+    // A burst inside the interval waits; the periodic flush picks it up once
+    // the interval has passed, with no further eviction needed.
+    _ = el.pending.fetchAdd(2, .monotonic);
+    try testing.expectEqual(@as(?u64, null), el.take(1030));
+    try testing.expectEqual(@as(?u64, 2), el.take(1060));
+    try testing.expectEqual(@as(?u64, null), el.take(1200));
+}
+
+test "eviction disabled keeps the 503 when the pool is full of idle connections" {
+    var relay: TestRelay = undefined;
+    relay.init(1, 10, 10);
+    defer relay.deinit();
+    relay.config.evict_idle_seconds = 0;
+    var peers: [2]TestPeer = undefined;
+    for (&peers) |*p| try p.init();
+    defer for (&peers) |*p| p.deinit();
+
+    const ctx_a = relay.ctx("10.0.0.1");
+    var ws_a = try WsConn.init(&peers[0].ws, &ctx_a);
+    defer ws_a.close();
+    idleFor(&ws_a, 3600);
+    const ctx_b = relay.ctx("10.0.1.1");
+    try testing.expectError(error.TooManyConnections, WsConn.init(&peers[1].ws, &ctx_b));
+    try testing.expect(!peers[0].serverReadShutDown());
 }

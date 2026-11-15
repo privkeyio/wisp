@@ -28,6 +28,14 @@ path = "./data"
 
 [limits]
 max_connections = 1000
+# Keep the top N max_connections slots for clients in reserved_ips (health
+# checks, trusted clients). Must be < max_connections.
+# reserved_connections = 0
+# On by default. When the pool is full, evict the longest-idle connection with
+# no subscription or NIP-77 session that has sent no message this long, instead
+# of refusing the newcomer with 503. Reserved clients are never evicted.
+# 0 disables eviction.
+# evict_idle_seconds = 120
 # Epoll worker threads. 0 = auto (scales with CPU, capped at 4). Set to 1 on a
 # personal or memory-constrained relay to shed per-worker buffers and threads.
 workers = 0
@@ -84,6 +92,9 @@ idle_seconds = 300
 # '.' or ':' still work ("10.0.0." is 10.0.0.0/24). '*' wildcards are not supported.
 # ip_whitelist = "192.168.1.0/24,10.0.0.0/24"
 # ip_blacklist = "185.220.100.0/22,2001:db8::/32"
+# May use reserved_connections and are never evicted. Only this list grants
+# that; ip_whitelist does not. Behind a reverse proxy this needs trust_proxy.
+# reserved_ips = "203.0.113.10,2001:db8::/64"
 
 [spider]
 # Spider syncs events from people you follow on other relays.

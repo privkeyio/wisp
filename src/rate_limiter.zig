@@ -659,6 +659,18 @@ pub const IpFilter = struct {
         return true;
     }
 
+    /// True only when the allow list is configured and the address matches it.
+    /// Unlike isAllowed, an empty list matches nobody.
+    pub fn matchesWhitelist(self: *IpFilter, ip: []const u8) bool {
+        const io = nostr.io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+
+        if (!self.whitelist_enabled) return false;
+        const addr = ip_match.parseAddr(ip) orelse return false;
+        return ip_match.anyMatch(self.whitelist.items, addr);
+    }
+
     pub fn isTrustedProxy(self: *IpFilter, ip: []const u8) bool {
         const io = nostr.io.io();
         self.mutex.lockUncancelable(io);
@@ -679,31 +691,35 @@ pub fn extractClientIp(
     trust_proxy: bool,
 ) []const u8 {
     if (trust_proxy) {
-        // Prefer X-Forwarded-For: the trusted proxy appends the address it
-        // actually received from, so the rightmost entry is proxy-controlled.
-        // X-Real-IP is only a fallback because a client can set it when the proxy
-        // does not, which would let it spoof the key used for every per-IP control.
-        if (forwarded_for) |xff| {
-            if (xff.len > 0) {
-                const segment = if (std.mem.lastIndexOf(u8, xff, ",")) |comma|
-                    xff[comma + 1 ..]
-                else
-                    xff;
-                const entry = std.mem.trim(u8, segment, " \t");
-                // A trailing comma or whitespace-only segment trims to empty; fall
-                // back to X-Real-IP, then remote_addr, instead of one shared key.
-                if (entry.len > 0) return normalizeIp(entry);
-            }
-        }
+        if (forwardedClientIp(forwarded_for, real_ip)) |ip| return ip;
+    }
+    return normalizeIp(remote_addr);
+}
 
-        if (real_ip) |ip| {
-            if (ip.len > 0) {
-                return normalizeIp(ip);
-            }
+/// The client IP the forwarding headers name, or null when they name none and
+/// extractClientIp would fall back to the socket peer.
+pub fn forwardedClientIp(forwarded_for: ?[]const u8, real_ip: ?[]const u8) ?[]const u8 {
+    // Prefer X-Forwarded-For: the trusted proxy appends the address it
+    // actually received from, so the rightmost entry is proxy-controlled.
+    // X-Real-IP is only a fallback because a client can set it when the proxy
+    // does not, which would let it spoof the key used for every per-IP control.
+    if (forwarded_for) |xff| {
+        if (xff.len > 0) {
+            const segment = if (std.mem.lastIndexOf(u8, xff, ",")) |comma|
+                xff[comma + 1 ..]
+            else
+                xff;
+            const entry = std.mem.trim(u8, segment, " \t");
+            // A trailing comma or whitespace-only segment trims to empty; fall
+            // back to X-Real-IP, then remote_addr, instead of one shared key.
+            if (entry.len > 0) return normalizeIp(entry);
         }
     }
 
-    return normalizeIp(remote_addr);
+    if (real_ip) |ip| {
+        if (ip.len > 0) return normalizeIp(ip);
+    }
+    return null;
 }
 
 // Derive the per-IP rate-limit bucket key. IPv6 clients are keyed on their /64
@@ -1038,6 +1054,18 @@ test "IpFilter whitelist with CIDR" {
     try std.testing.expect(!f.isAllowed("::2"));
     // A client address that does not parse cannot be on an allow list.
     try std.testing.expect(!f.isAllowed("unknown"));
+}
+
+test "IpFilter matchesWhitelist is empty-means-nobody" {
+    var f = IpFilter.init(std.testing.allocator);
+    defer f.deinit();
+    try std.testing.expect(!f.matchesWhitelist("10.0.0.1"));
+    try f.loadWhitelist("10.0.0.0/24, 2001:db8::/32");
+    try std.testing.expect(f.matchesWhitelist("10.0.0.9"));
+    try std.testing.expect(f.matchesWhitelist("::ffff:10.0.0.9"));
+    try std.testing.expect(f.matchesWhitelist("2001:db8::5"));
+    try std.testing.expect(!f.matchesWhitelist("10.0.1.1"));
+    try std.testing.expect(!f.matchesWhitelist("unknown"));
 }
 
 test "IpFilter trusted proxies with CIDR" {
