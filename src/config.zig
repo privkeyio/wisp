@@ -33,6 +33,37 @@ fn envInt(comptime T: type, name: []const u8, value: []const u8, current: T) T {
     };
 }
 
+/// A subnet prefix length, 0..max bits.
+fn parsePrefixLen(value: []const u8, max: u8) !u8 {
+    const len = try std.fmt.parseInt(u8, value, 10);
+    if (len > max) return error.PrefixLengthOutOfRange;
+    return len;
+}
+
+fn envPrefixLen(name: []const u8, value: []const u8, max: u8, current: u8) u8 {
+    return parsePrefixLen(value, max) catch {
+        var buf: [64]u8 = undefined;
+        log.warn("{s}=\"{s}\" is not a prefix length in 0..{d}; keeping {d}", .{ name, safeValue(value, &buf), max, current });
+        return current;
+    };
+}
+
+/// max_connections_per_ip must be at least 1: 0 would refuse every client and
+/// silently take the relay offline, and there is no unlimited value.
+fn parsePerIpCap(value: []const u8) !u32 {
+    const cap = try std.fmt.parseInt(u32, value, 10);
+    if (cap == 0) return error.MaxConnectionsPerIpZero;
+    return cap;
+}
+
+fn envPerIpCap(value: []const u8, current: u32) u32 {
+    return parsePerIpCap(value) catch {
+        var buf: [64]u8 = undefined;
+        log.warn("WISP_MAX_CONNECTIONS_PER_IP=\"{s}\" is not a connection count of at least 1; keeping {d}", .{ safeValue(value, &buf), current });
+        return current;
+    };
+}
+
 fn envBool(name: []const u8, value: []const u8, current: bool) bool {
     return parseBool(value) orelse {
         var buf: [64]u8 = undefined;
@@ -62,6 +93,14 @@ pub const Config = struct {
     pubkey: ?[]const u8,
     contact: ?[]const u8,
     max_connections: u32,
+    // The top this-many max_connections slots are kept for clients matching
+    // reserved_ips (health checks, trusted clients). 0 disables.
+    reserved_connections: u32,
+    // When max_connections is full, a newcomer evicts the longest-idle
+    // connection that has no subscription or NIP-77 session and has sent no
+    // message for at least this many seconds; reserved clients are never
+    // evicted. 0 disables eviction.
+    evict_idle_seconds: u32,
     // Epoll worker threads. 0 means auto (scale with CPU, capped at 4). Lower it
     // (e.g. 1) on a personal or memory-constrained relay: each worker carries its
     // own buffer pools and thread subset, so fewer workers means a smaller footprint.
@@ -104,8 +143,15 @@ pub const Config = struct {
     // honored. Empty with trust_proxy=true honors headers from any peer.
     trusted_proxies: []const u8,
     max_connections_per_ip: u32,
+    // Aggregate cap over every client in one subnet (subnet_prefix_v4 /
+    // subnet_prefix_v6 bits), alongside the per-IP cap. 0 disables it.
+    max_connections_per_subnet: u32,
+    subnet_prefix_v4: u8,
+    subnet_prefix_v6: u8,
     ip_whitelist: []const u8,
     ip_blacklist: []const u8,
+    // IPs/CIDR ranges that may use reserved_connections and are never evicted.
+    reserved_ips: []const u8,
     // Serve /metrics to non-loopback clients. Off by default so operational
     // metrics are not world-readable.
     metrics_public: bool,
@@ -152,6 +198,8 @@ pub const Config = struct {
             .pubkey = null,
             .contact = null,
             .max_connections = 1000,
+            .reserved_connections = 0,
+            .evict_idle_seconds = 120,
             .workers = 0,
             .max_conn = 0,
             .max_subscriptions = 20,
@@ -177,8 +225,12 @@ pub const Config = struct {
             .trust_proxy = false,
             .trusted_proxies = "",
             .max_connections_per_ip = 10,
+            .max_connections_per_subnet = 50,
+            .subnet_prefix_v4 = 24,
+            .subnet_prefix_v6 = 48,
             .ip_whitelist = "",
             .ip_blacklist = "",
+            .reserved_ips = "",
             .metrics_public = false,
             .spider_enabled = false,
             .spider_relays = "",
@@ -288,6 +340,10 @@ pub const Config = struct {
         } else if (std.mem.eql(u8, section, "limits")) {
             if (std.mem.eql(u8, key, "max_connections")) {
                 self.max_connections = try std.fmt.parseInt(u32, value, 10);
+            } else if (std.mem.eql(u8, key, "reserved_connections")) {
+                self.reserved_connections = try std.fmt.parseInt(u32, value, 10);
+            } else if (std.mem.eql(u8, key, "evict_idle_seconds")) {
+                self.evict_idle_seconds = try std.fmt.parseInt(u32, value, 10);
             } else if (std.mem.eql(u8, key, "workers")) {
                 self.workers = try std.fmt.parseInt(u16, value, 10);
             } else if (std.mem.eql(u8, key, "max_conn")) {
@@ -349,9 +405,17 @@ pub const Config = struct {
             } else if (std.mem.eql(u8, key, "trusted_proxies")) {
                 self.trusted_proxies = try self.allocString(value);
             } else if (std.mem.eql(u8, key, "max_connections_per_ip")) {
-                self.max_connections_per_ip = try std.fmt.parseInt(u32, value, 10);
+                self.max_connections_per_ip = try parsePerIpCap(value);
+            } else if (std.mem.eql(u8, key, "max_connections_per_subnet")) {
+                self.max_connections_per_subnet = try std.fmt.parseInt(u32, value, 10);
+            } else if (std.mem.eql(u8, key, "subnet_prefix_v4")) {
+                self.subnet_prefix_v4 = try parsePrefixLen(value, 32);
+            } else if (std.mem.eql(u8, key, "subnet_prefix_v6")) {
+                self.subnet_prefix_v6 = try parsePrefixLen(value, 128);
             } else if (std.mem.eql(u8, key, "ip_whitelist")) {
                 self.ip_whitelist = try self.allocString(value);
+            } else if (std.mem.eql(u8, key, "reserved_ips")) {
+                self.reserved_ips = try self.allocString(value);
             } else if (std.mem.eql(u8, key, "ip_blacklist")) {
                 self.ip_blacklist = try self.allocString(value);
             }
@@ -410,13 +474,18 @@ pub const Config = struct {
         if (getenv("WISP_STORAGE_PATH")) |v| self.storage_path = v;
         if (getenv("WISP_STORAGE_SYNC")) |v| self.storage_sync = v;
         if (getenv("WISP_MAX_CONNECTIONS")) |v| self.max_connections = envInt(u32, "WISP_MAX_CONNECTIONS", v, self.max_connections);
+        if (getenv("WISP_RESERVED_CONNECTIONS")) |v| self.reserved_connections = envInt(u32, "WISP_RESERVED_CONNECTIONS", v, self.reserved_connections);
+        if (getenv("WISP_EVICT_IDLE_SECONDS")) |v| self.evict_idle_seconds = envInt(u32, "WISP_EVICT_IDLE_SECONDS", v, self.evict_idle_seconds);
         if (getenv("WISP_AUTH_REQUIRED")) |v| self.auth_required = envBool("WISP_AUTH_REQUIRED", v, self.auth_required);
         if (getenv("WISP_AUTH_TO_WRITE")) |v| self.auth_to_write = envBool("WISP_AUTH_TO_WRITE", v, self.auth_to_write);
         if (getenv("WISP_RELAY_URL")) |v| self.relay_url = v;
         if (getenv("WISP_TRUST_PROXY")) |v| self.trust_proxy = envBool("WISP_TRUST_PROXY", v, self.trust_proxy);
         if (getenv("WISP_TRUSTED_PROXIES")) |v| self.trusted_proxies = v;
         if (getenv("WISP_METRICS_PUBLIC")) |v| self.metrics_public = envBool("WISP_METRICS_PUBLIC", v, self.metrics_public);
-        if (getenv("WISP_MAX_CONNECTIONS_PER_IP")) |v| self.max_connections_per_ip = envInt(u32, "WISP_MAX_CONNECTIONS_PER_IP", v, self.max_connections_per_ip);
+        if (getenv("WISP_MAX_CONNECTIONS_PER_IP")) |v| self.max_connections_per_ip = envPerIpCap(v, self.max_connections_per_ip);
+        if (getenv("WISP_MAX_CONNECTIONS_PER_SUBNET")) |v| self.max_connections_per_subnet = envInt(u32, "WISP_MAX_CONNECTIONS_PER_SUBNET", v, self.max_connections_per_subnet);
+        if (getenv("WISP_SUBNET_PREFIX_V4")) |v| self.subnet_prefix_v4 = envPrefixLen("WISP_SUBNET_PREFIX_V4", v, 32, self.subnet_prefix_v4);
+        if (getenv("WISP_SUBNET_PREFIX_V6")) |v| self.subnet_prefix_v6 = envPrefixLen("WISP_SUBNET_PREFIX_V6", v, 128, self.subnet_prefix_v6);
         if (getenv("WISP_WORKERS")) |v| self.workers = envInt(u16, "WISP_WORKERS", v, self.workers);
         if (getenv("WISP_MAX_CONN")) |v| self.max_conn = envInt(u16, "WISP_MAX_CONN", v, self.max_conn);
         if (getenv("WISP_EVENTS_PER_MINUTE")) |v| self.events_per_minute = envInt(u32, "WISP_EVENTS_PER_MINUTE", v, self.events_per_minute);
@@ -425,6 +494,7 @@ pub const Config = struct {
         if (getenv("WISP_IDLE_SECONDS")) |v| self.idle_seconds = envInt(u32, "WISP_IDLE_SECONDS", v, self.idle_seconds);
         if (getenv("WISP_IP_WHITELIST")) |v| self.ip_whitelist = v;
         if (getenv("WISP_IP_BLACKLIST")) |v| self.ip_blacklist = v;
+        if (getenv("WISP_RESERVED_IPS")) |v| self.reserved_ips = v;
         if (getenv("WISP_SPIDER_ENABLED")) |v| self.spider_enabled = envBool("WISP_SPIDER_ENABLED", v, self.spider_enabled);
         if (getenv("WISP_SPIDER_RELAYS")) |v| self.spider_relays = v;
         if (getenv("WISP_SPIDER_ADMIN")) |v| self.spider_admin = v;
@@ -440,6 +510,16 @@ pub const Config = struct {
         if (getenv("WISP_WATCHDOG_INTERVAL_SECONDS")) |v| self.watchdog_interval_seconds = envInt(u32, "WISP_WATCHDOG_INTERVAL_SECONDS", v, self.watchdog_interval_seconds);
         if (getenv("WISP_WATCHDOG_TIMEOUT_MS")) |v| self.watchdog_timeout_ms = envInt(u32, "WISP_WATCHDOG_TIMEOUT_MS", v, self.watchdog_timeout_ms);
         if (getenv("WISP_WATCHDOG_FAILURES")) |v| self.watchdog_failures = envInt(u32, "WISP_WATCHDOG_FAILURES", v, self.watchdog_failures);
+    }
+
+    /// Checks that span several keys, run once the file and environment are
+    /// both applied. Unlike a single malformed value there is no safe fallback
+    /// here, so startup fails rather than guessing; the caller reports which.
+    pub fn validate(self: *const Config) error{ReservedConnectionsTooLarge}!void {
+        // Reserving every slot would leave none for ordinary clients.
+        if (self.reserved_connections > 0 and self.reserved_connections >= self.max_connections) {
+            return error.ReservedConnectionsTooLarge;
+        }
     }
 
     pub fn deinit(self: *Config) void {
@@ -510,6 +590,40 @@ test "setValue: metrics_public defaults off and parses under [security]" {
     try std.testing.expectError(error.InvalidBoolean, config.setValue("security", "metrics_public", "maybe"));
 }
 
+test "setValue: subnet connection cap and prefix lengths" {
+    var config = Config.defaults();
+    try std.testing.expectEqual(@as(u32, 50), config.max_connections_per_subnet);
+    try std.testing.expectEqual(@as(u8, 24), config.subnet_prefix_v4);
+    try std.testing.expectEqual(@as(u8, 48), config.subnet_prefix_v6);
+
+    try config.setValue("security", "max_connections_per_subnet", "0");
+    try std.testing.expectEqual(@as(u32, 0), config.max_connections_per_subnet);
+    try config.setValue("security", "subnet_prefix_v4", "32");
+    try config.setValue("security", "subnet_prefix_v6", "0");
+    try std.testing.expectEqual(@as(u8, 32), config.subnet_prefix_v4);
+    try std.testing.expectEqual(@as(u8, 0), config.subnet_prefix_v6);
+    try config.setValue("security", "subnet_prefix_v6", "128");
+    try std.testing.expectEqual(@as(u8, 128), config.subnet_prefix_v6);
+
+    try std.testing.expectError(error.PrefixLengthOutOfRange, config.setValue("security", "subnet_prefix_v4", "33"));
+    try std.testing.expectError(error.PrefixLengthOutOfRange, config.setValue("security", "subnet_prefix_v6", "129"));
+    try std.testing.expectError(error.Overflow, config.setValue("security", "subnet_prefix_v6", "256"));
+    try std.testing.expectError(error.InvalidCharacter, config.setValue("security", "subnet_prefix_v4", "/24"));
+    try std.testing.expectEqual(@as(u8, 32), config.subnet_prefix_v4);
+
+    try config.setValue("security", "max_connections_per_ip", "1");
+    try std.testing.expectEqual(@as(u32, 1), config.max_connections_per_ip);
+    try std.testing.expectError(error.MaxConnectionsPerIpZero, config.setValue("security", "max_connections_per_ip", "0"));
+    try std.testing.expectEqual(@as(u32, 1), config.max_connections_per_ip);
+    try std.testing.expectEqual(@as(u32, 1), envPerIpCap("0", 1));
+    try std.testing.expectEqual(@as(u32, 25), envPerIpCap("25", 1));
+
+    // The environment keeps the current value on a bad one, like envInt.
+    try std.testing.expectEqual(@as(u8, 24), envPrefixLen("WISP_SUBNET_PREFIX_V4", "33", 32, 24));
+    try std.testing.expectEqual(@as(u8, 48), envPrefixLen("WISP_SUBNET_PREFIX_V6", "-1", 128, 48));
+    try std.testing.expectEqual(@as(u8, 56), envPrefixLen("WISP_SUBNET_PREFIX_V6", "56", 128, 48));
+}
+
 test safeValue {
     var buf: [64]u8 = undefined;
     // A value is echoed back when it fails to parse, so control characters must
@@ -525,4 +639,30 @@ test safeValue {
     // The buffer sets the cap, so a larger one keeps more of a long field.
     var wide: [256]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 200), safeValue(long, &wide).len);
+}
+
+test "setValue: connection headroom and eviction" {
+    var config = Config.defaults();
+    try std.testing.expectEqual(@as(u32, 0), config.reserved_connections);
+    try std.testing.expectEqual(@as(u32, 120), config.evict_idle_seconds);
+    try std.testing.expectEqualStrings("", config.reserved_ips);
+    try config.validate();
+
+    try config.setValue("limits", "reserved_connections", "10");
+    try config.setValue("limits", "evict_idle_seconds", "0");
+    try config.setValue("security", "reserved_ips", "10.0.0.0/8,::1");
+    try std.testing.expectEqual(@as(u32, 10), config.reserved_connections);
+    try std.testing.expectEqual(@as(u32, 0), config.evict_idle_seconds);
+    try std.testing.expectEqualStrings("10.0.0.0/8,::1", config.reserved_ips);
+    try std.testing.expectError(error.InvalidCharacter, config.setValue("limits", "reserved_connections", "10x"));
+    try config.validate();
+
+    config.max_connections = 11;
+    try config.validate();
+    config.max_connections = 10;
+    try std.testing.expectError(error.ReservedConnectionsTooLarge, config.validate());
+    config.max_connections = 0;
+    try std.testing.expectError(error.ReservedConnectionsTooLarge, config.validate());
+    config.reserved_connections = 0;
+    try config.validate();
 }

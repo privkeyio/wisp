@@ -103,7 +103,9 @@ write path, since there is no fsync to amortize.
 
 | TOML | Env | Type | Default | Description |
 |------|-----|------|---------|-------------|
-| `max_connections` | `WISP_MAX_CONNECTIONS` | u32 | `1000` | Maximum concurrent connections. |
+| `max_connections` | `WISP_MAX_CONNECTIONS` | u32 | `1000` | Maximum concurrent connections. See [When max_connections is full](#when-max_connections-is-full). |
+| `reserved_connections` | `WISP_RESERVED_CONNECTIONS` | u32 | `0` | The top this-many `max_connections` slots are granted only to clients matching `reserved_ips`, so health checks and trusted clients still get in when the pool is full. Must be less than `max_connections` or startup fails. `0` disables it. |
+| `evict_idle_seconds` | `WISP_EVICT_IDLE_SECONDS` | u32 | `120` | On by default. When `max_connections` is full, a new client evicts the longest-idle connection that has no open subscription or NIP-77 session and has sent no message for at least this many seconds, instead of getting `503`. `0` disables eviction. See [When max_connections is full](#when-max_connections-is-full) for who can be evicted. |
 | `workers` | `WISP_WORKERS` | u16 | `0` | Epoll worker threads. `0` = auto (`min(CPU, 4)`). Set `1` on a personal or memory-constrained relay to shed per-worker buffers and threads. |
 | `max_conn` | `WISP_MAX_CONN` | u16 | `0` | Live connections **per worker** before that worker pauses accepting. `0` keeps the built-in default (8192). Distinct from `max_connections`, which is the relay-wide cap. Accepted connections are limited by `max_conn` × the effective worker count (with `workers = 0` that is `min(CPU, 4)`, not `0`), while `max_connections` independently caps registered relay connections; whichever binds first applies. |
 | `max_subscriptions` | — | u32 | `20` | Maximum open REQ subscriptions per connection. |
@@ -165,7 +167,7 @@ instead leave it stopped.
 
 | TOML | Env | Type | Default | Description |
 |------|-----|------|---------|-------------|
-| `idle_seconds` | `WISP_IDLE_SECONDS` | u32 | `300` | Close a connection after this many seconds with no activity. |
+| `idle_seconds` | `WISP_IDLE_SECONDS` | u32 | `300` | Close a connection after this many seconds without a well-formed client message. WebSocket pings and frames that fail to parse do not count. |
 
 ### `[auth]` (NIP-42)
 
@@ -182,9 +184,13 @@ instead leave it stopped.
 | `trust_proxy` | `WISP_TRUST_PROXY` | bool | `false` | Honor `X-Forwarded-For` / `X-Real-IP` for the client IP. Enable only behind a reverse proxy whose backend port is not directly reachable, or clients can spoof their IP. A forwarded header that is ignored (trust_proxy off, or peer not in `trusted_proxies`) increments `wisp_forwarded_header_ignored_total` and may log a warning; see [deployment.md](deployment.md). |
 | `trusted_proxies` | `WISP_TRUSTED_PROXIES` | csv | (empty) | IPs/CIDR ranges of proxies whose forwarded headers are trusted. Empty with `trust_proxy=true` trusts any peer. |
 | `metrics_public` | `WISP_METRICS_PUBLIC` | bool | `false` | Serve `/metrics` to any client. When `false`, only direct requests whose socket peer is 127.0.0.0/8 or `::1` (including `::ffff:127.x`) and that carry no `X-Forwarded-For`/`X-Real-IP` header may scrape it; others get 403. |
-| `max_connections_per_ip` | `WISP_MAX_CONNECTIONS_PER_IP` | u32 | `10` | Per-IP concurrent connection cap, applied at the WebSocket upgrade. A connection that never sends a request does not reach it; those are closed by the 10s request timeout instead. To cap concurrent TCP connections per source, see [Limiting connections per source](deployment.md#limiting-connections-per-source). |
+| `max_connections_per_ip` | `WISP_MAX_CONNECTIONS_PER_IP` | u32 | `10` | Per-IP concurrent connection cap, applied at the WebSocket upgrade. A connection that never sends a request does not reach it; those are closed by the 10s request timeout instead. To cap concurrent TCP connections per source, see [Limiting connections per source](deployment.md#limiting-connections-per-source). Must be at least `1`: `0` fails the config load (and is ignored with a warning in the environment). There is no unlimited value, so set a large number to effectively lift the cap. |
+| `max_connections_per_subnet` | `WISP_MAX_CONNECTIONS_PER_SUBNET` | u32 | `50` | Concurrent connection cap shared by every client in one subnet (sized by the two prefix settings below), applied alongside `max_connections_per_ip`: a connection must fit under both. Stops a swarm spread over many addresses in one range from exhausting `max_connections`. `0` disables it. A value below `max_connections_per_ip` is raised to it, so one address can always use its full per-IP allowance. 50 is a starting point; see [Per-subnet connection cap](#per-subnet-connection-cap) before relying on it. |
+| `subnet_prefix_v4` | `WISP_SUBNET_PREFIX_V4` | u8 | `24` | IPv4 prefix length (0-32) that groups clients for `max_connections_per_subnet`. IPv4-mapped IPv6 clients (`::ffff:a.b.c.d`) count in their IPv4 subnet. |
+| `subnet_prefix_v6` | `WISP_SUBNET_PREFIX_V6` | u8 | `48` | IPv6 prefix length (0-128) that groups clients for `max_connections_per_subnet`. |
 | `ip_whitelist` | `WISP_IP_WHITELIST` | csv | (empty) | If set, only these IPs/CIDR ranges may connect. |
 | `ip_blacklist` | `WISP_IP_BLACKLIST` | csv | (empty) | These IPs/CIDR ranges are refused. |
+| `reserved_ips` | `WISP_RESERVED_IPS` | csv | (empty) | IPs/CIDR ranges that may use the `reserved_connections` slots and are never evicted, e.g. your uptime monitor. This is the only list that grants reserved status; `ip_whitelist` only decides who may connect. Matched against the same client IP as the per-IP limit, so behind a proxy it needs `trust_proxy`. While a request's forwarding headers are not honored (`trust_proxy` off, or the peer is not in `trusted_proxies`), a request that carries `X-Forwarded-For` or `X-Real-IP` is never reserved, since its address is the proxy's. Startup warns if this list covers a loopback or private range while `trust_proxy` is off. |
 
 IP list entries are a single address (`10.0.0.5`, `2001:db8::1`) or a CIDR range
 (`185.220.100.0/22`, `2001:db8::/32`, `0.0.0.0/0`). Bits past the prefix length are ignored, so
@@ -204,6 +210,76 @@ startup with a warning naming it rather than being accepted and then matching no
 `ip_whitelist` entry is rejected the allow list stays enabled and admits no one. The same rules
 apply to `trusted_proxies` and to the NIP-86 `blockip` method, which answers `400` for an entry it
 cannot parse.
+
+#### Per-subnet connection cap
+
+The default of 50 concurrent connections per /24 (or /48) is a starting point, not a measured
+safe value. Many users behind one carrier-grade NAT or mobile gateway share a subnet, so a busy
+relay with many mobile users should watch the `connection rejected (per-subnet limit)` log line
+and the `wisp_connections_rejected_subnet_total` metric. If legitimate clients are being refused,
+raise `max_connections_per_subnet`, narrow the subnet with a longer `subnet_prefix_v4` /
+`subnet_prefix_v6`, or set `max_connections_per_subnet = 0` to disable the cap.
+
+The cap is shared by the whole range, so any `max_connections_per_subnet / max_connections_per_ip`
+addresses in a subnet that hold their connections open lock the rest of that subnet out until they
+disconnect. That is the trade-off for bounding a swarm spread over a range. With `trust_proxy`
+enabled the client IP comes from the forwarded headers, and a client that can forge them can
+place its connections in any subnet, including one it wants to lock out; set `trusted_proxies` to
+exactly your proxies so only they are believed. Client IPs that do not parse as an address (a
+malformed or forged header) all share one subnet budget.
+
+Behind several proxy or ingress addresses in one subnet with `trust_proxy=false` (a Docker bridge
+network, Kubernetes ingress replicas), every client is seen as one of those addresses and the
+whole relay shares one subnet budget. Configure `trust_proxy` and `trusted_proxies`, or set
+`max_connections_per_subnet = 0`.
+
+### When max_connections is full
+
+A WebSocket upgrade is admitted in this order: `ip_whitelist`/`ip_blacklist`, then
+`max_connections_per_ip` and `max_connections_per_subnet` (`429`), then the global pool.
+In the pool:
+
+1. A client matching `reserved_ips` may use every slot. Any other client, including one
+   matching `ip_whitelist`, may only use `max_connections - reserved_connections`.
+2. If no slot is free for the newcomer, the longest-idle connection is closed to make room.
+   It must have no open REQ subscription and no open NIP-77 (negentropy) session, must not
+   have sent a well-formed message for `evict_idle_seconds`, and must not be a reserved
+   client. A client that is subscribed, syncing or recently active is never evicted.
+3. If no connection qualifies, the newcomer gets `503 server connection limit reached`, as before.
+
+Eviction is on by default (`evict_idle_seconds = 120`); set it to `0` to turn it off. It only
+happens while the pool is full. Once a connection has been silent for `evict_idle_seconds`, these
+clients can be evicted under that pressure and are expected to reconnect:
+
+- publish-only clients that hold a connection open between events, with no subscription;
+- NIP-42 sessions that authenticated (`AUTH`) and then sent nothing else;
+- clients that query with `REQ`, wait for `EOSE`, `CLOSE` the subscription and stay connected
+  idle until their next query.
+
+A NIP-77 sync holds an open session from `NEG-OPEN` until `NEG-CLOSE` (or an error) and is not
+evicted while it does. WebSocket pings, and frames that are not a well-formed Nostr message, do
+not count as messages. Under `auth_required`, `REQ`, `COUNT` and `NEG-OPEN` are refused until the
+client authenticates, so an unauthenticated connection cannot protect itself with a subscription.
+
+Eviction only runs after the per-IP and per-subnet caps have admitted the newcomer, so a source
+can never evict other clients with connections it was not allowed to hold. It stops only a silent
+swarm: connections that connect and sit idle give way to new clients long before `idle_seconds`
+would reap them. A swarm that keeps every connection busy, by holding a subscription open or
+sending a cheap well-formed message more often than `evict_idle_seconds`, is never evicted and
+still fills the pool. Against that, the real defenses are `max_connections_per_subnet` (and
+`max_connections_per_ip`), which bound how much of the pool one network can take, and
+`reserved_connections` with `reserved_ips`, which keep the relay reachable for your own clients.
+
+There is no separate limit on how often one source can evict: a client that connects, takes an
+idle connection's slot and disconnects can repeat that, one eviction per connection it opens,
+within its per-IP and per-subnet caps. It can only ever remove connections that already meet the
+rules above.
+
+When an upgrade finds no evictable connection, the relay skips the search for the next second, so
+a flood of refused upgrades costs one scan a second rather than one per attempt. A connection that
+becomes evictable by closing its last subscription or NIP-77 session is considered at once.
+Evictions are counted in `wisp_connections_evicted_total` and logged at most once a minute, as a
+count; a count still pending when evictions stop is logged within that minute.
 
 ### `[spider]`
 

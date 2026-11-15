@@ -23,6 +23,12 @@ pub const Family = enum { v4, v6 };
 pub const Addr = struct {
     family: Family,
     bits: u128,
+
+    /// The network this address is in at prefix length `len`, clamped to the
+    /// family's width: host bits are cleared.
+    pub fn prefix(self: Addr, len: u8) Addr {
+        return .{ .family = self.family, .bits = self.bits & prefixMask(self.family, len) };
+    }
 };
 
 pub const Rule = struct {
@@ -32,6 +38,12 @@ pub const Rule = struct {
 
     pub fn matches(self: Rule, addr: Addr) bool {
         return self.family == addr.family and (addr.bits & self.mask) == self.net;
+    }
+
+    /// True if some address matches both rules.
+    pub fn overlaps(self: Rule, other: Rule) bool {
+        const common = self.mask & other.mask;
+        return self.family == other.family and (self.net & common) == (other.net & common);
     }
 };
 
@@ -111,15 +123,25 @@ fn makeRule(addr: RuleAddr, len: u8) ?Rule {
             // ::ffff:a.b.c.d/96+n is the IPv4 rule a.b.c.d/n, so it matches the
             // folded IPv4 client.
             if (addr.mapped and len >= 96) return v4Rule(@truncate(addr.bits), len - 96);
-            const mask: u128 = if (len == 0) 0 else ~@as(u128, 0) << @intCast(128 - @as(u16, len));
+            const mask = prefixMask(.v6, len);
             return .{ .family = .v6, .net = addr.bits & mask, .mask = mask };
         },
     }
 }
 
 fn v4Rule(bits: u32, len: u8) Rule {
-    const mask: u32 = if (len == 0) 0 else ~@as(u32, 0) << @intCast(32 - @as(u16, len));
+    const mask = prefixMask(.v4, len);
     return .{ .family = .v4, .net = bits & mask, .mask = mask };
+}
+
+/// Mask of the leading `len` bits of a `family` address, `len` clamped to the
+/// family's width. IPv4 masks occupy the low 32 bits, like `Addr.bits`.
+fn prefixMask(family: Family, len: u8) u128 {
+    const width: u8 = if (family == .v4) 32 else 128;
+    const n = @min(len, width);
+    if (n == 0) return 0;
+    const full: u128 = if (family == .v4) ~@as(u32, 0) else ~@as(u128, 0);
+    return full & (full << @intCast(width - n));
 }
 
 fn parsePrefixLen(text: []const u8) ?u8 {
@@ -400,6 +422,24 @@ test "malformed rules are rejected" {
     try testing.expect(parseRule("1.2.3.4/33", .allow_dotless_prefix) == null);
 }
 
+test "Addr.prefix" {
+    const v4 = parseAddr("185.220.101.77").?;
+    try testing.expectEqual(parseAddr("185.220.101.0").?, v4.prefix(24));
+    try testing.expectEqual(parseAddr("185.220.100.0").?, v4.prefix(22));
+    try testing.expectEqual(v4, v4.prefix(32));
+    try testing.expectEqual(v4, v4.prefix(200));
+    try testing.expectEqual(Addr{ .family = .v4, .bits = 0 }, v4.prefix(0));
+    // A mapped address is folded first, so it lands in the IPv4 network.
+    try testing.expectEqual(v4.prefix(24), parseAddr("::ffff:185.220.101.9").?.prefix(24));
+
+    const v6 = parseAddr("2001:db8:aaaa:bbbb::1").?;
+    try testing.expectEqual(parseAddr("2001:db8:aaaa::").?, v6.prefix(48));
+    try testing.expectEqual(parseAddr("2001:db8:aaaa:bbbb::").?, v6.prefix(64));
+    try testing.expectEqual(parseAddr("2001:db8:aaaa:8000::").?, v6.prefix(49));
+    try testing.expectEqual(v6, v6.prefix(128));
+    try testing.expectEqual(Addr{ .family = .v6, .bits = 0 }, v6.prefix(0));
+}
+
 test anyMatch {
     const rules = [_]Rule{
         parseRule("10.0.0.0/8", .standard).?,
@@ -409,4 +449,16 @@ test anyMatch {
     try testing.expect(anyMatch(&rules, parseAddr("2001:db8::5").?));
     try testing.expect(!anyMatch(&rules, parseAddr("11.1.1.1").?));
     try testing.expect(!anyMatch(&[_]Rule{}, parseAddr("10.1.1.1").?));
+}
+
+test "Rule.overlaps" {
+    const ten = parseRule("10.0.0.0/8", .standard).?;
+    try testing.expect(ten.overlaps(parseRule("10.1.2.3", .standard).?));
+    try testing.expect(parseRule("10.1.2.3", .standard).?.overlaps(ten));
+    try testing.expect(ten.overlaps(parseRule("0.0.0.0/0", .standard).?));
+    try testing.expect(ten.overlaps(parseRule("::ffff:10.0.0.0/104", .standard).?));
+    try testing.expect(!ten.overlaps(parseRule("11.0.0.0/8", .standard).?));
+    try testing.expect(!ten.overlaps(parseRule("::/0", .standard).?));
+    try testing.expect(parseRule("fc00::/7", .standard).?.overlaps(parseRule("fd12::1", .standard).?));
+    try testing.expect(!parseRule("fc00::/7", .standard).?.overlaps(parseRule("2001:db8::/32", .standard).?));
 }
