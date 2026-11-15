@@ -74,6 +74,12 @@ idle_seconds = 300
 # Set true to serve it to any client that passes ip_whitelist/ip_blacklist.
 # metrics_public = false
 # max_connections_per_ip = 10
+# Shared cap for all clients in one subnet (/24 IPv4, /48 IPv6 by default), on
+# top of the per-IP cap; 0 disables. 50 is a starting point: with many mobile or
+# CGNAT users, watch wisp_connections_rejected_subnet_total and raise it if needed.
+# max_connections_per_subnet = 50
+# subnet_prefix_v4 = 24  # 0-32
+# subnet_prefix_v6 = 48  # 0-128
 # Entries are an address or a CIDR range, IPv4 or IPv6. Legacy prefixes ending in
 # '.' or ':' still work ("10.0.0." is 10.0.0.0/24). '*' wildcards are not supported.
 # ip_whitelist = "192.168.1.0/24,10.0.0.0/24"
