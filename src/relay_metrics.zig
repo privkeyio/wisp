@@ -12,6 +12,7 @@ var events_broadcast = std.atomic.Value(u64).init(0);
 var reqs_total = std.atomic.Value(u64).init(0);
 var rate_limited = std.atomic.Value(u64).init(0);
 var query_rate_limited = std.atomic.Value(u64).init(0);
+var forwarded_header_ignored = std.atomic.Value(u64).init(0);
 var connections_evicted = std.atomic.Value(u64).init(0);
 var connections_rejected_subnet = std.atomic.Value(u64).init(0);
 
@@ -47,6 +48,14 @@ pub fn queryRateLimited() void {
     _ = query_rate_limited.fetchAdd(1, .monotonic);
 }
 
+pub fn forwardedHeaderIgnored() void {
+    _ = forwarded_header_ignored.fetchAdd(1, .monotonic);
+}
+
+pub fn forwardedHeaderIgnoredTotal() u64 {
+    return forwarded_header_ignored.load(.monotonic);
+}
+
 pub fn connectionRejectedSubnet() void {
     _ = connections_rejected_subnet.fetchAdd(1, .monotonic);
 }
@@ -67,16 +76,19 @@ pub fn write(w: anytype, active_connections: u64) !void {
     try metric(w, "wisp_req_total", "REQ subscription messages received", "counter", reqs_total.load(.monotonic));
     try metric(w, "wisp_rate_limited_total", "Connections/events rejected by rate or connection limits", "counter", rate_limited.load(.monotonic));
     try metric(w, "wisp_query_rate_limited_total", "Query messages (REQ/COUNT/NEG_OPEN) rejected by the query rate limit", "counter", query_rate_limited.load(.monotonic));
+    try metric(w, "wisp_forwarded_header_ignored_total", "Requests whose X-Forwarded-For or X-Real-IP was ignored because trust_proxy is off or the peer is not in trusted_proxies", "counter", forwarded_header_ignored.load(.monotonic));
     try metric(w, "wisp_connections_rejected_subnet_total", "Connections rejected by max_connections_per_subnet", "counter", connections_rejected_subnet.load(.monotonic));
 }
 
 test write {
     const conn_before = connections_total.load(.monotonic);
     const bcast_before = events_broadcast.load(.monotonic);
+    const fwd_before = forwarded_header_ignored.load(.monotonic);
     const evicted_before = connections_evicted.load(.monotonic);
     const subnet_before = connections_rejected_subnet.load(.monotonic);
 
     connectionOpened();
+    forwardedHeaderIgnored();
     connectionEvicted();
     eventBroadcast(3);
     eventBroadcast(0); // no-op: a zero-recipient broadcast must not move the counter
@@ -100,6 +112,8 @@ test write {
     try std.testing.expect(std.mem.indexOf(u8, out, conn_line) != null);
     const bcast_line = try std.fmt.bufPrint(&line_buf, "wisp_events_broadcast_total {d}\n", .{bcast_before + 3});
     try std.testing.expect(std.mem.indexOf(u8, out, bcast_line) != null);
+    const fwd_line = try std.fmt.bufPrint(&line_buf, "wisp_forwarded_header_ignored_total {d}\n", .{fwd_before + 1});
+    try std.testing.expect(std.mem.indexOf(u8, out, fwd_line) != null);
     const evicted_line = try std.fmt.bufPrint(&line_buf, "wisp_connections_evicted_total {d}\n", .{evicted_before + 1});
     try std.testing.expect(std.mem.indexOf(u8, out, evicted_line) != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "# TYPE wisp_connections_rejected_subnet_total counter\n") != null);
