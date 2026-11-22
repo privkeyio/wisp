@@ -847,6 +847,11 @@ pub const Handler = struct {
         };
         defer filter.deinit();
 
+        if (validateSearchFilters(&.{filter})) |err_msg| {
+            self.sendNegErr(conn, sub_id, err_msg);
+            return;
+        }
+
         if (!conn.isAuthenticated() and requestsPrivateKinds(&.{filter})) {
             self.sendAuthChallenge(conn);
             self.sendNegErr(conn, sub_id, "auth-required: private events are only synced with their authenticated author or recipient");

@@ -693,7 +693,7 @@ pub const QueryIterator = struct {
                                 iter.prefix[0] = tag_filter.letter;
                                 @memcpy(iter.prefix[1..33], &bytes);
                                 iter.prefix_len = 33;
-                                iter.skip_filter = (f.kinds() == null and f.authors() == null and f.ids() == null and f.search() == null and f.since() == 0 and f.until() == 0);
+                                iter.skip_filter = (tag_filters.len == 1 and f.kinds() == null and f.authors() == null and f.ids() == null and f.search() == null and f.since() == 0 and f.until() == 0);
                             },
                             .string => {},
                         }
@@ -999,6 +999,60 @@ test "query scan cap not flagged truncated when match set ends at the cap" {
     try testing.expectEqual(@as(u32, 15), iter.scanned);
     // Scanned exactly the cap but nothing remained, so enumeration was complete.
     try testing.expect(!iter.truncated);
+}
+
+test "a tag index query still checks the tag filters after the first" {
+    const alloc = testing.allocator;
+    const io = nostr.io.io();
+    const dir = "./.test-tag-fast-path";
+    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+
+    var lmdb = try Lmdb.init(alloc, dir ++ "/db.mdb", 256, .none);
+    defer lmdb.deinit();
+    var s = try Store.init(alloc, &lmdb);
+    defer s.deinit();
+
+    const base = nostr.io.timestamp() - 100000;
+    const pk = &@as([64]u8, @splat('a'));
+    const sig = &@as([128]u8, @splat('0'));
+    const ref = &@as([64]u8, @splat('e'));
+    for ([_][]const u8{ "a", "b" }, 0..) |t, i| {
+        var idb: [64]u8 = undefined;
+        testIdHex(@intCast(i + 1), &idb);
+        const json = try std.fmt.allocPrint(
+            alloc,
+            "{{\"id\":\"{s}\",\"pubkey\":\"{s}\",\"sig\":\"{s}\",\"kind\":1,\"created_at\":{d},\"content\":\"x\",\"tags\":[[\"e\",\"{s}\"],[\"t\",\"{s}\"]]}}",
+            .{ &idb, pk, sig, base + @as(i64, @intCast(i)), ref, t },
+        );
+        defer alloc.free(json);
+        var event = try nostr.Event.parse(json);
+        defer event.deinit();
+        _ = try s.store(&event, json);
+    }
+
+    var msg = try nostr.ClientMsg.parseWithAllocator("[\"REQ\",\"s\",{\"#e\":[\"" ++ ref ++ "\"],\"#t\":[\"a\"]}]", alloc);
+    defer msg.deinit();
+    const filters = try msg.getFilters(alloc);
+    defer {
+        for (filters) |*f| f.deinit();
+        alloc.free(filters);
+    }
+
+    var iter = try s.query(filters, 10);
+    defer iter.deinit();
+    try testing.expectEqual(QueryIterator.IndexType.tag, iter.index_type);
+
+    var count: u32 = 0;
+    while (try iter.next()) |json| {
+        var ev = try nostr.Event.parse(json);
+        defer ev.deinit();
+        var idb: [64]u8 = undefined;
+        testIdHex(1, &idb);
+        try testing.expectEqualStrings(&idb, &std.fmt.bytesToHex(ev.id().*, .lower));
+        count += 1;
+    }
+    try testing.expectEqual(@as(u32, 1), count);
 }
 
 test "ids fast-path returns newest matches first under limit" {
