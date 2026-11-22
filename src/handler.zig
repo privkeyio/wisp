@@ -847,8 +847,10 @@ pub const Handler = struct {
         };
         defer filter.deinit();
 
-        if (validateSearchFilters(&.{filter})) |err_msg| {
-            self.sendNegErr(conn, sub_id, err_msg);
+        // A NEG-OPEN may scan negentropy_max_sync_events times the scan multiplier
+        // entries, far more than a REQ, so full-text search is not offered here.
+        if (filter.search() != null) {
+            self.sendNegErr(conn, sub_id, "blocked: search is not supported for negentropy");
             return;
         }
 

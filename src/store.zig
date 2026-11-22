@@ -638,6 +638,14 @@ pub const QueryIterator = struct {
             .max_scan = Store.scanCap(limit, scan_multiplier),
         };
 
+        // A present but empty list matches nothing, so a set made only of such
+        // filters needs no scan.
+        if (filters.len > 0) {
+            for (filters) |*f| {
+                if (!matchesNothing(f)) break;
+            } else iter.limit = 0;
+        }
+
         // An index can only narrow a single filter: with several, the match set is
         // their union, so anything but the full created-index scan would miss
         // matches from all but filters[0].
@@ -703,6 +711,14 @@ pub const QueryIterator = struct {
         }
 
         return iter;
+    }
+
+    fn matchesNothing(f: *const nostr.Filter) bool {
+        if (f.ids()) |v| if (v.len == 0) return true;
+        if (f.authors()) |v| if (v.len == 0) return true;
+        if (f.kinds()) |v| if (v.len == 0) return true;
+        if (f.tag_filters) |tags| for (tags) |t| if (t.values.len == 0) return true;
+        return false;
     }
 
     pub fn next(self: *QueryIterator) !?[]const u8 {
@@ -1053,6 +1069,53 @@ test "a tag index query still checks the tag filters after the first" {
         count += 1;
     }
     try testing.expectEqual(@as(u32, 1), count);
+}
+
+test "filters with an empty list match nothing without scanning" {
+    const alloc = testing.allocator;
+    const io = nostr.io.io();
+    const dir = "./.test-empty-lists";
+    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+
+    var lmdb = try Lmdb.init(alloc, dir ++ "/db.mdb", 256, .none);
+    defer lmdb.deinit();
+    var s = try Store.init(alloc, &lmdb);
+    defer s.deinit();
+
+    const base = nostr.io.timestamp() - 100000;
+    const pk = &@as([64]u8, @splat('a'));
+    var i: u32 = 0;
+    while (i < 5) : (i += 1) {
+        var idb: [64]u8 = undefined;
+        testIdHex(i + 1, &idb);
+        try storeTestEvent(&s, alloc, &idb, pk, base + @as(i64, i));
+    }
+
+    const cases = [_]struct { json: []const u8, want: u32 }{
+        .{ .json = "[\"REQ\",\"s\",{\"kinds\":[]}]", .want = 0 },
+        .{ .json = "[\"REQ\",\"s\",{\"ids\":[]}]", .want = 0 },
+        .{ .json = "[\"REQ\",\"s\",{\"authors\":[]}]", .want = 0 },
+        .{ .json = "[\"REQ\",\"s\",{\"#t\":[]}]", .want = 0 },
+        .{ .json = "[\"REQ\",\"s\",{\"kinds\":[]},{\"ids\":[]}]", .want = 0 },
+        .{ .json = "[\"REQ\",\"s\",{\"kinds\":[]},{\"kinds\":[1]}]", .want = 5 },
+        .{ .json = "[\"REQ\",\"s\",{\"kinds\":[1]}]", .want = 5 },
+    };
+    for (cases) |c| {
+        var msg = try nostr.ClientMsg.parseWithAllocator(c.json, alloc);
+        defer msg.deinit();
+        const filters = try msg.getFilters(alloc);
+        defer {
+            for (filters) |*f| f.deinit();
+            alloc.free(filters);
+        }
+        var iter = try s.query(filters, 10);
+        defer iter.deinit();
+        var count: u32 = 0;
+        while (try iter.next()) |_| count += 1;
+        try testing.expectEqual(c.want, count);
+        if (c.want == 0) try testing.expectEqual(@as(u32, 0), iter.scanned);
+    }
 }
 
 test "ids fast-path returns newest matches first under limit" {
