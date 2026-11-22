@@ -815,6 +815,11 @@ pub const Handler = struct {
             return;
         }
 
+        // A NEG-OPEN replaces any session with this id, so drop it now. A reopen
+        // refused below would otherwise leave the old session holding memory and
+        // a max_neg_sessions slot after the client was told it is gone.
+        _ = conn.removeNegSession(sub_id);
+
         if (!self.query_limiter.checkAndRecord(conn.getClientIp())) {
             metrics.queryRateLimited();
             self.sendNegErr(conn, sub_id, "rate-limited: too many queries");

@@ -38,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A filter whose `ids`, `authors`, `kinds` or `#x` value is not an array (`"kinds":1`) is now refused. REQ and COUNT answer `CLOSED "error: failed to parse filters"` and NEG-OPEN answers `NEG-ERR "error: invalid filter"`. Such a field used to be ignored
 - NIP-77 reconciliation now honors `#x` tag filters. A NEG-OPEN with a tag constraint used to enumerate every event matching the rest of its filter
 - A REQ, COUNT or NEG-OPEN whose first tag filter has a single 64-character hex value served from the tag index without checking the other tag filters, so `{"#e":[id],"#t":["x"]}` also returned events with no `t` tag of `x`
+- A NEG-OPEN that reuses the id of an open negentropy session and is refused (for an invalid filter, `search`, private kinds or a bad payload) now closes the old session. It used to stay open after the `NEG-ERR`, holding its memory and a `max_neg_sessions` slot until the client disconnected
 
 ## [0.9.3] - 2026-11-10
 
