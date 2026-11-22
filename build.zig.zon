@@ -1,6 +1,6 @@
 .{
     .name = .wisp,
-    .version = "0.9.3",
+    .version = "0.10.0",
     .fingerprint = 0xc4bdec9fe6401a8d,
     .dependencies = .{
         // websocket.zig: client for spider outbound connections and the epoll
@@ -15,8 +15,8 @@
             .hash = "websocket-0.1.0-ZPISdbERBQCnk2-UDVSJlOss6POs_aAJR2nrccYJ1wZm",
         },
         .nostr = .{
-            .url = "https://github.com/privkeyio/libnostr-z/archive/4915fe83ec72a1cf32b5fda767895947283a2159.tar.gz",
-            .hash = "nostr-0.5.0-JY6OcPFeEAAs86_4nOVCHoXmtRH0QJ7vfwlZohDtERd7",
+            .url = "https://github.com/privkeyio/libnostr-z/archive/cb992c0b56cfa9b673866d55bb4ede5dd281216e.tar.gz",
+            .hash = "nostr-0.6.0-JY6OcPFeEACeI0qFpzkDCrTGyU8hi9W_PThatWn8BoKz",
         },
         // http.zig: HTTP routing (NIP-11/NIP-86) + WebSocket upgrade onto
         // websocket.zig's epoll worker pool.
