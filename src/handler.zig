@@ -815,6 +815,11 @@ pub const Handler = struct {
             return;
         }
 
+        // A NEG-OPEN replaces any session with this id, so drop it now. A reopen
+        // refused below would otherwise leave the old session holding memory and
+        // a max_neg_sessions slot after the client was told it is gone.
+        _ = conn.removeNegSession(sub_id);
+
         if (!self.query_limiter.checkAndRecord(conn.getClientIp())) {
             metrics.queryRateLimited();
             self.sendNegErr(conn, sub_id, "rate-limited: too many queries");
@@ -846,6 +851,13 @@ pub const Handler = struct {
             return;
         };
         defer filter.deinit();
+
+        // A NEG-OPEN may scan negentropy_max_sync_events times the scan multiplier
+        // entries, far more than a REQ, so full-text search is not offered here.
+        if (filter.search() != null) {
+            self.sendNegErr(conn, sub_id, "blocked: search is not supported for negentropy");
+            return;
+        }
 
         if (!conn.isAuthenticated() and requestsPrivateKinds(&.{filter})) {
             self.sendAuthChallenge(conn);

@@ -24,11 +24,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- libnostr-z moves to commit 4915fe8, for the NIP-01 empty-list and NEG-OPEN filter fixes below, NIP-01 OK and CLOSED params, and NIP-39 kind 10011 identities
 - The `negentropy.max_sync_events` default is lowered from 1,000,000 to 100,000. Each NIP-77 session buffers up to this many event IDs in memory (about 40 MB at the old default, per session). A reconciliation whose filter matches more events is refused with `NEG-ERR "blocked: too many events"`; operators who sync large stores relay-to-relay should raise the setting. The per-NEG-OPEN scan bound (`max_sync_events × query_scan_multiplier`) drops 10x with it, from about 20M to 2M index entries, which cuts the work a single NEG-OPEN can force on the relay; a selective filter can now hit `NEG-ERR "error: result set too large to reconcile"` sooner. A wisp spider that gets a NEG-ERR from a peer stops using negentropy for that peer and keeps only its live REQ subscription, so history beyond the cap is not backfilled; raise the setting on the peer being synced from (#83)
 
 ### Security
 
 - `/metrics` is now served by default only to direct, non-proxied requests from loopback: the TCP peer must be 127.0.0.0/8 or `::1` and the request must carry neither `X-Forwarded-For` nor `X-Real-IP`. Requests relayed by a reverse proxy are refused regardless of `trust_proxy`, so a same-host proxy no longer exposes it and a forged forwarding header cannot unlock it. Remote scrapers must either run on the relay host or set `metrics_public = true` (`WISP_METRICS_PUBLIC=true`), which serves any client that passes the IP allowlist/blocklist.
+- A NEG-OPEN with `search` is refused with `NEG-ERR "blocked: search is not supported for negentropy"`. libnostr-z now applies `search` to NIP-77 filters, and a NEG-OPEN may scan 20 times as many entries as a REQ, so one message could otherwise force millions of full-text matches
+
+### Fixed
+
+- A filter with an empty `ids`, `authors`, `kinds` or tag list now matches nothing, as NIP-01 requires. wisp used to treat an empty list as absent, so `{"kinds":[]}` returned every event. A REQ, COUNT or NEG-OPEN made only of such filters returns at once without scanning the store
+- A filter whose `ids`, `authors`, `kinds` or `#x` value is not an array (`"kinds":1`) is now refused. REQ and COUNT answer `CLOSED "error: failed to parse filters"` and NEG-OPEN answers `NEG-ERR "error: invalid filter"`. Such a field used to be ignored
+- NIP-77 reconciliation now honors `#x` tag filters. A NEG-OPEN with a tag constraint used to enumerate every event matching the rest of its filter
+- A REQ, COUNT or NEG-OPEN whose first tag filter has a single 64-character hex value served from the tag index without checking the other tag filters, so `{"#e":[id],"#t":["x"]}` also returned events with no `t` tag of `x`
+- A NEG-OPEN that reuses the id of an open negentropy session and is refused (for an invalid filter, `search`, private kinds or a bad payload) now closes the old session. It used to stay open after the `NEG-ERR`, holding its memory and a `max_neg_sessions` slot until the client disconnected
 
 ## [0.9.3] - 2026-11-10
 
