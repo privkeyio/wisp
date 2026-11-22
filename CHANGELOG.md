@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-22
+
+Adds CIDR ranges in the IP lists, a per-subnet connection cap and idle-connection eviction against connection floods, restricts `/metrics` to loopback, and makes empty filter lists match nothing. The subnet cap and idle eviction are on by default, so read Migration before upgrading.
+
 ### Added
 
 - `ip_whitelist`, `ip_blacklist`, `trusted_proxies` and the NIP-86 `blockip` method accept CIDR ranges for IPv4 and IPv6 (`185.220.100.0/22`, `2001:db8::/32`). The config lists and the blocked-IP store now share one matcher: an IPv4 rule also matches IPv4-mapped IPv6 clients (`::ffff:a.b.c.d`), and an IPv6 subnet can be blocked through `blockip`, which previously only matched IPv4 prefixes. Existing entries keep working: a prefix ending in `.` or `:` is read as the equivalent CIDR range (`185.220.101.` is `185.220.101.0/24`), and dotless prefixes already stored by `blockip` (`185.220.101`) still match. `blockip` now answers `400` for an entry it cannot parse instead of storing one that never matches; such entries already stored are skipped with a warning and can still be removed with `unblockip` (#83)
@@ -24,7 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- libnostr-z moves to commit 4915fe8, for the NIP-01 empty-list and NEG-OPEN filter fixes below, NIP-01 OK and CLOSED params, and NIP-39 kind 10011 identities
+- libnostr-z moves to v0.6.0, for the NIP-01 empty-list and NEG-OPEN filter fixes below, NIP-01 OK and CLOSED params, and NIP-39 kind 10011 identities
 - The `negentropy.max_sync_events` default is lowered from 1,000,000 to 100,000. Each NIP-77 session buffers up to this many event IDs in memory (about 40 MB at the old default, per session). A reconciliation whose filter matches more events is refused with `NEG-ERR "blocked: too many events"`; operators who sync large stores relay-to-relay should raise the setting. The per-NEG-OPEN scan bound (`max_sync_events × query_scan_multiplier`) drops 10x with it, from about 20M to 2M index entries, which cuts the work a single NEG-OPEN can force on the relay; a selective filter can now hit `NEG-ERR "error: result set too large to reconcile"` sooner. A wisp spider that gets a NEG-ERR from a peer stops using negentropy for that peer and keeps only its live REQ subscription, so history beyond the cap is not backfilled; raise the setting on the peer being synced from (#83)
 
 ### Security
@@ -380,7 +384,8 @@ rolling out.
 - Import/export to JSONL format
 - Configuration via TOML file or environment variables
 
-[Unreleased]: https://github.com/privkeyio/wisp/compare/v0.9.3...HEAD
+[Unreleased]: https://github.com/privkeyio/wisp/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/privkeyio/wisp/compare/v0.9.3...v0.10.0
 [0.9.3]: https://github.com/privkeyio/wisp/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/privkeyio/wisp/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/privkeyio/wisp/compare/v0.9.0...v0.9.1
